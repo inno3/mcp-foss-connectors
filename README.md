@@ -89,6 +89,28 @@ known gotchas.
 
 > MCPB bundles are build artifacts and are **not** committed to this repository.
 
+### Download pre-built bundles
+
+You don't have to build them yourself — pre-built `.mcpb` bundles for every
+connector are attached to each tagged
+[**release**](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases).
+
+Latest — [**v0.1.0**](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/tag/v0.1.0):
+
+| Connector | Download |
+|---|---|
+| Dolibarr ERP | [`dolibarr-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/dolibarr-mcp.mcpb) |
+| Kanboard | [`kanboard-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/kanboard-mcp.mcpb) |
+| WordPress | [`wordpress-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/wordpress-mcp.mcpb) |
+| n8n | [`n8n-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/n8n-mcp.mcpb) |
+| Matrix | [`matrix-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/matrix-mcp.mcpb) |
+| Nextcloud | [`nextcloud-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/nextcloud-mcp.mcpb) |
+| HedgeDoc | [`hedgedoc-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/hedgedoc-mcp.mcpb) |
+| GitLab | [`gitlab-mcp.mcpb`](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/download/v0.1.0/gitlab-mcp.mcpb) |
+
+The bundles embed no credentials: you fill the URL/token at install time and the
+client stores them encrypted.
+
 ---
 
 ## Configuration model
