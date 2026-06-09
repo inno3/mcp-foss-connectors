@@ -1,0 +1,59 @@
+[project]
+name = "mcp-foss-connectors"
+version = "0.1.0"
+description = "Vendor-neutral MCP servers for free and open-source tools (Dolibarr, Kanboard, WordPress, n8n, Matrix, Nextcloud, HedgeDoc, GitLab)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "inno³ and contributors" }]
+keywords = ["mcp", "model-context-protocol", "dolibarr", "kanboard", "wordpress", "n8n", "matrix", "nextcloud", "hedgedoc", "gitlab"]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://inno3.fr"
+Source = "https://github.com/inno3/mcp-foss-connectors"
+
+[project.scripts]
+dolibarr-mcp = "dolibarr_mcp.server:main"
+kanboard-mcp = "kanboard_mcp.server:main"
+wordpress-mcp = "wordpress_mcp.server:main"
+n8n-mcp = "n8n_mcp.server:main"
+matrix-mcp = "matrix_mcp.server:main"
+nextcloud-mcp = "nextcloud_mcp.server:main"
+hedgedoc-mcp = "hedgedoc_mcp.server:main"
+gitlab-mcp = "gitlab_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "dolibarr_mcp*", "kanboard_mcp*", "wordpress_mcp*", "n8n_mcp*",
+    "matrix_mcp*", "nextcloud_mcp*", "hedgedoc_mcp*", "gitlab_mcp*",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # long lines tolerated in docstrings / URLs
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # imports after env setup are intentional

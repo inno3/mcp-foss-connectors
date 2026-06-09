@@ -1,0 +1,264 @@
+{
+  "manifest_version": "0.3",
+  "name": "kanboard-mcp",
+  "display_name": "Kanboard",
+  "version": "0.7.0",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, multi-comptes (primary humain + agent Claude). 43 tools.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "KANBOARD_URL": "${user_config.kanboard_url}",
+        "KANBOARD_USER": "${user_config.kanboard_user}",
+        "KANBOARD_TOKEN": "${user_config.kanboard_token}",
+        "KANBOARD_USER_ALT": "${user_config.kanboard_user_alt}",
+        "KANBOARD_TOKEN_ALT": "${user_config.kanboard_token_alt}",
+        "KANBOARD_DEFAULT_AS_USER": "${user_config.kanboard_default_as_user}"
+      }
+    }
+  },
+  "user_config": {
+    "kanboard_url": {
+      "type": "string",
+      "title": "URL Kanboard",
+      "description": "URL de l'API JSON-RPC Kanboard (ex: https://kanboard.example.org/jsonrpc.php)",
+      "required": true
+    },
+    "kanboard_user": {
+      "type": "string",
+      "title": "Compte primary - Utilisateur",
+      "description": "Login Kanboard du compte humain principal (ex: alice). Utilisé par défaut pour la lecture.",
+      "required": true
+    },
+    "kanboard_token": {
+      "type": "string",
+      "title": "Compte primary - Token API",
+      "description": "Token API personnel du compte primary (Kanboard > Profil > Gestion des API).",
+      "required": true,
+      "sensitive": true
+    },
+    "kanboard_user_alt": {
+      "type": "string",
+      "title": "Compte agent - Utilisateur (optionnel)",
+      "description": "Login Kanboard d'un compte secondaire dédié à un agent IA (ex: bot). Laisser vide pour fallback sur le compte primary.",
+      "default": "",
+      "required": false
+    },
+    "kanboard_token_alt": {
+      "type": "string",
+      "title": "Compte agent - Token API (optionnel)",
+      "description": "Token API personnel du compte agent. Laisser vide pour utiliser uniquement le compte primary.",
+      "default": "",
+      "required": false,
+      "sensitive": true
+    },
+    "kanboard_default_as_user": {
+      "type": "string",
+      "title": "Compte par défaut",
+      "description": "'primary' (humain) ou 'agent' (Claude). Détermine quel compte est utilisé quand le paramètre as_user d'un tool est vide.",
+      "default": "primary",
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "kanboard_list_accounts",
+      "description": "Diagnostic multi-comptes : liste les comptes configurés"
+    },
+    {
+      "name": "kanboard_who_am_i",
+      "description": "Identité utilisateur API (par compte)"
+    },
+    {
+      "name": "kanboard_my_dashboard",
+      "description": "Mes tâches par projet (param as_user)"
+    },
+    {
+      "name": "kanboard_my_overdue",
+      "description": "Mes tâches en retard (param as_user)"
+    },
+    {
+      "name": "kanboard_list_projects",
+      "description": "Liste des projets"
+    },
+    {
+      "name": "kanboard_create_project",
+      "description": "Créer un projet"
+    },
+    {
+      "name": "kanboard_get_project_metadata",
+      "description": "Détail complet d'un projet"
+    },
+    {
+      "name": "kanboard_delete_project",
+      "description": "Supprimer un projet (irréversible)"
+    },
+    {
+      "name": "kanboard_recent_activity",
+      "description": "Activité récente d'un projet"
+    },
+    {
+      "name": "kanboard_list_project_users",
+      "description": "Lister les membres d'un projet"
+    },
+    {
+      "name": "kanboard_assign_project_user",
+      "description": "Ajouter un utilisateur à un projet"
+    },
+    {
+      "name": "kanboard_remove_project_user",
+      "description": "Retirer un utilisateur d'un projet"
+    },
+    {
+      "name": "kanboard_list_tasks",
+      "description": "Tâches d'un projet"
+    },
+    {
+      "name": "kanboard_get_task",
+      "description": "Détail d'une tâche"
+    },
+    {
+      "name": "kanboard_search_tasks",
+      "description": "Recherche de tâches"
+    },
+    {
+      "name": "kanboard_get_board",
+      "description": "État du board Kanban"
+    },
+    {
+      "name": "kanboard_create_task",
+      "description": "Créer une tâche (swimlane/category/tags)"
+    },
+    {
+      "name": "kanboard_update_task",
+      "description": "Modifier une tâche"
+    },
+    {
+      "name": "kanboard_move_task",
+      "description": "Déplacer une tâche entre colonnes"
+    },
+    {
+      "name": "kanboard_close_task",
+      "description": "Fermer une tâche"
+    },
+    {
+      "name": "kanboard_open_task",
+      "description": "Rouvrir une tâche"
+    },
+    {
+      "name": "kanboard_delete_task",
+      "description": "Supprimer une tâche"
+    },
+    {
+      "name": "kanboard_add_comment",
+      "description": "Ajouter un commentaire (auteur = compte as_user)"
+    },
+    {
+      "name": "kanboard_list_columns",
+      "description": "Lister les colonnes d'un projet"
+    },
+    {
+      "name": "kanboard_create_column",
+      "description": "Créer une colonne"
+    },
+    {
+      "name": "kanboard_update_column",
+      "description": "Modifier une colonne"
+    },
+    {
+      "name": "kanboard_remove_column",
+      "description": "Supprimer une colonne"
+    },
+    {
+      "name": "kanboard_change_column_position",
+      "description": "Repositionner une colonne"
+    },
+    {
+      "name": "kanboard_list_swimlanes",
+      "description": "Lister les swimlanes"
+    },
+    {
+      "name": "kanboard_create_swimlane",
+      "description": "Créer un swimlane"
+    },
+    {
+      "name": "kanboard_update_swimlane",
+      "description": "Modifier un swimlane"
+    },
+    {
+      "name": "kanboard_remove_swimlane",
+      "description": "Supprimer un swimlane (irréversible)"
+    },
+    {
+      "name": "kanboard_disable_swimlane",
+      "description": "Désactiver un swimlane (soft)"
+    },
+    {
+      "name": "kanboard_enable_swimlane",
+      "description": "Réactiver un swimlane désactivé"
+    },
+    {
+      "name": "kanboard_change_swimlane_position",
+      "description": "Repositionner un swimlane"
+    },
+    {
+      "name": "kanboard_list_categories",
+      "description": "Lister les catégories"
+    },
+    {
+      "name": "kanboard_create_category",
+      "description": "Créer une catégorie"
+    },
+    {
+      "name": "kanboard_update_category",
+      "description": "Modifier une catégorie"
+    },
+    {
+      "name": "kanboard_remove_category",
+      "description": "Supprimer une catégorie"
+    },
+    {
+      "name": "kanboard_create_subtask",
+      "description": "Créer une sous-tâche"
+    },
+    {
+      "name": "kanboard_update_subtask",
+      "description": "Modifier une sous-tâche"
+    },
+    {
+      "name": "kanboard_delete_subtask",
+      "description": "Supprimer une sous-tâche"
+    },
+    {
+      "name": "kanboard_toggle_subtask_status",
+      "description": "Cycler le statut d'une sous-tâche (todo/in_progress/done)"
+    }
+  ],
+  "keywords": [
+    "kanboard",
+    "kanban",
+    "tasks",
+    "projets",
+    "agile",
+    "multi-account"
+  ],
+  "compatibility": {
+    "platforms": [
+      "linux",
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

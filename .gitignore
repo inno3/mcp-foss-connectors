@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+*.log
+.env
+.env.local
+.env.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Build artifacts — MCPB bundles are generated, never committed
+*.mcpb
+*.dxt
+
+# Local credential / config files
+secrets.json
+claude_desktop_config.local.json

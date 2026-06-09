@@ -1,0 +1,206 @@
+{
+  "manifest_version": "0.3",
+  "name": "dolibarr-mcp",
+  "display_name": "Dolibarr ERP",
+  "version": "1.0.0",
+  "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures, propositions, tickets, comptes-rendus. API REST Dolibarr 16+.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "DOLIBARR_URL": "${user_config.dolibarr_url}",
+        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}",
+        "DOLIBARR_ENABLE_INNO3_EXTENSIONS": "${user_config.dolibarr_enable_inno3_extensions}"
+      }
+    }
+  },
+  "user_config": {
+    "dolibarr_url": {
+      "type": "string",
+      "title": "URL Dolibarr",
+      "description": "URL de base de l'instance Dolibarr (ex: https://erp.monentreprise.fr). Sans slash final. L'API REST doit être activée.",
+      "required": true,
+      "sensitive": false
+    },
+    "dolibarr_api_key": {
+      "type": "string",
+      "title": "Clé API Dolibarr (DOLAPIKEY)",
+      "description": "Clé API d'un utilisateur Dolibarr (envoyée dans l'en-tête DOLAPIKEY). À générer dans Dolibarr : fiche utilisateur > onglet 'Clé API'.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "dolibarr_list_projects",
+      "description": "Liste les projets"
+    },
+    {
+      "name": "dolibarr_get_project",
+      "description": "Détail d'un projet (ID ou réf)"
+    },
+    {
+      "name": "dolibarr_create_project",
+      "description": "Crée un projet"
+    },
+    {
+      "name": "dolibarr_update_project",
+      "description": "Met à jour un projet"
+    },
+    {
+      "name": "dolibarr_delete_project",
+      "description": "Supprime un projet"
+    },
+    {
+      "name": "dolibarr_list_tasks",
+      "description": "Liste les tâches d'un projet"
+    },
+    {
+      "name": "dolibarr_create_task",
+      "description": "Crée une tâche"
+    },
+    {
+      "name": "dolibarr_close_task",
+      "description": "Marque une tâche terminée"
+    },
+    {
+      "name": "dolibarr_log_time",
+      "description": "Saisit du temps passé sur une tâche"
+    },
+    {
+      "name": "dolibarr_list_thirdparties",
+      "description": "Liste les tiers (clients/fournisseurs/prospects)"
+    },
+    {
+      "name": "dolibarr_get_thirdparty",
+      "description": "Détail d'un tiers"
+    },
+    {
+      "name": "dolibarr_create_thirdparty",
+      "description": "Crée un tiers"
+    },
+    {
+      "name": "dolibarr_update_thirdparty",
+      "description": "Met à jour un tiers"
+    },
+    {
+      "name": "dolibarr_list_contacts",
+      "description": "Liste les contacts d'un tiers"
+    },
+    {
+      "name": "dolibarr_add_contact",
+      "description": "Ajoute un contact à un tiers"
+    },
+    {
+      "name": "dolibarr_update_contact",
+      "description": "Met à jour un contact"
+    },
+    {
+      "name": "dolibarr_delete_contact",
+      "description": "Supprime un contact"
+    },
+    {
+      "name": "dolibarr_search_contacts",
+      "description": "Cherche un contact par email ou nom"
+    },
+    {
+      "name": "dolibarr_resolve_email",
+      "description": "Résout un email vers tiers/contact"
+    },
+    {
+      "name": "dolibarr_list_invoices",
+      "description": "Liste les factures clients"
+    },
+    {
+      "name": "dolibarr_get_invoice",
+      "description": "Détail d'une facture client"
+    },
+    {
+      "name": "dolibarr_validate_invoice",
+      "description": "Valide une facture brouillon"
+    },
+    {
+      "name": "dolibarr_get_invoice_pdf_url",
+      "description": "URL du PDF d'une facture"
+    },
+    {
+      "name": "dolibarr_list_supplier_invoices",
+      "description": "Liste les factures fournisseur"
+    },
+    {
+      "name": "dolibarr_get_supplier_invoice",
+      "description": "Détail d'une facture fournisseur"
+    },
+    {
+      "name": "dolibarr_list_proposals",
+      "description": "Liste les propositions commerciales"
+    },
+    {
+      "name": "dolibarr_get_proposal",
+      "description": "Détail d'une proposition"
+    },
+    {
+      "name": "dolibarr_create_proposal",
+      "description": "Crée une proposition commerciale"
+    },
+    {
+      "name": "dolibarr_add_proposal_lines",
+      "description": "Ajoute des lignes à une proposition"
+    },
+    {
+      "name": "dolibarr_validate_proposal",
+      "description": "Valide une proposition brouillon"
+    },
+    {
+      "name": "dolibarr_list_tickets",
+      "description": "Liste les tickets de support"
+    },
+    {
+      "name": "dolibarr_get_ticket",
+      "description": "Détail d'un ticket"
+    },
+    {
+      "name": "dolibarr_create_ticket",
+      "description": "Crée un ticket de support"
+    },
+    {
+      "name": "dolibarr_get_revenue_summary",
+      "description": "Synthèse du chiffre d'affaires"
+    },
+    {
+      "name": "dolibarr_dashboard",
+      "description": "Tableau de bord de direction"
+    },
+    {
+      "name": "dolibarr_list_actions_open",
+      "description": "Liste les actions ouvertes (agenda/CR/suivi)"
+    }
+  ],
+  "keywords": [
+    "dolibarr",
+    "erp",
+    "crm",
+    "invoicing",
+    "projects",
+    "rest"
+  ],
+  "compatibility": {
+    "platforms": [
+      "linux",
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

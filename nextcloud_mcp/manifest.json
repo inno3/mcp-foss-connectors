@@ -1,0 +1,108 @@
+{
+  "manifest_version": "0.3",
+  "name": "nextcloud-mcp",
+  "display_name": "Nextcloud",
+  "version": "1.0.0",
+  "description": "Connecteur Nextcloud : fichiers (WebDAV), partages (OCS), recherche, statut utilisateur.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "NEXTCLOUD_URL": "${user_config.nextcloud_url}",
+        "NEXTCLOUD_USER": "${user_config.nextcloud_user}",
+        "NEXTCLOUD_APP_PASSWORD": "${user_config.nextcloud_app_password}"
+      }
+    }
+  },
+  "user_config": {
+    "nextcloud_url": {
+      "type": "string",
+      "title": "URL Nextcloud",
+      "description": "URL de votre instance Nextcloud (ex: https://cloud.example.org). Sans slash final.",
+      "required": true,
+      "sensitive": false
+    },
+    "nextcloud_user": {
+      "type": "string",
+      "title": "Identifiant Nextcloud",
+      "description": "Nom d'utilisateur Nextcloud (ex: jdupont). Visible dans Paramètres > Profil.",
+      "required": true,
+      "sensitive": false
+    },
+    "nextcloud_app_password": {
+      "type": "string",
+      "title": "Mot de passe d'application Nextcloud",
+      "description": "Mot de passe d'application généré dans Nextcloud (Paramètres > Sécurité > Mot de passe d'application). Format : xxxx-xxxx-xxxx-xxxx-xxxx.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "nextcloud_list_files",
+      "description": "Liste les fichiers et dossiers d'un chemin (WebDAV PROPFIND)"
+    },
+    {
+      "name": "nextcloud_get_file_info",
+      "description": "Métadonnées d'un fichier ou dossier (PROPFIND depth=0)"
+    },
+    {
+      "name": "nextcloud_download_file",
+      "description": "Télécharge le contenu d'un fichier texte (≤100 KB)"
+    },
+    {
+      "name": "nextcloud_upload_file",
+      "description": "Crée ou remplace un fichier avec le contenu fourni"
+    },
+    {
+      "name": "nextcloud_create_folder",
+      "description": "Crée un dossier (MKCOL)"
+    },
+    {
+      "name": "nextcloud_delete",
+      "description": "Supprime un fichier ou dossier (DELETE)"
+    },
+    {
+      "name": "nextcloud_move",
+      "description": "Déplace ou renomme une ressource (MOVE)"
+    },
+    {
+      "name": "nextcloud_copy",
+      "description": "Copie une ressource (COPY)"
+    },
+    {
+      "name": "nextcloud_list_shares",
+      "description": "Liste les partages, avec filtre optionnel par chemin"
+    },
+    {
+      "name": "nextcloud_create_share",
+      "description": "Crée un partage (utilisateur, groupe ou lien public)"
+    },
+    {
+      "name": "nextcloud_delete_share",
+      "description": "Supprime un partage par son identifiant"
+    },
+    {
+      "name": "nextcloud_search",
+      "description": "Recherche des fichiers par nom ou contenu (OCS search)"
+    },
+    {
+      "name": "nextcloud_status",
+      "description": "Statut et version du serveur Nextcloud"
+    },
+    {
+      "name": "nextcloud_user_info",
+      "description": "Informations de l'utilisateur connecté (quota, groupes)"
+    }
+  ]
+}

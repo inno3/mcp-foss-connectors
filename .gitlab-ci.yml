@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+stages:
+  - lint
+  - test
+
+.base:
+  image: python:${PY_VERSION}-slim
+  before_script:
+    - pip install -e ".[dev]"
+
+lint:
+  extends: .base
+  stage: lint
+  variables:
+    PY_VERSION: "3.11"
+  script:
+    - ruff check .
+
+.test:
+  extends: .base
+  stage: test
+  script:
+    - pytest -q
+
+test:py311:
+  extends: .test
+  variables:
+    PY_VERSION: "3.11"
+
+test:py312:
+  extends: .test
+  variables:
+    PY_VERSION: "3.12"

@@ -1,0 +1,86 @@
+{
+  "manifest_version": "0.3",
+  "name": "hedgedoc-mcp",
+  "display_name": "HedgeDoc",
+  "version": "1.1.0",
+  "description": "Connecteur HedgeDoc : lecture, création, mise à jour de notes collaboratives Markdown, historique et recherche.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "HEDGEDOC_URL": "${user_config.hedgedoc_url}",
+        "HEDGEDOC_USER": "${user_config.hedgedoc_user}",
+        "HEDGEDOC_PASSWORD": "${user_config.hedgedoc_password}"
+      }
+    }
+  },
+  "user_config": {
+    "hedgedoc_url": {
+      "type": "string",
+      "title": "URL HedgeDoc",
+      "description": "URL de l'instance HedgeDoc (ex: https://pad.example.org). Sans slash final.",
+      "required": true,
+      "sensitive": false
+    },
+    "hedgedoc_user": {
+      "type": "string",
+      "title": "Email de connexion HedgeDoc",
+      "description": "Adresse email utilisée pour se connecter à HedgeDoc. HedgeDoc 1.x n'a pas d'API key — l'auth se fait par login/mot de passe.",
+      "required": false,
+      "sensitive": false,
+      "default": ""
+    },
+    "hedgedoc_password": {
+      "type": "string",
+      "title": "Mot de passe HedgeDoc",
+      "description": "Mot de passe du compte HedgeDoc. Utilisé pour obtenir un cookie de session permettant d'accéder aux notes privées et à l'historique.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    }
+  },
+  "tools": [
+    {
+      "name": "hedgedoc_get_note",
+      "description": "Télécharge le contenu Markdown d'une note"
+    },
+    {
+      "name": "hedgedoc_get_note_info",
+      "description": "Récupère les métadonnées d'une note (titre, tags, dates, vues)"
+    },
+    {
+      "name": "hedgedoc_create_note",
+      "description": "Crée une nouvelle note avec un contenu Markdown"
+    },
+    {
+      "name": "hedgedoc_update_note",
+      "description": "Met à jour le contenu d'une note existante"
+    },
+    {
+      "name": "hedgedoc_list_history",
+      "description": "Liste les notes récentes de l'utilisateur connecté"
+    },
+    {
+      "name": "hedgedoc_me",
+      "description": "Informations de l'utilisateur HedgeDoc connecté"
+    },
+    {
+      "name": "hedgedoc_search_notes",
+      "description": "Recherche des notes par titre ou tag dans l'historique"
+    },
+    {
+      "name": "hedgedoc_delete_history_entry",
+      "description": "Retire une note de l'historique personnel"
+    }
+  ]
+}

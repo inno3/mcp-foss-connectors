@@ -1,0 +1,84 @@
+{
+  "manifest_version": "0.3",
+  "name": "matrix-mcp",
+  "display_name": "Matrix",
+  "version": "1.0.0",
+  "description": "Connecteur Matrix : salons, messages, membres, invitations. API Matrix Client-Server v3.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "MATRIX_HOMESERVER_URL": "${user_config.matrix_homeserver_url}",
+        "MATRIX_ACCESS_TOKEN": "${user_config.matrix_access_token}"
+      }
+    }
+  },
+  "user_config": {
+    "matrix_homeserver_url": {
+      "type": "string",
+      "title": "URL du serveur Matrix",
+      "description": "URL du homeserver Matrix (ex: https://matrix.example.org). Sans slash final.",
+      "required": true,
+      "sensitive": false
+    },
+    "matrix_access_token": {
+      "type": "string",
+      "title": "Access Token Matrix",
+      "description": "Token d'accès Matrix obtenu via la connexion (Element > Paramètres > Aide & à propos > Informations de débogage > Access Token).",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "matrix_whoami",
+      "description": "Informations du compte Matrix authentifié"
+    },
+    {
+      "name": "matrix_list_rooms",
+      "description": "Liste les salons rejoints avec nom et sujet"
+    },
+    {
+      "name": "matrix_get_room_messages",
+      "description": "Lit les derniers messages d'un salon"
+    },
+    {
+      "name": "matrix_send_message",
+      "description": "Envoie un message texte dans un salon"
+    },
+    {
+      "name": "matrix_send_html_message",
+      "description": "Envoie un message HTML formaté dans un salon"
+    },
+    {
+      "name": "matrix_search_messages",
+      "description": "Recherche des messages dans les salons"
+    },
+    {
+      "name": "matrix_get_room_members",
+      "description": "Liste les membres d'un salon"
+    },
+    {
+      "name": "matrix_create_room",
+      "description": "Crée un nouveau salon Matrix"
+    },
+    {
+      "name": "matrix_invite_user",
+      "description": "Invite un utilisateur dans un salon"
+    },
+    {
+      "name": "matrix_set_topic",
+      "description": "Définit le sujet d'un salon"
+    }
+  ]
+}

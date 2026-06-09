@@ -1,0 +1,210 @@
+{
+  "manifest_version": "0.3",
+  "name": "wordpress-mcp",
+  "display_name": "WordPress",
+  "version": "1.3.0",
+  "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, médias, redirections. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "WP_PROD_URL": "${user_config.wp_prod_url}",
+        "WP_PROD_USER": "${user_config.wp_prod_user}",
+        "WP_PROD_APP_PASSWORD": "${user_config.wp_prod_app_password}",
+        "WP_TEST_URL": "${user_config.wp_test_url}",
+        "WP_TEST_USER": "${user_config.wp_test_user}",
+        "WP_TEST_APP_PASSWORD": "${user_config.wp_test_app_password}",
+        "WP_TEST_VERIFY_SSL": "${user_config.wp_test_verify_ssl}",
+        "WP_TEST_SERVER_AUTH_USER": "${user_config.wp_test_server_auth_user}",
+        "WP_TEST_SERVER_AUTH_PASS": "${user_config.wp_test_server_auth_pass}"
+      }
+    }
+  },
+  "user_config": {
+    "wp_prod_url": {
+      "type": "string",
+      "title": "URL WordPress Production",
+      "description": "URL du site WordPress de production (ex: https://mon-site.fr). Sans slash final.",
+      "required": true,
+      "sensitive": false
+    },
+    "wp_prod_user": {
+      "type": "string",
+      "title": "Identifiant WordPress Production",
+      "description": "Nom d'utilisateur WordPress sur le site de production (ex: jdupont).",
+      "required": true,
+      "sensitive": false
+    },
+    "wp_prod_app_password": {
+      "type": "string",
+      "title": "Application Password Production",
+      "description": "Mot de passe d'application généré dans WordPress (Utilisateurs > Profil > Mots de passe d'application). Format: xxxx xxxx xxxx xxxx xxxx xxxx",
+      "required": true,
+      "sensitive": true
+    },
+    "wp_test_url": {
+      "type": "string",
+      "title": "URL WordPress Test/Recette",
+      "description": "URL du site WordPress de test/recette (ex: https://recette.mon-site.fr). Laisser vide si non utilisé.",
+      "required": false,
+      "sensitive": false,
+      "default": ""
+    },
+    "wp_test_user": {
+      "type": "string",
+      "title": "Identifiant WordPress Test",
+      "description": "Nom d'utilisateur WordPress sur le site de test (ex: jdupont).",
+      "required": false,
+      "sensitive": false,
+      "default": ""
+    },
+    "wp_test_app_password": {
+      "type": "string",
+      "title": "Application Password Test",
+      "description": "Mot de passe d'application généré dans WordPress sur le site de test.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    },
+    "wp_test_verify_ssl": {
+      "type": "string",
+      "title": "Vérifier SSL (serveur test)",
+      "description": "Mettre 'false' si le serveur de test utilise un certificat auto-signé ou invalide. Laisser vide (ou 'true') pour la vérification normale.",
+      "required": false,
+      "sensitive": false,
+      "default": "false"
+    },
+    "wp_test_server_auth_user": {
+      "type": "string",
+      "title": "Basic Auth serveur test — Utilisateur",
+      "description": "Identifiant de la protection Basic Auth Nginx/Apache du serveur de test (le popup navigateur). Laisser vide si le site n'a pas de protection serveur.",
+      "required": false,
+      "sensitive": false,
+      "default": ""
+    },
+    "wp_test_server_auth_pass": {
+      "type": "string",
+      "title": "Basic Auth serveur test — Mot de passe",
+      "description": "Mot de passe de la protection Basic Auth Nginx/Apache du serveur de test.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    }
+  },
+  "tools": [
+    {
+      "name": "wordpress_check_connection",
+      "description": "Teste la connexion et l'authentification"
+    },
+    {
+      "name": "wordpress_site_info",
+      "description": "Infos générales du site"
+    },
+    {
+      "name": "wordpress_list_pages",
+      "description": "Liste les pages"
+    },
+    {
+      "name": "wordpress_get_page",
+      "description": "Lit une page complète avec ACF (context=edit par défaut → markup Gutenberg raw)"
+    },
+    {
+      "name": "wordpress_create_page",
+      "description": "Crée une page"
+    },
+    {
+      "name": "wordpress_update_page",
+      "description": "Met à jour une page"
+    },
+    {
+      "name": "wordpress_delete_page",
+      "description": "Supprime ou met à la corbeille"
+    },
+    {
+      "name": "wordpress_list_posts",
+      "description": "Liste les articles"
+    },
+    {
+      "name": "wordpress_get_post",
+      "description": "Lit un article complet (context=edit par défaut → markup Gutenberg raw)"
+    },
+    {
+      "name": "wordpress_update_post",
+      "description": "Met à jour un article"
+    },
+    {
+      "name": "wordpress_search",
+      "description": "Recherche globale"
+    },
+    {
+      "name": "wordpress_list_post_types",
+      "description": "Liste les types de contenu"
+    },
+    {
+      "name": "wordpress_list_custom_posts",
+      "description": "Liste un CPT (ex: news, realisations, projets)"
+    },
+    {
+      "name": "wordpress_get_custom_post",
+      "description": "Lit un CPT complet avec ACF (context=edit par défaut → markup Gutenberg raw)"
+    },
+    {
+      "name": "wordpress_create_custom_post",
+      "description": "Crée un CPT (ex: nouvel article de blog news)"
+    },
+    {
+      "name": "wordpress_update_custom_post",
+      "description": "Met à jour un CPT avec ACF"
+    },
+    {
+      "name": "wordpress_delete_custom_post",
+      "description": "Supprime ou met à la corbeille un CPT"
+    },
+    {
+      "name": "wordpress_list_media",
+      "description": "Liste la médiathèque"
+    },
+    {
+      "name": "wordpress_upload_media",
+      "description": "Uploade un fichier"
+    },
+    {
+      "name": "wordpress_list_acf_field_groups",
+      "description": "Liste les groupes ACF"
+    },
+    {
+      "name": "wordpress_get_acf_fields",
+      "description": "Champs ACF d'une publication"
+    },
+    {
+      "name": "wordpress_list_redirections",
+      "description": "Liste les redirections"
+    },
+    {
+      "name": "wordpress_create_redirection",
+      "description": "Crée une redirection"
+    },
+    {
+      "name": "wordpress_delete_redirection",
+      "description": "Supprime une redirection"
+    },
+    {
+      "name": "wordpress_list_categories",
+      "description": "Liste les catégories"
+    },
+    {
+      "name": "wordpress_list_users",
+      "description": "Liste les utilisateurs"
+    }
+  ]
+}

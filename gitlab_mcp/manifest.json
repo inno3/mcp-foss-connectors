@@ -1,0 +1,117 @@
+{
+  "manifest_version": "0.3",
+  "name": "gitlab-mcp",
+  "display_name": "GitLab",
+  "version": "1.0.0",
+  "description": "Connecteur GitLab : projets, issues, merge requests, repository, pipelines CI/CD.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "GITLAB_URL": "${user_config.gitlab_url}",
+        "GITLAB_TOKEN": "${user_config.gitlab_token}"
+      }
+    }
+  },
+  "user_config": {
+    "gitlab_url": {
+      "type": "string",
+      "title": "URL GitLab",
+      "description": "URL de l'instance GitLab (ex: https://gitlab.com ou https://gitlab.monentreprise.fr). Sans slash final.",
+      "required": true,
+      "sensitive": false,
+      "default": "https://gitlab.com"
+    },
+    "gitlab_token": {
+      "type": "string",
+      "title": "Token d'accès personnel GitLab",
+      "description": "Personal Access Token GitLab avec les scopes 'api' ou 'read_api'. Générer dans GitLab : Paramètres > Tokens d'accès.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "gitlab_list_projects",
+      "description": "Liste les projets GitLab de l'utilisateur"
+    },
+    {
+      "name": "gitlab_get_project",
+      "description": "Détails complets d'un projet"
+    },
+    {
+      "name": "gitlab_list_issues",
+      "description": "Liste les issues d'un projet"
+    },
+    {
+      "name": "gitlab_get_issue",
+      "description": "Détails complets d'une issue avec description"
+    },
+    {
+      "name": "gitlab_create_issue",
+      "description": "Crée une nouvelle issue"
+    },
+    {
+      "name": "gitlab_update_issue",
+      "description": "Met à jour ou ferme/rouvre une issue"
+    },
+    {
+      "name": "gitlab_add_issue_comment",
+      "description": "Ajoute un commentaire sur une issue"
+    },
+    {
+      "name": "gitlab_list_merge_requests",
+      "description": "Liste les merge requests d'un projet"
+    },
+    {
+      "name": "gitlab_get_merge_request",
+      "description": "Détails complets d'un merge request"
+    },
+    {
+      "name": "gitlab_create_merge_request",
+      "description": "Crée un nouveau merge request"
+    },
+    {
+      "name": "gitlab_list_repo_tree",
+      "description": "Liste les fichiers d'un répertoire du dépôt"
+    },
+    {
+      "name": "gitlab_get_file",
+      "description": "Lit le contenu d'un fichier du dépôt"
+    },
+    {
+      "name": "gitlab_create_file",
+      "description": "Crée un fichier dans le dépôt"
+    },
+    {
+      "name": "gitlab_update_file",
+      "description": "Met à jour un fichier du dépôt"
+    },
+    {
+      "name": "gitlab_list_branches",
+      "description": "Liste les branches du dépôt"
+    },
+    {
+      "name": "gitlab_list_pipelines",
+      "description": "Liste les pipelines CI/CD d'un projet"
+    },
+    {
+      "name": "gitlab_get_pipeline",
+      "description": "Détails d'un pipeline avec ses jobs"
+    },
+    {
+      "name": "gitlab_whoami",
+      "description": "Infos de l'utilisateur GitLab authentifié"
+    }
+  ]
+}

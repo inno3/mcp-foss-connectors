@@ -1,0 +1,128 @@
+{
+  "manifest_version": "0.3",
+  "name": "n8n-mcp",
+  "display_name": "n8n",
+  "version": "1.0.0",
+  "description": "Connecteur n8n : workflows, exécutions, nœuds (Code / HTTP), credentials, variables globales. API publique REST n8n.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "N8N_BASE_URL": "${user_config.n8n_base_url}",
+        "N8N_API_KEY": "${user_config.n8n_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "n8n_base_url": {
+      "type": "string",
+      "title": "URL de l'instance n8n",
+      "description": "URL de base de l'instance n8n (ex: https://n8n.monentreprise.fr). Sans slash final. L'API publique doit être activée.",
+      "required": true,
+      "sensitive": false
+    },
+    "n8n_api_key": {
+      "type": "string",
+      "title": "Clé API n8n",
+      "description": "Clé API n8n (envoyée dans l'en-tête X-N8N-API-KEY). À générer dans n8n : Settings > n8n API.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "n8n_list_workflows",
+      "description": "Liste les workflows (id, nom, statut actif, dernière exécution)"
+    },
+    {
+      "name": "n8n_get_workflow",
+      "description": "Détails d'un workflow (nœuds, connexions, paramètres)"
+    },
+    {
+      "name": "n8n_get_workflow_full",
+      "description": "JSON complet d'un workflow avec tous les paramètres des nœuds"
+    },
+    {
+      "name": "n8n_create_workflow",
+      "description": "Crée un nouveau workflow"
+    },
+    {
+      "name": "n8n_delete_workflow",
+      "description": "Supprime un workflow"
+    },
+    {
+      "name": "n8n_activate_workflow",
+      "description": "Active un workflow (mise en production)"
+    },
+    {
+      "name": "n8n_deactivate_workflow",
+      "description": "Désactive un workflow"
+    },
+    {
+      "name": "n8n_trigger_workflow",
+      "description": "Déclenche manuellement un workflow en mode test"
+    },
+    {
+      "name": "n8n_get_executions",
+      "description": "Exécutions récentes d'un workflow"
+    },
+    {
+      "name": "n8n_get_execution_detail",
+      "description": "Détail complet d'une exécution (débogage)"
+    },
+    {
+      "name": "n8n_update_workflow_code",
+      "description": "Met à jour le jsCode d'un nœud Code"
+    },
+    {
+      "name": "n8n_update_node_params",
+      "description": "Met à jour les paramètres d'un nœud"
+    },
+    {
+      "name": "n8n_update_node_credentials",
+      "description": "Assigne des credentials à un nœud"
+    },
+    {
+      "name": "n8n_patch_workflow_nodes",
+      "description": "Remplace la liste complète des nœuds et connexions"
+    },
+    {
+      "name": "n8n_list_credentials",
+      "description": "Liste les credentials (id, nom, type)"
+    },
+    {
+      "name": "n8n_list_variables",
+      "description": "Liste les variables globales"
+    },
+    {
+      "name": "n8n_create_variable",
+      "description": "Crée une variable globale"
+    }
+  ],
+  "keywords": [
+    "n8n",
+    "workflow",
+    "automation",
+    "no-code",
+    "rest"
+  ],
+  "compatibility": {
+    "platforms": [
+      "linux",
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

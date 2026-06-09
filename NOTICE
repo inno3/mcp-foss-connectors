@@ -1,0 +1,28 @@
+mcp-foss-connectors
+Copyright 2026 inno³ (https://inno3.fr)
+
+This product includes software developed at inno³, an independent consultancy
+specialised in open-source and open-innovation strategy, legal and compliance.
+
+The connectors in this repository were originally built by inno³ to let MCP
+clients (Claude Desktop, Cowork, and any other Model Context Protocol client)
+interact with the free and open-source tools that make up inno³'s own
+information system — Dolibarr, Kanboard, WordPress, n8n, Matrix, Nextcloud,
+HedgeDoc and GitLab. They are released here as a generic, vendor-neutral
+toolkit so that any organisation running these tools can reuse them, and so
+that inno³ can migrate its own usage onto the public code base.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License. A copy of the License
+is provided in the LICENSE file and at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+"inno³" and the inno³ logo are trademarks of inno³. This License does not
+grant permission to use them except as required for reasonable and customary
+use in describing the origin of the work (see Section 6 of the License).
+
+The names of the third-party tools these connectors integrate with
+(Dolibarr, Kanboard, WordPress, n8n, Matrix, Nextcloud, HedgeDoc, GitLab)
+are the property of their respective owners. This project is not affiliated
+with or endorsed by any of them.
