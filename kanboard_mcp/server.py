@@ -709,27 +709,31 @@ async def kanboard_get_board(project_id: int = 0) -> str:
 async def kanboard_move_task(
     task_id: int = 0,
     column_name: str = "",
+    swimlane_name: str = "",
+    position: int = 1,
     project_id: int = 0,
     as_user: str = "",
 ) -> str:
-    """Deplace une tache vers une colonne du tableau.
+    """Deplace une tache vers une colonne (et/ou un swimlane) du tableau.
 
     Confirmation utilisateur requise avant execution.
 
     Parametres :
     - task_id : ID de la tache (obligatoire)
     - column_name : nom de la colonne cible (ex: 'En cours', 'Done')
+    - swimlane_name : nom du swimlane cible (vide = swimlane actuel inchange)
+    - position : position dans la colonne (defaut: 1 = haut)
     - project_id : ID du projet (si omis, deduit de la tache)
     - as_user : compte qui execute le deplacement ("" = defaut, "primary"/"agent")
 
-    Resout le nom de colonne en ID automatiquement.
+    Resout les noms de colonne et swimlane en IDs automatiquement.
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
     if not column_name:
         return "Erreur : column_name est obligatoire."
     try:
-        # Recuperer la tache pour connaitre le projet et le swimlane
+        # Recuperer la tache pour connaitre le projet et le swimlane actuel
         task = await kb_call("getTask", {"task_id": task_id}, as_user=as_user)
         if not task:
             return "Tache introuvable."
@@ -758,18 +762,34 @@ async def kanboard_move_task(
             return f"Colonne '{column_name}' introuvable. Colonnes disponibles : {available}"
 
         col_id = int(target_col["id"])
-        position = 1  # En haut de la colonne
+
+        # Resoudre le swimlane par nom si fourni
+        if swimlane_name:
+            swimlanes = await kb_call("getActiveSwimlanes", {"project_id": pid}, as_user=as_user)
+            sw_lower = swimlane_name.lower()
+            target_sw = None
+            for s in (swimlanes or []):
+                if (s.get("name") or "").lower() == sw_lower:
+                    target_sw = s
+                    break
+            if not target_sw:
+                available_sw = [s.get("name") for s in (swimlanes or [])]
+                return f"Swimlane '{swimlane_name}' introuvable. Swimlanes disponibles : {available_sw}"
+            swimlane_id = int(target_sw["id"])
 
         success = await kb_call("moveTaskPosition", {
             "project_id": pid,
             "task_id": task_id,
             "column_id": col_id,
-            "position": position,
+            "position": max(1, position),
             "swimlane_id": swimlane_id,
         }, as_user=as_user)
 
         if success:
-            return _dumps({"success": True, "task_id": task_id, "moved_to": column_name})
+            result: dict[str, Any] = {"success": True, "task_id": task_id, "moved_to": column_name}
+            if swimlane_name:
+                result["swimlane"] = swimlane_name
+            return _dumps(result)
         else:
             return "Echec du deplacement (la tache est peut-etre deja dans cette colonne)."
     except Exception as exc:
@@ -783,6 +803,10 @@ async def kanboard_update_task(
     description: str = "",
     priority: int = -1,
     due_date: str = "",
+    owner_id: int = -1,
+    category_id: int = -1,
+    color_id: str = "",
+    tags: list[str] | None = None,
     as_user: str = "",
 ) -> str:
     """Modifie une tache existante dans Kanboard.
@@ -795,6 +819,10 @@ async def kanboard_update_task(
     - description : nouvelle description (vide = inchange)
     - priority : priorite 0-3 (-1 = inchange)
     - due_date : date d'echeance ISO (YYYY-MM-DD), vide = inchange
+    - owner_id : ID du porteur de la tache (-1 = inchange, 0 = desassigner)
+    - category_id : ID de la categorie (-1 = inchange, 0 = aucune)
+    - color_id : couleur de la carte (ex: 'yellow', 'green', '' = inchange)
+    - tags : liste de tags libres (null = inchange, [] = supprimer tous les tags)
     - as_user : compte qui modifie ("" = defaut, "primary"/"agent")
 
     Retourne les details de la tache mise a jour.
@@ -811,6 +839,14 @@ async def kanboard_update_task(
             params["priority"] = priority
         if due_date:
             params["date_due"] = due_date
+        if owner_id >= 0:
+            params["owner_id"] = owner_id
+        if category_id >= 0:
+            params["category_id"] = category_id
+        if color_id:
+            params["color_id"] = color_id
+        if tags is not None:
+            params["tags"] = list(tags)
 
         if len(params) == 1:
             return "Erreur : aucun champ a modifier."
@@ -822,6 +858,138 @@ async def kanboard_update_task(
             return _dumps(await _task_summary(task, as_user=as_user)) if task else _dumps({"success": True})
         else:
             return "Echec de la mise a jour."
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_assign_task(
+    task_id: int = 0,
+    user_id: int = 0,
+    user_name: str = "",
+    as_user: str = "",
+) -> str:
+    """Assigne (ou desassigne) le porteur d'une tache existante.
+
+    Confirmation utilisateur requise avant execution.
+
+    Parametres :
+    - task_id : ID de la tache (obligatoire)
+    - user_id : ID de l'utilisateur Kanboard (0 + user_name vide = desassigner)
+    - user_name : nom de l'utilisateur (si user_id=0, resolution auto via membres du projet)
+    - as_user : compte qui effectue la modification ("" = defaut, "primary"/"agent")
+
+    Resolution par nom :
+    - Recherche insensible a la casse dans les membres du projet (nom affiche ET login).
+    - Erreur explicite si aucune correspondance ou ambiguite.
+    - L'utilisateur doit etre membre du projet ; sinon erreur avec suggestion
+      d'utiliser kanboard_assign_project_user.
+
+    Exemples :
+    - kanboard_assign_task(task_id=7152, user_id=4)              -> assigne user 4
+    - kanboard_assign_task(task_id=7152, user_name="Benjamin")    -> resolution auto
+    - kanboard_assign_task(task_id=7152, user_id=0)              -> desassigne
+    """
+    if not task_id:
+        return "Erreur : task_id est obligatoire."
+
+    try:
+        # Recuperer la tache pour connaitre le projet
+        task = await kb_call("getTask", {"task_id": task_id}, as_user=as_user)
+        if not task:
+            return f"Tache {task_id} introuvable."
+
+        pid = int(task.get("project_id", 0))
+        if not pid:
+            return "Erreur : impossible de determiner le projet de la tache."
+
+        # Cas desassignation
+        if user_id == 0 and not user_name:
+            success = await kb_call("updateTask", {"id": task_id, "owner_id": 0}, as_user=as_user)
+            if success:
+                return _dumps({"success": True, "task_id": task_id, "owner_id": 0, "action": "deassigned"})
+            return "Echec de la desassignation."
+
+        resolved_uid = user_id
+
+        # Resolution par nom si user_id non fourni
+        if resolved_uid == 0 and user_name:
+            members_raw = await kb_call("getProjectUsers", {"project_id": pid}, as_user=as_user)
+            if not members_raw:
+                return f"Projet {pid} : aucun membre trouve (verifiez les droits du compte)."
+
+            # Kanboard retourne {uid_str: username} ; enrichir avec le nom affiche
+            if isinstance(members_raw, dict):
+                member_list = [{"id": int(k), "username": v} for k, v in members_raw.items()]
+            else:
+                member_list = [{"id": int(m.get("id", 0)), "username": m.get("username", "") or m.get("name", "")} for m in members_raw]
+
+            name_lower = user_name.lower().strip()
+            matches: list[dict] = []
+            for m in member_list:
+                uid = m["id"]
+                # Comparer login Kanboard
+                if (m.get("username") or "").lower() == name_lower:
+                    matches.append(m)
+                    continue
+                # Comparer nom affiche (appel getUser, cached)
+                display = await _get_user_name(uid, as_user=as_user)
+                if display.lower() == name_lower:
+                    matches.append({**m, "display_name": display})
+
+            if len(matches) == 0:
+                member_names = []
+                for m in member_list:
+                    dn = await _get_user_name(m["id"], as_user=as_user)
+                    member_names.append(dn or m.get("username", f"uid={m['id']}"))
+                return (
+                    f"Aucun membre du projet {pid} ne correspond a '{user_name}'. "
+                    f"Membres disponibles : {member_names}"
+                )
+            if len(matches) > 1:
+                return (
+                    f"Ambiguite : '{user_name}' correspond a plusieurs membres : "
+                    f"{[m.get('display_name') or m.get('username') for m in matches]}. "
+                    "Preciser user_id."
+                )
+            resolved_uid = matches[0]["id"]
+
+        # Verifier que l'utilisateur est bien membre du projet
+        members_raw = await kb_call("getProjectUsers", {"project_id": pid}, as_user=as_user)
+        if members_raw:
+            if isinstance(members_raw, dict):
+                member_ids = {int(k) for k in members_raw}
+            else:
+                member_ids = {int(m.get("id", 0)) for m in members_raw}
+            if resolved_uid not in member_ids:
+                return (
+                    f"L'utilisateur {resolved_uid} n'est pas membre du projet {pid}. "
+                    "Utiliser kanboard_assign_project_user pour l'ajouter d'abord."
+                )
+
+        # Idempotence : si deja assigne au meme utilisateur, ok
+        current_owner = int(task.get("owner_id") or 0)
+        if current_owner == resolved_uid:
+            display = await _get_user_name(resolved_uid, as_user=as_user)
+            return _dumps({
+                "success": True,
+                "task_id": task_id,
+                "owner_id": resolved_uid,
+                "owner_name": display,
+                "note": "deja assigne a cet utilisateur",
+            })
+
+        success = await kb_call("updateTask", {"id": task_id, "owner_id": resolved_uid}, as_user=as_user)
+        if success:
+            display = await _get_user_name(resolved_uid, as_user=as_user)
+            return _dumps({
+                "success": True,
+                "task_id": task_id,
+                "owner_id": resolved_uid,
+                "owner_name": display,
+                "project_id": pid,
+            })
+        return "Echec de l'assignation."
     except Exception as exc:
         return _format_error(exc)
 
