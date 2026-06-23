@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.7.0",
-  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, multi-comptes (primary humain + agent Claude). 43 tools.",
+  "version": "0.8.0",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, multi-comptes (primary humain + agent Claude). 44 tools.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -141,11 +141,15 @@
     },
     {
       "name": "kanboard_update_task",
-      "description": "Modifier une tâche"
+      "description": "Modifier une tâche (titre, description, priorité, échéance, owner_id, category_id, color_id, tags)"
+    },
+    {
+      "name": "kanboard_assign_task",
+      "description": "Assigner ou désassigner le porteur d'une tâche (résolution par nom ou user_id)"
     },
     {
       "name": "kanboard_move_task",
-      "description": "Déplacer une tâche entre colonnes"
+      "description": "Déplacer une tâche entre colonnes / swimlanes (résolution par nom, position)"
     },
     {
       "name": "kanboard_close_task",
