@@ -68,7 +68,10 @@ _swimlane_cache: dict[int, dict[int, str]] = {}  # project_id -> {sw_id -> name}
 def _resolve_account(as_user: str = "") -> str:
     """Normalise l'argument as_user en 'primary' ou 'agent'.
 
-    Vide ou inconnu -> defaut configure (KANBOARD_DEFAULT_AS_USER).
+    Vide ou "default" -> defaut configure (KANBOARD_DEFAULT_AS_USER).
+    Valeur non vide inconnue -> ValueError : pas de fallback silencieux sur
+    "primary", qui signerait avec le compte humain une ecriture destinee au
+    compte agent (tracabilite faussee).
     """
     val = (as_user or "").strip().lower()
     if val in ("primary", "agent"):
@@ -78,9 +81,13 @@ def _resolve_account(as_user: str = "") -> str:
     # Aliases pratiques
     if val in ("me", "human", "user"):
         return "primary"
-    if val in ("bot", "ai", "alt"):
+    if val in ("bot", "ai", "alt", "claude"):
         return "agent"
-    return "primary"
+    raise ValueError(
+        f"as_user invalide : '{as_user}'. Valeurs acceptees : 'primary' "
+        "(ou me/human/user), 'agent' (ou bot/ai/alt/claude), '' ou 'default' "
+        "pour le compte par defaut."
+    )
 
 
 def _get_credentials(as_user: str) -> tuple[str, str, str]:
@@ -125,7 +132,9 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     for attempt in range(_MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(verify=True, timeout=30) as client:
-                logger.info("RPC %s as=%s params=%s (attempt %d)", method, account, params, attempt + 1)
+                logger.info("RPC %s as=%s param_keys=%s (attempt %d)",
+                            method, account, sorted(params or {}), attempt + 1)
+                logger.debug("RPC %s as=%s params=%s", method, account, params)
                 resp = await client.post(
                     KANBOARD_URL,
                     json=payload,

@@ -57,13 +57,21 @@ def _init_servers() -> None:
             "url": os.environ.get("WP_TEST_URL", "").rstrip("/"),
             "user": os.environ.get("WP_TEST_USER", ""),
             "password": os.environ.get("WP_TEST_APP_PASSWORD", ""),
-            "verify_ssl": os.environ.get("WP_TEST_VERIFY_SSL", "false").lower() != "false",
+            # Vérification TLS active par défaut : opt-out explicite uniquement
+            # (l'auth est Basic, un MITM capterait les credentials en clair).
+            "verify_ssl": os.environ.get("WP_TEST_VERIFY_SSL", "1").strip().lower()
+                          not in ("0", "false", "no", "off"),
             # Basic Auth serveur (Nginx/Apache) si le site de test est protégé
             "server_auth_user": os.environ.get("WP_TEST_SERVER_AUTH_USER", ""),
             "server_auth_pass": os.environ.get("WP_TEST_SERVER_AUTH_PASS", ""),
             "subsites": _parse_subsites(os.environ.get("WP_TEST_SUBSITES", "")),
         },
     }
+    if not _SERVER_CONFIGS["test"]["verify_ssl"]:
+        logger.warning(
+            "Vérification TLS DÉSACTIVÉE pour le serveur 'test' (WP_TEST_VERIFY_SSL) : "
+            "les credentials Basic sont exposés à une interception MITM."
+        )
 
 
 def _parse_subsites(raw: str) -> dict:

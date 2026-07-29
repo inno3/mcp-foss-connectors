@@ -32,7 +32,19 @@ class TestHelpers:
         assert _resolve_account("human") == "primary"
         assert _resolve_account("user") == "primary"
         assert _resolve_account("") == "primary"
-        assert _resolve_account("unknown") == "primary"
+        assert _resolve_account("claude") == "agent"
+
+    def test_resolve_account_rejects_unknown(self) -> None:
+        """Une valeur inconnue doit échouer, pas retomber sur 'primary'.
+
+        Le repli silencieux signait les écritures avec le compte humain alors que
+        l'appelant demandait le compte agent : la traçabilité Kanboard devenait
+        fausse sans que rien ne le signale.
+        """
+        with pytest.raises(ValueError, match="as_user invalide"):
+            _resolve_account("unknown")
+        with pytest.raises(ValueError, match="as_user invalide"):
+            _resolve_account("agnet")
 
     def test_clamp_limit(self) -> None:
         assert _clamp_limit(0) == 1
