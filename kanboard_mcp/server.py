@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import os
+import unicodedata
 from datetime import datetime
 from typing import Any
 
@@ -132,6 +133,8 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     for attempt in range(_MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(verify=True, timeout=30) as client:
+                # Seules les clefs en INFO : les valeurs portent titres, descriptions
+                # et commentaires de cartes, qui n'ont rien a faire dans un log courant.
                 logger.info("RPC %s as=%s param_keys=%s (attempt %d)",
                             method, account, sorted(params or {}), attempt + 1)
                 logger.debug("RPC %s as=%s params=%s", method, account, params)
@@ -193,6 +196,16 @@ def _dumps(data: Any) -> str:
 def _clamp_limit(limit: int) -> int:
     """Borne la limite entre 1 et MAX_LIMIT."""
     return max(1, min(limit, MAX_LIMIT))
+
+
+def _fold(value: Any) -> str:
+    """Replie une chaine en minuscules sans accents, pour comparaison souple.
+
+    Les noms de projets Kanboard sont saisis a la main ("Pilotage",
+    "Référentiel…") : sans repli, un filtre tape sans accent ne trouverait rien.
+    """
+    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    return "".join(ch for ch in text if not unicodedata.combining(ch))
 
 
 def _ts_to_date(value: Any) -> str:
@@ -437,29 +450,59 @@ async def kanboard_my_dashboard(as_user: str = "") -> str:
 
 
 @mcp.tool()
-async def kanboard_list_projects(limit: int = DEFAULT_LIMIT) -> str:
-    """Liste tous les projets Kanboard accessibles.
+async def kanboard_list_projects(
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    name_filter: str = "",
+) -> str:
+    """Liste les projets Kanboard accessibles.
 
     Parametres :
     - limit : nombre max de resultats (defaut 20, max 100)
+    - offset : nombre de projets a sauter avant de decouper (pagination)
+    - name_filter : sous-chaine filtrant le nom OU l'identifiant du projet,
+      insensible a la casse et aux accents (ex. "pilotage" trouve
+      "[Pilotage] Coordination")
 
-    Retourne : id, nom, description, nombre de taches.
+    Retourne : total_available (avant pagination), offset, count, has_more,
+    et projects (id, nom, identifiant, description tronquee a 200 caracteres,
+    is_active, nb_open_tasks).
     """
     try:
-        projects = await kb_call("getAllProjects")
-        if not projects:
-            return _dumps([])
-        results = []
-        for p in projects[:_clamp_limit(limit)]:
-            results.append({
+        projects = await kb_call("getAllProjects") or []
+
+        # Filtrage cote MCP : getAllProjects ne prend aucun critere.
+        needle = _fold(name_filter)
+        if needle:
+            projects = [
+                p for p in projects
+                if needle in _fold(p.get("name")) or needle in _fold(p.get("identifier"))
+            ]
+
+        # total_available et has_more sont mesures AVANT le decoupage : sans eux,
+        # une instance a plus de `limit` projets se lit comme une liste complete.
+        total = len(projects)
+        start = max(0, offset)
+        window = projects[start:start + _clamp_limit(limit)]
+
+        results = [
+            {
                 "id": p.get("id"),
                 "name": p.get("name"),
                 "identifier": p.get("identifier", ""),
                 "description": (p.get("description") or "")[:200],
                 "is_active": p.get("is_active"),
                 "nb_open_tasks": p.get("nb_open_tasks", ""),
-            })
-        return _dumps(results)
+            }
+            for p in window
+        ]
+        return _dumps({
+            "total_available": total,
+            "offset": start,
+            "count": len(results),
+            "has_more": start + len(results) < total,
+            "projects": results,
+        })
     except Exception as exc:
         return _format_error(exc)
 
@@ -672,13 +715,17 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
 
 
 @mcp.tool()
-async def kanboard_get_board(project_id: int = 0) -> str:
+async def kanboard_get_board(project_id: int = 0, tasks_per_column: int = 10) -> str:
     """Etat du tableau Kanboard d'un projet.
 
     Parametres :
     - project_id : ID du projet (obligatoire)
+    - tasks_per_column : nombre max de cartes detaillees par colonne
+      (defaut 10, max 100)
 
-    Retourne les colonnes, swimlanes et nombre de taches par cellule.
+    Retourne les swimlanes et leurs colonnes ; chaque carte porte id, titre,
+    assignee, echeance (due_date), priorite et categorie. Une colonne dont les
+    cartes ont ete tronquees porte truncated=true avec shown/total.
     """
     if not project_id:
         return "Erreur : project_id est obligatoire."
@@ -687,21 +734,37 @@ async def kanboard_get_board(project_id: int = 0) -> str:
         if not board:
             return "Tableau introuvable."
 
+        per_column = _clamp_limit(tasks_per_column)
         result = []
         for swimlane in board:
             sw_name = swimlane.get("name", "Default")
             columns = []
             for col in swimlane.get("columns", []):
                 tasks_in_col = col.get("tasks", [])
-                columns.append({
+                shown = tasks_in_col[:per_column]  # Limiter pour les tokens
+                entry = {
                     "id": col.get("id"),
                     "name": col.get("title", ""),
                     "task_count": len(tasks_in_col),
                     "tasks": [
-                        {"id": t.get("id"), "title": t.get("title"), "assignee": t.get("assignee_name", "")}
-                        for t in tasks_in_col[:10]  # Limiter pour les tokens
+                        {
+                            "id": t.get("id"),
+                            "title": t.get("title"),
+                            "assignee": t.get("assignee_name", ""),
+                            "due_date": _ts_to_date(t.get("date_due")),
+                            "priority": t.get("priority"),
+                            "category_name": t.get("category_name", ""),
+                        }
+                        for t in shown
                     ],
-                })
+                }
+                # Sans ce marqueur, une colonne tronquee est indiscernable d'une
+                # colonne qui contient exactement per_column cartes.
+                if len(shown) < len(tasks_in_col):
+                    entry["truncated"] = True
+                    entry["shown"] = len(shown)
+                    entry["total"] = len(tasks_in_col)
+                columns.append(entry)
             result.append({"swimlane": sw_name, "columns": columns})
 
         return _dumps(result)
