@@ -42,6 +42,11 @@ HEADERS = {
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
 
+# Limite serveur à demander quand un filtre est appliqué côté client (search,
+# min_amount) : sans elle, la limite demandée tronque AVANT le filtrage et des
+# résultats manquent silencieusement.
+CLIENT_FILTER_SCAN_LIMIT = 500
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -49,6 +54,11 @@ MAX_LIMIT = 100
 
 _MAX_RETRIES = 2
 _RETRY_DELAY = 1.0  # seconds, doubles each retry
+
+# Méthodes rejouables une fois la requête émise. Rejouer une écriture après un
+# timeout de lecture ou un 5xx crée des DOUBLONS (tickets, tiers, propositions,
+# temps passé) car Dolibarr a pu traiter la requête avant de perdre la réponse.
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 class DolibarrAPIError(RuntimeError):
@@ -85,6 +95,7 @@ def _parse_json_or_raise(resp: "httpx.Response", method: str, url: str) -> Any:
 async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
     """Appel HTTP avec retry et backoff exponentiel."""
     url = f"{DOLIBARR_URL}/api/index.php/{endpoint}"
+    idempotent = method.upper() in _IDEMPOTENT_METHODS
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -118,7 +129,8 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
 
                 resp.raise_for_status()
 
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        except httpx.ConnectError as exc:
+            # La requête n'a jamais atteint Dolibarr : rejouable même en écriture.
             last_exc = exc
             if attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
@@ -126,8 +138,18 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 await asyncio.sleep(delay)
             else:
                 raise
+        except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+            # La requête est partie : côté écriture, Dolibarr a peut-être déjà
+            # créé l'objet → rejouer ferait un doublon. On remonte l'erreur.
+            last_exc = exc
+            if idempotent and attempt < _MAX_RETRIES:
+                delay = _RETRY_DELAY * (2 ** attempt)
+                logger.warning("Retry %s %s in %.1fs: %s", method, url, delay, exc)
+                await asyncio.sleep(delay)
+            else:
+                raise
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2 ** attempt)
                 logger.warning("Retry %s %s (HTTP %d) in %.1fs", method, url, exc.response.status_code, delay)
@@ -136,9 +158,10 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 raise
         except DolibarrAPIError as exc:
             # Corps non-JSON sur réponse 2xx : très probablement un hoquet transient
-            # côté PHP-FPM / proxy. On retry comme pour un timeout.
+            # côté PHP-FPM / proxy. On retry comme pour un timeout — donc jamais
+            # sur une écriture, qui a pu aboutir malgré la réponse illisible.
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if idempotent and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
                 logger.warning("Retry %s %s (corps non-JSON) in %.1fs", method, url, delay)
                 await asyncio.sleep(delay)
@@ -153,7 +176,7 @@ _LIST_404_AS_EMPTY = {
     "thirdparties",
     "contacts",
     "invoices",
-    "supplier_invoices",
+    "supplierinvoices",
     "proposals",
     "tickets",
     "agendaevents",
@@ -167,9 +190,9 @@ async def _api_get_list(endpoint: str, params: dict[str, Any] | None = None) -> 
     Ce wrapper normalise pour les endpoints du set _LIST_404_AS_EMPTY.
     """
     try:
-        data = await _api_request("GET", endpoint, params=params or {})
+        data = await api_get(endpoint, params)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
+        if exc.response.status_code == 404 and endpoint.split("/")[0] in _LIST_404_AS_EMPTY:
             # Vérifier que c'est bien le pattern "No X found" et pas une vraie 404
             try:
                 body = exc.response.json()
@@ -300,10 +323,13 @@ async def dolibarr_list_projects(
     Retourne : ref, titre, tiers, statut, dates, budget.
     """
     try:
+        clamp = _clamp_limit(limit)
         params: dict[str, Any] = {
             "sortfield": "t.ref",
             "sortorder": "ASC",
-            "limit": _clamp_limit(limit),
+            # search est filtré côté client : élargir la limite serveur, sinon
+            # elle tronque avant le filtrage et des projets manquent.
+            "limit": CLIENT_FILTER_SCAN_LIMIT if search else clamp,
         }
         if status:
             params["sqlfilters"] = f"(t.fk_statut:=:{status})"
@@ -331,6 +357,8 @@ async def dolibarr_list_projects(
                 if search.lower() not in haystack:
                     continue
             results.append(entry)
+            if len(results) >= clamp:
+                break
 
         return _dumps({"count": len(results), "projects": results})
 
@@ -451,20 +479,26 @@ async def dolibarr_log_time(
         from datetime import datetime
 
         if date:
-            ts = int(datetime.strptime(date, "%Y-%m-%d").timestamp())
+            dt = datetime.strptime(date, "%Y-%m-%d")
         else:
-            ts = int(datetime.now().replace(hour=9, minute=0, second=0).timestamp())
+            dt = datetime.now().replace(hour=9, minute=0, second=0)
 
         duration_seconds = int(duration * 3600)
 
+        # Dolibarr v23 : POST tasks/{id}/addtimespent, champs date/duration/
+        # user_id/note. La date passe par dol_stringtotime() → format
+        # "YYYY-MM-DD HH:MI:SS" attendu, PAS un timestamp Unix.
         data: dict[str, Any] = {
-            "datec": ts,
+            "date": dt.strftime("%Y-%m-%d %H:%M:%S"),
             "duration": duration_seconds,
-            "fk_user": user_id if user_id else None,
             "note": note,
         }
+        # user_id absent = utilisateur de la clé API (envoyer None ferait échouer
+        # la validation Restler du paramètre entier).
+        if user_id:
+            data["user_id"] = user_id
 
-        await api_post(f"tasks/{task_id}/timespent", data)
+        await api_post(f"tasks/{task_id}/addtimespent", data)
 
         # Re-fetch task to get updated totals
         task = await api_get(f"tasks/{task_id}")
@@ -606,10 +640,13 @@ async def dolibarr_list_invoices(
     Retourne : ref, tiers, montant TTC, date échéance, statut, jours de retard.
     """
     try:
+        clamp = _clamp_limit(limit)
         params: dict[str, Any] = {
             "sortfield": "t.date_lim_reglement",
             "sortorder": "ASC",
-            "limit": _clamp_limit(limit),
+            # min_amount est filtré côté client : élargir la limite serveur, sinon
+            # elle tronque avant le filtrage et des factures manquent.
+            "limit": CLIENT_FILTER_SCAN_LIMIT if min_amount else clamp,
         }
 
         # Mapping statut
@@ -621,7 +658,7 @@ async def dolibarr_list_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await api_get("invoices", params)
+        invoices = await _api_get_list("invoices", params)
 
         from datetime import datetime
 
@@ -656,6 +693,8 @@ async def dolibarr_list_invoices(
                 "days_late": days_late,
                 "remaining_to_pay": float(inv.get("remaintopay") or total_ttc),
             })
+            if len(results) >= clamp:
+                break
 
         return _dumps({"count": len(results), "invoices": results})
 
@@ -691,7 +730,7 @@ async def dolibarr_list_supplier_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await api_get("supplierinvoices", params)
+        invoices = await _api_get_list("supplierinvoices", params)
 
         from datetime import datetime
 
@@ -754,7 +793,7 @@ async def dolibarr_list_proposals(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        proposals = await api_get("proposals", params)
+        proposals = await _api_get_list("proposals", params)
 
         results = []
         for p in proposals:
@@ -821,14 +860,11 @@ async def dolibarr_list_thirdparties(
         elif type_filter == "prospect":
             filters.append("(t.client:=:2)")
         if search:
-            escaped = search.replace("'", "\\'")
-            filters.append(f"(t.nom:like:'%{escaped}%')")
+            filters.append(f"(t.nom:like:'%{_sf_escape(search)}%')")
         if search_email:
-            escaped = search_email.replace("'", "\\'")
-            filters.append(f"(t.email:like:'%{escaped}%')")
+            filters.append(f"(t.email:like:'%{_sf_escape(search_email)}%')")
         if search_code:
-            escaped = search_code.replace("'", "\\'")
-            filters.append(f"(t.code_client:like:'%{escaped}%')")
+            filters.append(f"(t.code_client:like:'%{_sf_escape(search_code)}%')")
         if filters:
             params["sqlfilters"] = " AND ".join(filters)
         if category:
@@ -1227,7 +1263,7 @@ async def dolibarr_list_contacts(
         if not thirdparty_id:
             return "Veuillez fournir un thirdparty_id."
 
-        contacts = await api_get("contacts", {
+        contacts = await _api_get_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -1274,11 +1310,11 @@ async def dolibarr_search_contacts(
 
         filters = []
         if email:
-            filters.append(f"(t.email:like:'%{email}%')")
+            filters.append(f"(t.email:like:'%{_sf_escape(email)}%')")
         if search:
-            filters.append(f"(t.lastname:like:'%{search}%')")
+            filters.append(f"(t.lastname:like:'%{_sf_escape(search)}%')")
 
-        contacts = await api_get("contacts", {
+        contacts = await _api_get_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -1432,11 +1468,11 @@ async def dolibarr_list_tickets(
         if thirdparty_id:
             filters.append(f"(t.fk_soc:=:{thirdparty_id})")
         if severity:
-            filters.append(f"(t.severity_code:=:'{severity}')")
+            filters.append(f"(t.severity_code:=:'{_sf_escape(severity)}')")
         if filters:
             params["sqlfilters"] = " AND ".join(filters)
 
-        tickets = await api_get("tickets", params)
+        tickets = await _api_get_list("tickets", params)
 
         results = []
         for t in tickets:
@@ -1476,7 +1512,7 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
         if ticket_id:
             ticket = await api_get(f"tickets/{ticket_id}")
         elif ref:
-            tickets = await api_get("tickets", {"sqlfilters": f"(t.ref:=:'{ref}')", "limit": 1})
+            tickets = await api_get("tickets", {"sqlfilters": f"(t.ref:=:'{_sf_escape(ref)}')", "limit": 1})
             if not tickets:
                 return f"Ticket '{ref}' introuvable."
             ticket = tickets[0]
@@ -1821,7 +1857,7 @@ async def dolibarr_list_actions_open(
             sql_parts.append(f"(t.fk_soc:=:{thirdparty_id})")
         params["sqlfilters"] = " AND ".join(sql_parts)
 
-        actions = await api_get("agendaevents", params)
+        actions = await _api_get_list("agendaevents", params)
 
         if not isinstance(actions, list):
             return _dumps({"count": 0, "actions": []})
