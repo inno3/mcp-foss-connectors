@@ -1,6 +1,6 @@
 # Kanboard connector (`kanboard-mcp`)
 
-MCP server for the [Kanboard](https://kanboard.org/) JSON-RPC API. Projects, boards, tasks, columns, swimlanes, categories and subtasks, with optional **dual-account** support (a human account + a dedicated AI-agent account).
+MCP server for the [Kanboard](https://kanboard.org/) JSON-RPC API. Projects, boards, tasks, columns, swimlanes, categories, subtasks and comments, with optional **dual-account** support (a human account + a dedicated AI-agent account).
 
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
@@ -16,7 +16,7 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
-## Tools (43)
+## Tools (48)
 
 - `kanboard_my_dashboard` — Tableau de bord personnel Kanboard
 - `kanboard_list_projects` — Liste tous les projets Kanboard accessibles
@@ -27,7 +27,12 @@ environment variables — no host, login or secret is baked into the code.
 - `kanboard_get_board` — Etat du tableau Kanboard d'un projet
 - `kanboard_move_task` — Deplace une tache vers une colonne du tableau
 - `kanboard_update_task` — Modifie une tache existante dans Kanboard
+- `kanboard_assign_task` — Assigne (ou desassigne) le porteur d'une tache existante
 - `kanboard_add_comment` — Ajoute un commentaire a une tache Kanboard
+- `kanboard_list_comments` — Liste tous les commentaires d'une tache, contenu integral
+- `kanboard_get_comment` — Detail d'un commentaire par son ID, contenu integral
+- `kanboard_update_comment` — Modifie le texte d'un commentaire existant
+- `kanboard_remove_comment` — Supprime definitivement un commentaire
 - `kanboard_close_task` — Ferme (clôture) une tâche dans Kanboard
 - `kanboard_open_task` — Rouvre une tâche dans Kanboard
 - `kanboard_create_task` — Cree une nouvelle tache dans un projet Kanboard
@@ -68,6 +73,22 @@ Write tools accept an `as_user` argument (`primary` | `agent`). This lets a huma
 and an AI agent share the same MCP server while keeping a correct authorship
 trail on comments and task changes. If the agent account is not configured, all
 calls transparently fall back to the primary account.
+
+### Editing and deleting comments: authorship applies
+
+Kanboard enforces an author check on `updateComment` and `removeComment`: unless
+the account is an administrator, it can only edit or delete **its own** comments.
+With two accounts configured, a comment posted as `primary` is therefore not
+editable as `agent`, and vice versa. The API answers a bare `false` in that case;
+`kanboard_update_comment` and `kanboard_remove_comment` turn it into an explicit
+message naming the comment's author and the `as_user` value to retry with.
+
+Comments are not versioned by Kanboard. Both tools re-read the comment before
+writing and return the previous text (`previous_comment` / `deleted_comment`),
+which is the only remaining trace of it. To fetch a full comment before rewriting
+it, use `kanboard_list_comments` or `kanboard_get_comment` — `kanboard_get_task`
+previews comments at 500 characters and flags the cut with `comment_truncated` /
+`comment_full_length` (or pass `full_comments=True`).
 
 ## License
 

@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.8.0",
-  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, multi-comptes (primary humain + agent Claude). 44 tools.",
+  "version": "0.9.0",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), multi-comptes (primary humain + agent Claude). 48 tools.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -166,6 +166,22 @@
     {
       "name": "kanboard_add_comment",
       "description": "Ajouter un commentaire (auteur = compte as_user)"
+    },
+    {
+      "name": "kanboard_list_comments",
+      "description": "Lister les commentaires d'une tâche (contenu intégral, sans troncature)"
+    },
+    {
+      "name": "kanboard_get_comment",
+      "description": "Détail d'un commentaire (contenu intégral)"
+    },
+    {
+      "name": "kanboard_update_comment",
+      "description": "Modifier un commentaire (renvoie l'ancien texte ; auteur uniquement)"
+    },
+    {
+      "name": "kanboard_remove_comment",
+      "description": "Supprimer un commentaire (irréversible, renvoie le contenu ; auteur uniquement)"
     },
     {
       "name": "kanboard_list_columns",
