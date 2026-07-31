@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.9.0",
-  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), multi-comptes (primary humain + agent Claude). 48 tools.",
+  "version": "0.10.0",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), multi-comptes (primary humain + agent Claude). 49 tools.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -80,6 +80,10 @@
       "description": "Identité utilisateur API (par compte)"
     },
     {
+      "name": "kanboard_check_project_access",
+      "description": "Diagnostic : projets atteignables par chaque compte (évite le 403 à l'écriture)"
+    },
+    {
       "name": "kanboard_my_dashboard",
       "description": "Mes tâches par projet (param as_user)"
     },
@@ -105,7 +109,7 @@
     },
     {
       "name": "kanboard_recent_activity",
-      "description": "Activité récente d'un projet"
+      "description": "Activité récente d'un projet (plafonnée à 50 événements par l'API)"
     },
     {
       "name": "kanboard_list_project_users",

@@ -7,6 +7,7 @@ import json
 import os
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 os.environ.setdefault("KANBOARD_URL", "https://kb.example.test/jsonrpc.php")
@@ -18,21 +19,32 @@ os.environ.setdefault("KANBOARD_USER_ALT", "bot")
 os.environ.setdefault("KANBOARD_TOKEN_ALT", "tok-agent")
 
 from kanboard_mcp.server import (  # noqa: E402
+    ACTIVITY_API_CAP,
     COMMENT_PREVIEW_CHARS,
     _clamp_limit,
     _dumps,
     _fold,
     _resolve_account,
     _ts_to_date,
+    kanboard_check_project_access,
     kanboard_get_board,
     kanboard_get_comment,
     kanboard_get_task,
     kanboard_list_comments,
     kanboard_list_projects,
     kanboard_my_dashboard,
+    kanboard_recent_activity,
     kanboard_remove_comment,
     kanboard_update_comment,
 )
+
+
+def _http_403() -> httpx.HTTPStatusError:
+    """Reproduit le 403 que Kanboard rend sur getAllProjects a un non-admin."""
+    request = httpx.Request("POST", "https://kb.example.test/jsonrpc.php")
+    return httpx.HTTPStatusError(
+        "Forbidden", request=request, response=httpx.Response(403, request=request)
+    )
 
 
 def _projects(count: int) -> list[dict]:
@@ -613,3 +625,246 @@ class TestRemoveComment:
 
     async def test_requires_comment_id(self) -> None:
         assert "comment_id est obligatoire" in await kanboard_remove_comment()
+
+
+def _events(count: int, start_ts: int = 1753900000) -> list[dict]:
+    """Fabrique `count` evenements getProjectActivity, du plus recent au plus ancien."""
+    return [
+        {
+            "event_name": "task.update",
+            "date_creation": str(start_ts - i * 3600),
+            "author_name": "Alice",
+            "task": {"id": 1000 + i, "title": f"Carte {i}"},
+            "event_title": "Alice a modifie la tache",
+        }
+        for i in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+class TestRecentActivity:
+    async def test_full_window_is_flagged_as_capped(self) -> None:
+        """L'API plafonne a 50 sans le dire : 50 evenements ne sont pas « tout »."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_events(ACTIVITY_API_CAP),
+        ):
+            data = json.loads(await kanboard_recent_activity(project_id=262, limit=100))
+        assert data["api_cap_reached"] is True
+        assert data["api_cap"] == ACTIVITY_API_CAP
+        assert "plafonne" in data["note"]
+        assert data["oldest_available"] != ""
+
+    async def test_partial_window_is_not_flagged(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_events(12),
+        ):
+            data = json.loads(await kanboard_recent_activity(project_id=262, limit=100))
+        assert data["api_cap_reached"] is False
+        assert "note" not in data
+        assert data["count"] == 12
+
+    async def test_limit_can_only_narrow_never_widen(self) -> None:
+        """`limit` cote connecteur ne peut pas depasser ce que l'API a rendu."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_events(ACTIVITY_API_CAP),
+        ):
+            data = json.loads(await kanboard_recent_activity(project_id=262, limit=100))
+        assert data["count"] == ACTIVITY_API_CAP
+        assert len(data["events"]) == ACTIVITY_API_CAP
+
+    async def test_since_iso_older_than_window_is_flagged_incomplete(self) -> None:
+        """Le filtre date s'applique APRES le plafond : il ne remonte rien de plus."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_events(ACTIVITY_API_CAP),
+        ):
+            data = json.loads(
+                await kanboard_recent_activity(project_id=262, since_iso="2020-01-01")
+            )
+        assert data["window_incomplete"] is True
+
+    async def test_since_iso_inside_window_is_not_flagged(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_events(ACTIVITY_API_CAP),
+        ):
+            data = json.loads(
+                await kanboard_recent_activity(project_id=262, since_iso="2030-01-01")
+            )
+        assert "window_incomplete" not in data
+
+    async def test_empty_project_returns_empty_payload(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            data = json.loads(await kanboard_recent_activity(project_id=262))
+        assert data == {"count": 0, "api_cap_reached": False, "events": []}
+
+
+@pytest.mark.asyncio
+class TestNonAdminProjectFallback:
+    async def test_my_dashboard_survives_a_403_on_get_all_projects(self) -> None:
+        """getAllProjects est admin-only : as_user='agent' rendait un 403 sec."""
+        calls: list[str] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append(method)
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getAllProjects":
+                raise _http_403()
+            if method == "getMyProjects":
+                return [{"id": 262, "name": "Pilotage", "is_active": "1"}]
+            if method == "getAllTasks":
+                return []
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server._my_id_cache", {}
+        ), patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            out = await kanboard_my_dashboard(as_user="agent")
+        assert "403" not in out
+        assert "getMyProjects" in calls
+
+    async def test_list_projects_reports_the_narrowed_scope(self) -> None:
+        """Retomber sur les projets « membre » sans le dire ferait conclure a tort
+        qu'un projet n'existe pas."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                raise _http_403()
+            if method == "getMyProjects":
+                return _projects(3)
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(await kanboard_list_projects())
+        assert data["scope"] == "member"
+        assert data["total_available"] == 3
+
+    async def test_admin_scope_is_reported_as_all(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_projects(3),
+        ):
+            data = json.loads(await kanboard_list_projects())
+        assert data["scope"] == "all"
+
+    async def test_non_permission_errors_are_not_swallowed(self) -> None:
+        """Seul un refus declenche le repli : une panne doit rester visible."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                raise Exception("Kanboard API error: database is gone")
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            out = await kanboard_list_projects()
+        assert "database is gone" in out
+
+
+@pytest.mark.asyncio
+class TestCheckProjectAccess:
+    @staticmethod
+    def _dispatch(primary: dict, agent: dict, admin_agent: bool = False):
+        async def _inner(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getMyProjectsList":
+                return primary if as_user == "primary" else agent
+            if method == "getAllProjects":
+                if as_user == "primary" or admin_agent:
+                    return []
+                raise _http_403()
+            raise AssertionError(f"methode inattendue : {method}")
+
+        return _inner
+
+    async def test_reports_the_gap_between_accounts(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=self._dispatch(
+                primary={"262": "Pilotage", "31": "Site web"},
+                agent={"262": "Pilotage"},
+            ),
+        ):
+            data = json.loads(await kanboard_check_project_access())
+        assert data["accounts_configured"] == ["primary", "agent"]
+        assert data["primary"]["is_admin"] is True
+        assert data["agent"]["is_admin"] is False
+        assert data["only_primary_count"] == 1
+        assert data["only_primary"][0]["id"] == "31"
+        assert data["only_agent_count"] == 0
+
+    async def test_named_project_says_which_account_can_write(self) -> None:
+        """Le point du tool : savoir AVANT d'ecrire, pas apres un 403."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=self._dispatch(
+                primary={"262": "Pilotage", "31": "Site web"},
+                agent={"262": "Pilotage"},
+            ),
+        ):
+            data = json.loads(await kanboard_check_project_access(project_id=31))
+        assert data["writable_by"] == ["primary"]
+        assert data["project_name"] == "Site web"
+        assert "as_user='primary'" in data["hint"]
+        assert "agent" in data["hint"]
+
+    async def test_project_reachable_by_both_has_no_hint(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=self._dispatch(
+                primary={"262": "Pilotage"},
+                agent={"262": "Pilotage"},
+            ),
+        ):
+            data = json.loads(await kanboard_check_project_access(project_id=262))
+        assert data["writable_by"] == ["primary", "agent"]
+        assert "hint" not in data
+
+    async def test_unreachable_project_is_called_out(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=self._dispatch(primary={"262": "Pilotage"}, agent={}),
+        ):
+            data = json.loads(await kanboard_check_project_access(project_id=999))
+        assert data["writable_by"] == []
+        assert "hors de portee" in data["hint"]
+
+    async def test_gap_list_is_clamped_and_says_so(self) -> None:
+        primary = {str(i): f"Projet {i}" for i in range(1, 40)}
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=self._dispatch(primary=primary, agent={}),
+        ):
+            data = json.loads(await kanboard_check_project_access(limit=5))
+        assert data["only_primary_count"] == 39
+        assert len(data["only_primary"]) == 5
+        assert data["truncated"] is True
