@@ -8,7 +8,9 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "inno³ and contributors" }]
 keywords = ["mcp", "model-context-protocol", "dolibarr", "kanboard", "wordpress", "n8n", "matrix", "nextcloud", "hedgedoc", "gitlab"]
 dependencies = [
-    "mcp>=1.0.0",
+    # mcp 2.0 supprime mcp.server.fastmcp (FastMCP devient un paquet séparé) :
+    # rester sur la série 1.x tant que les serveurs ne sont pas migrés.
+    "mcp>=1.0.0,<2.0",
     "httpx>=0.27",
 ]
 
