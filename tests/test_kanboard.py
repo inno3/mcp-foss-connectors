@@ -27,14 +27,18 @@ from kanboard_mcp.server import (  # noqa: E402
     _resolve_account,
     _ts_to_date,
     kanboard_check_project_access,
+    kanboard_create_task_link,
     kanboard_get_board,
     kanboard_get_comment,
     kanboard_get_task,
     kanboard_list_comments,
+    kanboard_list_link_types,
     kanboard_list_projects,
+    kanboard_list_task_links,
     kanboard_my_dashboard,
     kanboard_recent_activity,
     kanboard_remove_comment,
+    kanboard_remove_task_link,
     kanboard_search_tasks,
     kanboard_update_comment,
 )
@@ -965,3 +969,217 @@ class TestCheckProjectAccess:
         assert data["only_primary_count"] == 39
         assert len(data["only_primary"]) == 5
         assert data["truncated"] is True
+
+
+# Types de liens tels que les renvoie getAllLinks. Les libelles suivent la
+# langue de l'instance et les ids ne sont pas garantis : c'est tout l'interet
+# de kanboard_list_link_types.
+_LINK_TYPES = [
+    {"id": "1", "label": "relates to", "opposite_id": "0"},
+    {"id": "2", "label": "blocks", "opposite_id": "3"},
+    {"id": "3", "label": "is blocked by", "opposite_id": "2"},
+    {"id": "8", "label": "is a milestone of", "opposite_id": "9"},
+    {"id": "9", "label": "targets milestone", "opposite_id": "8"},
+]
+
+
+def _task_link(**over: object) -> dict:
+    """Lien brut de getAllTaskLinks.
+
+    Piege reproduit fidelement : Kanboard aliase `opposite_task_id AS task_id`,
+    donc `task_id` designe ici la tache LIEE, pas celle qu'on a interrogee.
+    """
+    raw = {
+        "id": "17",
+        "task_id": "300",
+        "link_id": "9",
+        "label": "targets milestone",
+        "title": "Livrer le rapport",
+        "is_active": "1",
+        "column_id": "4",
+        "column_title": "En cours",
+        "project_id": "7",
+        "project_name": "Projet 7",
+        "date_due": "0",
+    }
+    raw.update(over)  # type: ignore[arg-type]
+    return raw
+
+
+@pytest.mark.asyncio
+class TestListLinkTypes:
+    async def test_presupposes_no_hardcoded_identifier(self) -> None:
+        """Les ids varient selon l'instance : ils doivent venir de l'API seule."""
+        with patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock
+        ) as mock_call:
+            mock_call.return_value = [
+                {"id": "42", "label": "jalon maison", "opposite_id": "43"},
+                {"id": "43", "label": "vise le jalon maison", "opposite_id": "42"},
+            ]
+            data = json.loads(await kanboard_list_link_types())
+
+        assert mock_call.call_args[0][0] == "getAllLinks"
+        # Aucun parametre d'identifiant n'est envoye : rien n'est presuppose.
+        assert mock_call.call_args[0][1:] in ((), (None,))
+        assert {t["id"] for t in data["link_types"]} == {42, 43}
+        assert data["count"] == 2
+
+    async def test_resolves_the_opposite_label(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _LINK_TYPES
+            data = json.loads(await kanboard_list_link_types())
+
+        milestone = [t for t in data["link_types"] if t["id"] == 8][0]
+        assert milestone["opposite_id"] == 9
+        assert milestone["opposite_label"] == "targets milestone"
+
+    async def test_symmetric_type_has_no_opposite(self) -> None:
+        """opposite_id=0 signifie « son propre oppose », pas « type 0 »."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _LINK_TYPES
+            data = json.loads(await kanboard_list_link_types())
+
+        relates = [t for t in data["link_types"] if t["id"] == 1][0]
+        assert relates["opposite_id"] is None
+        assert relates["opposite_label"] is None
+
+
+@pytest.mark.asyncio
+class TestCreateTaskLink:
+    async def test_transmits_the_three_expected_parameters(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = 17
+            data = json.loads(await kanboard_create_task_link(
+                task_id=100, opposite_task_id=300, link_id=9
+            ))
+
+        assert mock_call.call_args[0][0] == "createTaskLink"
+        assert mock_call.call_args[0][1] == {
+            "task_id": 100,
+            "opposite_task_id": 300,
+            "link_id": 9,
+        }
+        assert data["success"] is True
+        assert data["task_link_id"] == 17
+
+    async def test_says_the_reverse_link_is_automatic(self) -> None:
+        """Sans cette mention, le lien inverse se lit comme un doublon."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = 17
+            data = json.loads(await kanboard_create_task_link(
+                task_id=100, opposite_task_id=300, link_id=9
+            ))
+        assert "automatiquement" in data["note"]
+        assert mock_call.call_count == 1  # surtout pas un second appel inverse
+
+    async def test_missing_link_id_points_at_the_lookup_tool(self) -> None:
+        result = await kanboard_create_task_link(task_id=100, opposite_task_id=300)
+        assert "kanboard_list_link_types" in result
+
+    async def test_refuses_to_link_a_task_to_itself(self) -> None:
+        result = await kanboard_create_task_link(
+            task_id=100, opposite_task_id=100, link_id=9
+        )
+        assert "elle-meme" in result
+
+    async def test_requires_both_tasks(self) -> None:
+        assert "task_id" in await kanboard_create_task_link(opposite_task_id=300, link_id=9)
+        assert "opposite_task_id" in await kanboard_create_task_link(task_id=100, link_id=9)
+
+    async def test_silent_refusal_is_reported_as_failure(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = False
+            data = json.loads(await kanboard_create_task_link(
+                task_id=100, opposite_task_id=300, link_id=9
+            ))
+        assert data["success"] is False
+        assert "kanboard_list_link_types" in data["hint"]
+
+
+@pytest.mark.asyncio
+class TestListTaskLinks:
+    async def _links(self, rows: list[dict]) -> dict:
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllTaskLinks":
+                return rows
+            if method == "getAllLinks":
+                return _LINK_TYPES
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            return json.loads(await kanboard_list_task_links(task_id=100))
+
+    async def test_returns_title_and_status_not_just_an_id(self) -> None:
+        """C'est ce qui rend la sortie exploitable sans second appel."""
+        data = await self._links([_task_link()])
+        link = data["links"][0]
+        assert link["title"] == "Livrer le rapport"
+        assert link["status"] == "open"
+        assert link["column"] == "En cours"
+        assert link["project_name"] == "Projet 7"
+
+    async def test_closed_task_is_reported_as_closed(self) -> None:
+        data = await self._links([_task_link(is_active="0")])
+        assert data["links"][0]["status"] == "closed"
+
+    async def test_the_aliased_task_id_is_exposed_as_the_linked_task(self) -> None:
+        """Kanboard aliase opposite_task_id en task_id : ne pas le repropager."""
+        data = await self._links([_task_link()])
+        link = data["links"][0]
+        assert link["linked_task_id"] == 300      # la tache liee
+        assert data["task_id"] == 100             # celle qu'on a interrogee
+        assert "task_id" not in link              # pas de champ ambigu dans la ligne
+
+    async def test_removal_identifier_is_the_link_row_not_the_task(self) -> None:
+        data = await self._links([_task_link()])
+        link = data["links"][0]
+        assert link["task_link_id"] == 17
+        assert link["task_link_id"] != link["linked_task_id"]
+
+    async def test_no_links_is_an_empty_list_not_an_error(self) -> None:
+        data = await self._links([])
+        assert data["count"] == 0
+        assert data["links"] == []
+
+    async def test_link_labels_survive_a_failing_type_lookup(self) -> None:
+        """Un getAllLinks en echec ne doit pas faire perdre la liste des liens."""
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllTaskLinks":
+                return [_task_link()]
+            raise Exception("getAllLinks indisponible")
+
+        with patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            data = json.loads(await kanboard_list_task_links(task_id=100))
+        assert data["count"] == 1
+        assert data["links"][0]["relation"] == "targets milestone"  # libelle brut
+
+    async def test_requires_a_task_id(self) -> None:
+        assert "task_id est obligatoire" in await kanboard_list_task_links()
+
+
+@pytest.mark.asyncio
+class TestRemoveTaskLink:
+    async def test_sends_the_link_row_id(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = True
+            data = json.loads(await kanboard_remove_task_link(task_link_id=17))
+
+        assert mock_call.call_args[0][0] == "removeTaskLink"
+        assert mock_call.call_args[0][1] == {"task_link_id": 17}
+        assert data["success"] is True
+
+    async def test_missing_id_warns_against_passing_a_task_id(self) -> None:
+        result = await kanboard_remove_task_link()
+        assert "task_link_id" in result
+        assert "linked_task_id" in result
+
+    async def test_refusal_is_not_reported_as_success(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = False
+            data = json.loads(await kanboard_remove_task_link(task_link_id=17))
+        assert data["success"] is False

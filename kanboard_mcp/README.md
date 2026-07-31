@@ -16,7 +16,7 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
-## Tools (49)
+## Tools (53)
 
 - `kanboard_my_dashboard` — Tableau de bord personnel Kanboard
 - `kanboard_list_projects` — Liste tous les projets Kanboard accessibles
@@ -64,6 +64,10 @@ environment variables — no host, login or secret is baked into the code.
 - `kanboard_update_subtask` — Modifie une sous-tache existante
 - `kanboard_delete_subtask` — Supprime definitivement une sous-tache
 - `kanboard_toggle_subtask_status` — Bascule le statut d'une sous-tache (cycle todo -> in_progress -> done -> todo)
+- `kanboard_list_link_types` — Liste les types de liens entre taches configures sur l'instance
+- `kanboard_list_task_links` — Liste les liens d'une tache, avec titre et statut des taches liees
+- `kanboard_create_task_link` — Cree un lien entre deux taches (jalon, blocage...)
+- `kanboard_remove_task_link` — Supprime un lien entre deux taches
 - `kanboard_check_project_access` — Diagnostic : quels projets chaque compte configure peut-il atteindre
 - `kanboard_who_am_i` — Diagnostic : affiche l'identite de l'utilisateur authentifie pour un compte
 - `kanboard_list_accounts` — Liste les comptes Kanboard configures sur ce MCP (multi-compte)
@@ -136,6 +140,29 @@ Its `limit` argument can only narrow that window, never widen it. Because
 `since_iso` filters *after* the cap, asking for a date older than the window
 cannot bring back the missing history; that case is flagged with
 `window_incomplete`.
+
+## Task links: three traps
+
+Kanboard models milestones as **link types between tasks**, so attaching a task
+to a milestone means creating a link — but three details bite.
+
+**Link type ids are instance-specific.** They depend on the instance language
+and on any customisation, so a hardcoded id silently creates the wrong relation
+on the next instance. Always resolve the id from `kanboard_list_link_types`,
+which also returns `opposite_label` so the pair reads correctly. A type with
+`opposite_id: null` is symmetric — it is its own opposite.
+
+**The reverse link is created for you.** `kanboard_create_task_link` produces
+the relation on *both* tasks in a single call. Seeing it appear on the opposite
+task is not a duplicate, and calling the tool again in the other direction is
+wrong.
+
+**`getAllTaskLinks` returns a misleading `task_id`.** Kanboard aliases
+`opposite_task_id AS task_id`, so that column is the *linked* task, never the
+one you asked about. `kanboard_list_task_links` re-exposes it as
+`linked_task_id`, and surfaces the link row's own id as `task_link_id` — that
+last one is what `kanboard_remove_task_link` expects. Passing a task id there
+would target an unrelated link.
 
 ## License
 

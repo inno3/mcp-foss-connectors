@@ -2692,6 +2692,251 @@ async def kanboard_remove_comment(comment_id: int = 0, as_user: str = "") -> str
 
 
 # ---------------------------------------------------------------------------
+# Tools -- Liens entre taches
+# ---------------------------------------------------------------------------
+
+
+def _link_row(raw: dict, types: dict[int, str] | None = None) -> dict:
+    """Projette un lien brut de getAllTaskLinks sur des champs exploitables.
+
+    Kanboard renvoie ici un alias trompeur : la colonne `task_id` porte en
+    realite l'identifiant de la tache LIEE (`opposite_task_id AS task_id`), pas
+    celui de la tache interrogee. On la reexpose sous `linked_task_id` pour que
+    personne n'ait a connaitre ce detail.
+
+    Les autres champs (titre, colonne, projet, echeance) decrivent eux aussi la
+    tache liee : c'est ce qui rend la sortie lisible sans second appel.
+    """
+    link_id = _int_or_none(raw.get("link_id"))
+    row = {
+        # Identifiant de la LIGNE de lien : c'est lui qu'attend removeTaskLink,
+        # surtout pas un task_id.
+        "task_link_id": _int_or_none(raw.get("id")),
+        "linked_task_id": _int_or_none(raw.get("task_id")),
+        "relation": raw.get("label"),
+        "title": raw.get("title"),
+        "status": "open" if str(raw.get("is_active")) == "1" else "closed",
+        "column": raw.get("column_title"),
+        "project_id": _int_or_none(raw.get("project_id")),
+        "project_name": raw.get("project_name"),
+        "date_due": _ts_to_date(raw.get("date_due")),
+    }
+    if link_id is not None:
+        row["link_id"] = link_id
+        if types and link_id in types:
+            row["relation"] = types[link_id]
+    return row
+
+
+def _int_or_none(value: Any) -> int | None:
+    """Convertit un identifiant Kanboard (souvent une chaine) en entier."""
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@mcp.tool()
+async def kanboard_list_link_types(as_user: str = "") -> str:
+    """Liste les types de liens entre taches configures sur l'instance.
+
+    A appeler AVANT kanboard_create_task_link : les identifiants de types de
+    liens varient d'une instance a l'autre selon la langue et les
+    personnalisations. Ne jamais coder un id en dur — le resoudre ici par son
+    libelle.
+
+    Les liens de jalon sont une paire : un type « etape importante » et son
+    oppose « vise l'etape importante ». Le libelle exact depend de la langue de
+    l'instance.
+
+    Parametres :
+    - as_user : compte de lecture ("" = defaut, "primary"/"agent")
+
+    Retourne pour chaque type : id, label, opposite_id et opposite_label (le
+    libelle de l'oppose, resolu ici pour eviter un second appel).
+    """
+    try:
+        links = await kb_call("getAllLinks", as_user=as_user)
+        by_id = {_int_or_none(link.get("id")): link.get("label") for link in (links or [])}
+        rows = []
+        for link in links or []:
+            opposite_id = _int_or_none(link.get("opposite_id"))
+            rows.append({
+                "id": _int_or_none(link.get("id")),
+                "label": link.get("label"),
+                # opposite_id vaut 0 pour un type symetrique (« est lie a »),
+                # qui est son propre oppose : pas de libelle a resoudre.
+                "opposite_id": opposite_id or None,
+                "opposite_label": by_id.get(opposite_id) if opposite_id else None,
+            })
+        return _dumps({"count": len(rows), "link_types": rows})
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_list_task_links(task_id: int = 0, as_user: str = "") -> str:
+    """Liste les liens d'une tache, avec le titre et le statut des taches liees.
+
+    La sortie est exploitable sans second appel : chaque lien porte le titre, le
+    statut (open/closed), la colonne, le projet et l'echeance de la tache liee.
+
+    Parametres :
+    - task_id : ID de la tache (obligatoire)
+    - as_user : compte de lecture ("" = defaut, "primary"/"agent")
+
+    Retourne pour chaque lien : task_link_id (identifiant de la LIGNE de lien,
+    a passer a kanboard_remove_task_link), linked_task_id, relation, title,
+    status, column, project_id, project_name, date_due.
+    """
+    if not task_id:
+        return "Erreur : task_id est obligatoire."
+    try:
+        try:
+            links = await kb_call("getAllTaskLinks", {"task_id": task_id}, as_user=as_user)
+        except Exception as exc:
+            if _is_permission_error(exc):
+                _, _, account = _get_credentials(as_user)
+                return _not_found_or_forbidden("task", task_id, account, str(exc))
+            raise
+
+        # Les libelles sont resolus depuis getAllLinks : un echec ici ne doit pas
+        # faire perdre la liste des liens, on garde alors le libelle brut.
+        types: dict[int, str] = {}
+        try:
+            for link in (await kb_call("getAllLinks", as_user=as_user)) or []:
+                lid = _int_or_none(link.get("id"))
+                if lid is not None:
+                    types[lid] = link.get("label")
+        except Exception:
+            logger.warning("getAllLinks indisponible : libelles de liens laisses bruts")
+
+        rows = [_link_row(link, types) for link in (links or [])]
+        return _dumps({"task_id": task_id, "count": len(rows), "links": rows})
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_create_task_link(
+    task_id: int = 0,
+    opposite_task_id: int = 0,
+    link_id: int = 0,
+    as_user: str = "",
+) -> str:
+    """Cree un lien entre deux taches (rattachement a un jalon, blocage...).
+
+    Confirmation utilisateur requise avant execution.
+
+    Kanboard cree AUTOMATIQUEMENT le lien inverse sur la tache opposee : la
+    relation apparait des deux cotes apres un seul appel. Ce n'est pas un
+    doublon, et il ne faut surtout pas rappeler ce tool en sens inverse.
+
+    Le link_id doit etre resolu avec kanboard_list_link_types : les
+    identifiants varient d'une instance a l'autre. Ne jamais en coder un en dur.
+
+    Parametres :
+    - task_id : ID de la tache source (obligatoire)
+    - opposite_task_id : ID de la tache liee (obligatoire)
+    - link_id : ID du type de lien (obligatoire, cf. kanboard_list_link_types)
+    - as_user : compte qui cree le lien ("" = defaut, "primary"/"agent")
+
+    Retourne l'ID du lien cree.
+    """
+    if not task_id:
+        return "Erreur : task_id est obligatoire."
+    if not opposite_task_id:
+        return "Erreur : opposite_task_id est obligatoire."
+    if not link_id:
+        return (
+            "Erreur : link_id est obligatoire. Recuperer l'identifiant du type "
+            "de lien avec kanboard_list_link_types (il varie selon l'instance)."
+        )
+    if task_id == opposite_task_id:
+        return "Erreur : une tache ne peut pas etre liee a elle-meme."
+    try:
+        try:
+            created = await kb_call("createTaskLink", {
+                "task_id": task_id,
+                "opposite_task_id": opposite_task_id,
+                "link_id": link_id,
+            }, as_user=as_user)
+        except Exception as exc:
+            if _is_permission_error(exc):
+                _, _, account = _get_credentials(as_user)
+                return _not_found_or_forbidden("task", task_id, account, str(exc))
+            raise
+
+        if not created:
+            return _dumps({
+                "success": False,
+                "task_id": task_id,
+                "opposite_task_id": opposite_task_id,
+                "link_id": link_id,
+                "hint": (
+                    "Kanboard a refuse la creation sans lever d'erreur. Verifier "
+                    "que les deux taches existent et que le link_id figure bien "
+                    "dans kanboard_list_link_types."
+                ),
+            })
+
+        return _dumps({
+            "success": True,
+            "task_link_id": _int_or_none(created),
+            "task_id": task_id,
+            "opposite_task_id": opposite_task_id,
+            "link_id": link_id,
+            "as_user": _resolve_account(as_user),
+            "note": ("Le lien inverse a ete cree automatiquement sur la tache "
+                     f"#{opposite_task_id} : ce n'est pas un doublon."),
+        })
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_remove_task_link(task_link_id: int = 0, as_user: str = "") -> str:
+    """Supprime un lien entre deux taches.
+
+    ATTENTION : suppression irreversible. Kanboard retire le lien ET son
+    inverse sur la tache opposee, sans confirmation ni historique.
+
+    Confirmation utilisateur requise avant execution.
+
+    Le parametre est l'identifiant de la LIGNE de lien (`task_link_id` rendu par
+    kanboard_list_task_links), PAS un task_id : passer un identifiant de tache
+    supprimerait un lien sans rapport, ou echouerait silencieusement.
+
+    Parametres :
+    - task_link_id : ID du lien (obligatoire, cf. kanboard_list_task_links)
+    - as_user : compte qui supprime ("" = defaut, "primary"/"agent")
+
+    Retourne la confirmation de suppression.
+    """
+    if not task_link_id:
+        return (
+            "Erreur : task_link_id est obligatoire. Le recuperer avec "
+            "kanboard_list_task_links (champ task_link_id, pas linked_task_id)."
+        )
+    try:
+        removed = await kb_call(
+            "removeTaskLink", {"task_link_id": task_link_id}, as_user=as_user
+        )
+        return _dumps({
+            "success": bool(removed),
+            "task_link_id": task_link_id,
+            "as_user": _resolve_account(as_user),
+            "note": ("Le lien inverse a ete retire en meme temps."
+                     if removed else
+                     "Kanboard a refuse la suppression : verifier le task_link_id."),
+        })
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
 # Tools -- Diagnostic (multi-compte)
 # ---------------------------------------------------------------------------
 
