@@ -264,6 +264,54 @@ def _date_str_to_ts(date_str: str) -> int:
     return int(d.timestamp())
 
 
+def _seconds_to_hours(value: Any) -> float | None:
+    """Convertit une durée Dolibarr (secondes) en heures, arrondies à 2 décimales.
+
+    Dolibarr stocke et renvoie TOUTES les durées en secondes, le plus souvent
+    sous forme de chaîne ('14400'). Exposer cette valeur brute sous un nom en
+    heures fait conclure à un temps 3600 fois trop élevé, sans aucune erreur
+    visible — d'où cette conversion systématique.
+
+    Retourne None si la valeur est absente ou non numérique : surtout pas 0,
+    qui se lirait comme « aucun temps passé » alors que l'information manque.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return round(float(value) / 3600, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _seconds_int(value: Any) -> int | None:
+    """Renvoie la durée brute Dolibarr en secondes (entier), ou None.
+
+    Conservée à côté de la valeur en heures pour ne rien perdre de la
+    précision d'origine (l'arrondi à 2 décimales perd jusqu'à 18 secondes).
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _error_body(exc: httpx.HTTPStatusError) -> str:
+    """Extrait le message d'erreur renvoyé par Dolibarr, ou '' si illisible.
+
+    Une erreur Dolibarr a la forme {"error": {"code":…, "message":…}} ; certains
+    échecs (fatale PHP) ne rendent qu'un corps vide.
+    """
+    try:
+        body = exc.response.json()
+    except Exception:
+        return (exc.response.text or "").strip()[:500]
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return str(body["error"].get("message") or "")[:500]
+    return json.dumps(body, ensure_ascii=False)[:500]
+
+
 def _format_error(exc: Exception) -> str:
     """Formate une erreur HTTP en message lisible."""
     if isinstance(exc, DolibarrAPIError):
@@ -418,7 +466,13 @@ async def dolibarr_list_tasks(
     - assigned_to : filtrer par utilisateur assigné (ID)
     - limit : nombre max de résultats
 
-    Retourne : ref, label, progression, dates, temps passé.
+    Retourne : ref, label, progression, dates, charge prévue et temps passé.
+
+    Durées — Dolibarr les renvoie en SECONDES ; chacune est exposée deux fois :
+    - planned_hours / spent_hours   : heures, arrondies à 2 décimales
+    - planned_seconds / spent_seconds : valeur brute Dolibarr, sans perte
+    Une tâche portant 32,5 h ressort donc à spent_hours=32.5 et
+    spent_seconds=117000. Ne jamais lire spent_seconds comme des heures.
     """
     try:
         if not project_id:
@@ -436,8 +490,10 @@ async def dolibarr_list_tasks(
                 "progress": t.get("progress"),
                 "date_start": _ts_to_date(t.get("date_start")),
                 "date_end": _ts_to_date(t.get("date_end")),
-                "planned_hours": t.get("planned_workload"),
-                "spent_hours": t.get("duration_effective"),
+                "planned_hours": _seconds_to_hours(t.get("planned_workload")),
+                "planned_seconds": _seconds_int(t.get("planned_workload")),
+                "spent_hours": _seconds_to_hours(t.get("duration_effective")),
+                "spent_seconds": _seconds_int(t.get("duration_effective")),
                 "assigned_to": t.get("fk_user_resp") or t.get("fk_user_creat"),
             }
             if assigned_to and str(entry.get("assigned_to")) != str(assigned_to):
@@ -448,6 +504,94 @@ async def dolibarr_list_tasks(
 
     except Exception as exc:
         return _format_error(exc)
+
+
+# Route d'ajout de temps passé, vérifiée contre le swagger servi par l'API
+# elle-même (Dolibarr v23). Trois routes se ressemblent, une seule accepte
+# un POST — les deux autres rendent un 404 sec, indiscernable d'un problème
+# de droits ou d'identifiant :
+#   POST tasks/{id}/addtimespent   → la bonne
+#   GET  tasks/{id}/timespent      → lecture seule, un POST ici rend 404
+#   .../projects/tasks/{id}/…      → n'existe pas : la classe Tasks est montée
+#                                    à la racine, jamais sous /projects
+TIMESPENT_ENDPOINT = "tasks/{task_id}/addtimespent"
+
+
+async def _task_exists(task_id: int) -> bool | None:
+    """True/False selon que la tâche existe, None si le diagnostic échoue lui-même.
+
+    Sert uniquement à trancher entre les causes d'un échec d'imputation ; on ne
+    l'appelle jamais sur le chemin nominal.
+    """
+    try:
+        return bool(await api_get(f"tasks/{task_id}"))
+    except httpx.HTTPStatusError as exc:
+        return False if exc.response.status_code == 404 else None
+    except Exception:
+        return None
+
+
+async def _log_time_error(exc: Exception, task_id: int, endpoint: str) -> str:
+    """Explique l'échec d'une imputation de temps, cause par cause.
+
+    Un « 404 : ressource non trouvée » nu est indébogable côté client : il
+    recouvre des causes qui n'appellent pas du tout la même correction. On
+    interroge la tâche pour trancher, et on remonte toujours le corps d'erreur
+    Dolibarr quand il y en a un.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return _format_error(exc)
+
+    status = exc.response.status_code
+    payload: dict[str, Any] = {
+        "success": False,
+        "task_id": task_id,
+        "endpoint": endpoint,
+        "http_status": status,
+        "dolibarr_error": _error_body(exc) or None,
+    }
+
+    if status in (401, 403):
+        payload["cause"] = "droits_insuffisants"
+        payload["hint"] = (
+            "Dolibarr refuse l'accès à cette tâche. Vérifier que la clé API "
+            "porte le droit « créer/modifier » sur les projets, et que le "
+            "user_id visé est bien affecté à la tâche."
+        )
+        return _dumps(payload)
+
+    exists = await _task_exists(task_id)
+
+    if exists is False:
+        payload["cause"] = "tache_inexistante"
+        payload["hint"] = (
+            f"La tâche #{task_id} est introuvable. Lister les tâches du projet "
+            "avec dolibarr_list_tasks pour récupérer un id valide."
+        )
+    elif status == 404:
+        # La tâche répond : ce n'est donc pas elle qui manque, c'est la route.
+        payload["cause"] = "route_ou_methode_invalide"
+        payload["hint"] = (
+            f"La tâche #{task_id} existe, mais {endpoint} rend un 404 : la route "
+            "ou le verbe ne correspond pas à cette version de Dolibarr. "
+            "L'ajout de temps est un POST sur tasks/{id}/addtimespent — "
+            "tasks/{id}/timespent est en lecture seule."
+        )
+    elif exists is True:
+        payload["cause"] = "utilisateur_non_affecte_ou_erreur_interne"
+        payload["hint"] = (
+            f"La tâche #{task_id} existe et la route répond. Cause la plus "
+            "fréquente : l'utilisateur visé n'est pas affecté à la tâche "
+            "(Dolibarr rejette l'imputation sans message explicite). "
+            "Vérifier l'affectation, ou passer un user_id explicite."
+        )
+    else:
+        payload["cause"] = "indetermine"
+        payload["hint"] = (
+            "L'appel a échoué et la tâche n'a pas pu être interrogée pour "
+            "trancher. Vérifier la connectivité et les droits de la clé API."
+        )
+    return _dumps(payload)
 
 
 @mcp.tool()
@@ -467,7 +611,12 @@ async def dolibarr_log_time(
     - note : commentaire sur le temps passé
     - user_id : ID utilisateur (défaut: utilisateur API)
 
-    Retourne : confirmation avec le temps total passé sur la tâche.
+    La durée est saisie en HEURES et convertie en secondes pour l'API, qui
+    n'accepte que des secondes (1.5 → 5400).
+
+    Retourne : confirmation avec le temps total passé sur la tâche, en heures
+    (`total_spent_hours`) et en secondes brutes (`total_spent_seconds`).
+    En cas d'échec, retourne la cause identifiée (`cause`) plutôt qu'un 404 nu.
     """
     try:
         task_id = int(task_id) if task_id else 0
@@ -498,21 +647,27 @@ async def dolibarr_log_time(
         if user_id:
             data["user_id"] = user_id
 
-        await api_post(f"tasks/{task_id}/addtimespent", data)
+        endpoint = TIMESPENT_ENDPOINT.format(task_id=task_id)
+        try:
+            await api_post(endpoint, data)
+        except Exception as exc:
+            return await _log_time_error(exc, task_id, endpoint)
 
         # Re-fetch task to get updated totals
         task = await api_get(f"tasks/{task_id}")
-        spent_h = round((task.get("duration_effective") or 0) / 3600, 1)
-        planned_h = round((task.get("planned_workload") or 0) / 3600, 1)
 
         return _dumps({
-            "logged": f"{duration}h",
+            "success": True,
+            "logged_hours": duration,
+            "logged_seconds": duration_seconds,
             "task_id": task_id,
             "task_ref": task.get("ref"),
             "task_label": task.get("label"),
-            "total_spent": f"{spent_h}h",
-            "planned": f"{planned_h}h" if planned_h else None,
-            "date": date or datetime.now().strftime("%Y-%m-%d"),
+            "total_spent_hours": _seconds_to_hours(task.get("duration_effective")),
+            "total_spent_seconds": _seconds_int(task.get("duration_effective")),
+            "planned_hours": _seconds_to_hours(task.get("planned_workload")),
+            "planned_seconds": _seconds_int(task.get("planned_workload")),
+            "date": dt.strftime("%Y-%m-%d"),
             "note": note,
         })
 
@@ -591,7 +746,8 @@ async def dolibarr_close_task(
     - task_id  : ID de la tâche (obligatoire)
     - progress : avancement en % à appliquer (défaut: 100 = terminée)
 
-    Retourne les infos mises à jour de la tâche.
+    Retourne les infos mises à jour de la tâche, temps passé en heures
+    (`total_spent_hours`) et en secondes brutes (`total_spent_seconds`).
     """
     try:
         if not task_id:
@@ -601,7 +757,6 @@ async def dolibarr_close_task(
         await api_put(f"tasks/{task_id}", {"progress": progress})
 
         task = await api_get(f"tasks/{task_id}")
-        spent_h = round((task.get("duration_effective") or 0) / 3600, 1)
 
         return _dumps({
             "success": True,
@@ -609,7 +764,8 @@ async def dolibarr_close_task(
             "ref": task.get("ref"),
             "label": task.get("label"),
             "progress": progress,
-            "total_spent": f"{spent_h}h",
+            "total_spent_hours": _seconds_to_hours(task.get("duration_effective")),
+            "total_spent_seconds": _seconds_int(task.get("duration_effective")),
             "status": "terminée" if progress == 100 else f"{progress}%",
         })
 
