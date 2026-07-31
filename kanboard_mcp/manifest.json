@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.11.1",
-  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), multi-comptes (primary humain + agent Claude). 49 tools.",
+  "version": "0.12.0",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -266,6 +266,22 @@
     {
       "name": "kanboard_toggle_subtask_status",
       "description": "Cycler le statut d'une sous-tâche (todo/in_progress/done)"
+    },
+    {
+      "name": "kanboard_list_link_types",
+      "description": "Liste les types de liens entre tâches (ids variables selon l'instance)"
+    },
+    {
+      "name": "kanboard_list_task_links",
+      "description": "Liste les liens d'une tâche, avec titre et statut des tâches liées"
+    },
+    {
+      "name": "kanboard_create_task_link",
+      "description": "Crée un lien entre deux tâches (jalon, blocage…) — lien inverse automatique"
+    },
+    {
+      "name": "kanboard_remove_task_link",
+      "description": "Supprime un lien entre deux tâches (irréversible)"
     }
   ],
   "keywords": [
