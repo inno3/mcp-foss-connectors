@@ -12,16 +12,26 @@ import pytest
 os.environ.setdefault("KANBOARD_URL", "https://kb.example.test/jsonrpc.php")
 os.environ.setdefault("KANBOARD_USER", "alice")
 os.environ.setdefault("KANBOARD_TOKEN", "tok-primary")
+# Deux comptes configures : c'est le mode nominal du connecteur, et la seule
+# configuration ou la contrainte d'auteur sur les commentaires est jouable.
+os.environ.setdefault("KANBOARD_USER_ALT", "bot")
+os.environ.setdefault("KANBOARD_TOKEN_ALT", "tok-agent")
 
 from kanboard_mcp.server import (  # noqa: E402
+    COMMENT_PREVIEW_CHARS,
     _clamp_limit,
     _dumps,
     _fold,
     _resolve_account,
     _ts_to_date,
     kanboard_get_board,
+    kanboard_get_comment,
+    kanboard_get_task,
+    kanboard_list_comments,
     kanboard_list_projects,
     kanboard_my_dashboard,
+    kanboard_remove_comment,
+    kanboard_update_comment,
 )
 
 
@@ -38,6 +48,21 @@ def _projects(count: int) -> list[dict]:
         }
         for i in range(1, count + 1)
     ]
+
+
+def _comment(comment_id: int = 7, text: str = "Texte initial", user_id: str = "84") -> dict:
+    """Fabrique un commentaire brut tel que le renvoie getComment/getAllComments."""
+    return {
+        "id": str(comment_id),
+        "task_id": "42",
+        "user_id": user_id,
+        "username": "bot",
+        "name": "Agent IA",
+        "date_creation": "1609459200",
+        "date_modification": "1609545600",
+        "comment": text,
+        "secret": "drop",
+    }
 
 
 def _board(task_count: int) -> list[dict]:
@@ -294,3 +319,297 @@ class TestGetBoard:
         col = data[0]["columns"][0]
         assert len(col["tasks"]) == 1
         assert col["truncated"] is True
+
+
+def _task_calls(comments: list[dict]):
+    """Aiguille kb_call par methode pour les tests de kanboard_get_task."""
+    task = {
+        "id": 42,
+        "title": "Carte de test",
+        "description": "d",
+        "project_id": 262,
+        "project_name": "Pilotage",
+        "column_name": "En cours",
+        "swimlane_name": "Default",
+        "assignee_name": "Alice",
+        "creator_name": "Alice",
+    }
+
+    async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+        if method == "getTask":
+            return task
+        if method == "getAllComments":
+            return comments
+        if method == "getAllSubtasks":
+            return []
+        raise AssertionError(f"methode inattendue : {method}")
+
+    return _dispatch
+
+
+@pytest.mark.asyncio
+class TestGetTaskComments:
+    async def test_long_comment_is_flagged_as_truncated(self) -> None:
+        """Le [:500] muet faisait relire un commentaire coupe comme complet."""
+        long_text = "x" * (COMMENT_PREVIEW_CHARS + 140)
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_task_calls([_comment(text=long_text)]),
+        ):
+            data = json.loads(await kanboard_get_task(task_id=42))
+        entry = data["comments"][0]
+        assert entry["comment_truncated"] is True
+        assert entry["comment_full_length"] == COMMENT_PREVIEW_CHARS + 140
+        assert len(entry["content"]) == COMMENT_PREVIEW_CHARS
+
+    async def test_short_comment_carries_no_marker(self) -> None:
+        """L'absence de marqueur doit valoir « contenu complet »."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_task_calls([_comment(text="court")]),
+        ):
+            data = json.loads(await kanboard_get_task(task_id=42))
+        entry = data["comments"][0]
+        assert entry["content"] == "court"
+        assert "comment_truncated" not in entry
+        assert "comment_full_length" not in entry
+
+    async def test_full_comments_returns_whole_text(self) -> None:
+        long_text = "y" * (COMMENT_PREVIEW_CHARS + 300)
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_task_calls([_comment(text=long_text)]),
+        ):
+            data = json.loads(await kanboard_get_task(task_id=42, full_comments=True))
+        entry = data["comments"][0]
+        assert entry["content"] == long_text
+        assert "comment_truncated" not in entry
+
+
+@pytest.mark.asyncio
+class TestListComments:
+    async def test_empty_returns_empty_list(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_call:
+            raw = await kanboard_list_comments(task_id=42)
+        assert mock_call.call_args[0][0] == "getAllComments"
+        assert json.loads(raw) == []
+
+    async def test_exposes_documented_fields_without_truncation(self) -> None:
+        """C'est le tool de reference avant reecriture : aucune coupure permise."""
+        long_text = "z" * (COMMENT_PREVIEW_CHARS + 900)
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=[_comment(text=long_text)],
+        ):
+            rows = json.loads(await kanboard_list_comments(task_id=42))
+        row = rows[0]
+        assert row["comment"] == long_text
+        assert set(row) == {
+            "id", "task_id", "user_id", "username", "name",
+            "date_creation", "date_modification", "comment",
+        }
+        assert row["date_creation"] != ""
+
+    async def test_requires_task_id(self) -> None:
+        assert "task_id est obligatoire" in await kanboard_list_comments()
+
+
+@pytest.mark.asyncio
+class TestGetComment:
+    async def test_returns_full_content(self) -> None:
+        long_text = "w" * (COMMENT_PREVIEW_CHARS + 50)
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_comment(text=long_text),
+        ) as mock_call:
+            row = json.loads(await kanboard_get_comment(comment_id=7))
+        assert mock_call.call_args[0][0] == "getComment"
+        assert mock_call.call_args[0][1] == {"comment_id": 7}
+        assert row["comment"] == long_text
+        assert "secret" not in row
+
+    async def test_missing_comment_is_reported(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            assert "introuvable" in await kanboard_get_comment(comment_id=7)
+
+
+@pytest.mark.asyncio
+class TestUpdateComment:
+    async def test_sends_id_and_content_and_returns_previous(self) -> None:
+        """Kanboard ne versionne pas : sans previous_comment, l'ancien texte est perdu."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="Ancien texte")
+            if method == "updateComment":
+                return True
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ) as mock_call:
+            data = json.loads(
+                await kanboard_update_comment(comment_id=7, comment="Nouveau texte")
+            )
+        update_call = [c for c in mock_call.call_args_list if c[0][0] == "updateComment"][0]
+        # L'API attend `content`, le parametre expose s'appelle `comment`.
+        assert update_call[0][1] == {"id": 7, "content": "Nouveau texte"}
+        assert data["success"] is True
+        assert data["previous_comment"] == "Ancien texte"
+        assert data["new_comment"] == "Nouveau texte"
+
+    async def test_missing_comment_is_not_overwritten(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_call:
+            out = await kanboard_update_comment(comment_id=7, comment="x")
+        assert "introuvable" in out
+        assert [c[0][0] for c in mock_call.call_args_list] == ["getComment"]
+
+    async def test_requires_both_arguments(self) -> None:
+        assert "comment_id est obligatoire" in await kanboard_update_comment(comment="x")
+        assert "comment est obligatoire" in await kanboard_update_comment(comment_id=7)
+
+    async def test_bare_false_becomes_an_author_message(self) -> None:
+        """Un `false` nu est indebogable : il faut nommer l'auteur et le compte."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="Ancien texte")
+            if method == "updateComment":
+                return False
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(
+                await kanboard_update_comment(comment_id=7, comment="x", as_user="primary")
+            )
+        assert data["success"] is False
+        assert data["error"] == "permission_denied"
+        assert data["attempted_as_user"] == "primary"
+        assert data["comment_author"] == "Agent IA"
+        assert "as_user='agent'" in data["hint"]
+
+    async def test_permission_exception_becomes_an_author_message(self) -> None:
+        """Selon la version, le refus d'auteur ressort en erreur JSON-RPC."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="Ancien texte")
+            if method == "updateComment":
+                raise Exception("Kanboard API error: Access Forbidden")
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(
+                await kanboard_update_comment(comment_id=7, comment="x", as_user="agent")
+            )
+        assert data["error"] == "permission_denied"
+        assert data["attempted_as_user"] == "agent"
+        assert "as_user='primary'" in data["hint"]
+        assert "Forbidden" in data["api_detail"]
+
+    async def test_single_account_setup_does_not_suggest_a_phantom_account(self) -> None:
+        """Sans compte agent, "reessayer avec l'autre" enverrait sur une fausse piste.
+
+        Tout retombe sur primary : le refus signifie alors que le commentaire
+        appartient a un utilisateur Kanboard tiers.
+        """
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="Ancien texte")
+            if method == "updateComment":
+                return False
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with (
+            patch("kanboard_mcp.server.KANBOARD_USER_ALT", ""),
+            patch("kanboard_mcp.server.KANBOARD_TOKEN_ALT", ""),
+            patch(
+                "kanboard_mcp.server.kb_call",
+                new_callable=AsyncMock,
+                side_effect=_dispatch,
+            ),
+        ):
+            data = json.loads(
+                await kanboard_update_comment(comment_id=7, comment="x", as_user="agent")
+            )
+        # "agent" demande mais non configure : c'est primary qui a signe.
+        assert data["attempted_as_user"] == "primary"
+        assert "as_user=" not in data["hint"]
+        assert "Aucun second compte" in data["hint"]
+
+
+@pytest.mark.asyncio
+class TestRemoveComment:
+    async def test_returns_deleted_content(self) -> None:
+        """Kanboard ne garde aucune copie : le texte doit survivre dans la reponse."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="A supprimer")
+            if method == "removeComment":
+                return True
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ) as mock_call:
+            data = json.loads(await kanboard_remove_comment(comment_id=7))
+        remove_call = [c for c in mock_call.call_args_list if c[0][0] == "removeComment"][0]
+        assert remove_call[0][1] == {"comment_id": 7}
+        assert data["success"] is True
+        assert data["deleted_comment"] == "A supprimer"
+        assert data["deleted_comment_author"] == "Agent IA"
+        assert data["task_id"] == "42"
+
+    async def test_refusal_names_the_other_account(self) -> None:
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getComment":
+                return _comment(text="A supprimer")
+            if method == "removeComment":
+                return False
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(
+                await kanboard_remove_comment(comment_id=7, as_user="primary")
+            )
+        assert data["success"] is False
+        assert data["action"] == "supprimer"
+        assert "as_user='agent'" in data["hint"]
+
+    async def test_requires_comment_id(self) -> None:
+        assert "comment_id est obligatoire" in await kanboard_remove_comment()

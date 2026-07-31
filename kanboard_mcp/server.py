@@ -52,6 +52,11 @@ KANBOARD_DEFAULT_AS_USER = (os.environ.get("KANBOARD_DEFAULT_AS_USER", "primary"
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
 
+# Apercu des commentaires dans kanboard_get_task. Au-dela, la coupure est
+# signalee (comment_truncated / comment_full_length) : voir kanboard_list_comments
+# pour le contenu integral.
+COMMENT_PREVIEW_CHARS = 500
+
 # Retry
 _MAX_RETRIES = 2
 _RETRY_DELAY = 1.0  # secondes, double à chaque tentative
@@ -540,14 +545,21 @@ async def kanboard_list_tasks(
 
 
 @mcp.tool()
-async def kanboard_get_task(task_id: int = 0) -> str:
+async def kanboard_get_task(task_id: int = 0, full_comments: bool = False) -> str:
     """Detail complet d'une tache par son ID.
 
     Parametres :
     - task_id : identifiant de la tache (obligatoire)
+    - full_comments : True = commentaires en entier ; False (defaut) = apercu
+      de 500 caracteres
 
     Retourne tous les champs : titre, description, colonne, assignee,
     priorite, dates, commentaires, sous-taches.
+
+    Quand un apercu de commentaire est coupe, `comment_truncated` et
+    `comment_full_length` l'indiquent ; leur absence signifie « contenu
+    complet ». Pour un texte integral, utiliser full_comments=True ou
+    kanboard_list_comments.
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
@@ -562,12 +574,20 @@ async def kanboard_get_task(task_id: int = 0) -> str:
 
         comments = []
         for c in (comments_raw or []):
-            comments.append({
+            content = c.get("comment") or ""
+            entry: dict[str, Any] = {
                 "id": c.get("id"),
                 "user": c.get("name") or c.get("username", ""),
                 "date": _ts_to_datetime(c.get("date_creation")),
-                "content": (c.get("comment") or "")[:500],
-            })
+                "content": content,
+            }
+            if not full_comments and len(content) > COMMENT_PREVIEW_CHARS:
+                # Le `[:500]` muet faisait relire un commentaire tronque comme
+                # s'il etait complet, donc reecrire par-dessus en perdant la fin.
+                entry["content"] = content[:COMMENT_PREVIEW_CHARS]
+                entry["comment_truncated"] = True
+                entry["comment_full_length"] = len(content)
+            comments.append(entry)
 
         subtasks = []
         for s in (subtasks_raw or []):
@@ -2267,6 +2287,258 @@ async def kanboard_toggle_subtask_status(
                 "new_status_name": _SUBTASK_STATUS_NAMES[new_status],
             })
         return "Echec de la mise a jour du statut."
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools -- Commentaires
+# ---------------------------------------------------------------------------
+
+# Champs exposes pour un commentaire, dans l'ordre de lecture utile.
+_COMMENT_FIELDS = (
+    "id", "task_id", "user_id", "username", "name",
+    "date_creation", "date_modification", "comment",
+)
+
+
+def _comment_row(raw: dict) -> dict:
+    """Projette un commentaire brut sur les champs exposes, sans troncature.
+
+    Les deux dates sont converties en datetime lisible (convention du
+    connecteur, qui ne remonte jamais de timestamp Unix brut), mais gardent
+    leur nom d'origine cote Kanboard.
+    """
+    row = {k: raw.get(k) for k in _COMMENT_FIELDS}
+    row["date_creation"] = _ts_to_datetime(raw.get("date_creation"))
+    row["date_modification"] = _ts_to_datetime(raw.get("date_modification"))
+    return row
+
+
+def _other_account(account: str) -> str:
+    """Retourne l'autre compte du connecteur ('primary' <-> 'agent')."""
+    return "primary" if account == "agent" else "agent"
+
+
+# Marqueurs textuels d'un refus Kanboard. La verification d'auteur ne remonte
+# pas toujours un code HTTP : selon la version, elle ressort en erreur JSON-RPC.
+_PERMISSION_MARKERS = (
+    "forbidden", "not authorized", "unauthorized",
+    "permission", "access denied", "denied",
+)
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    """Vrai si l'exception ressemble a un refus de permission Kanboard."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+        return True
+    return any(marker in str(exc).lower() for marker in _PERMISSION_MARKERS)
+
+
+def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detail: str = "") -> str:
+    """Message d'echec explicite quand Kanboard refuse une ecriture sur commentaire.
+
+    Kanboard verifie l'auteur : hors admin, un compte ne peut modifier ou
+    supprimer que ses propres commentaires. L'API se contente d'un `false`,
+    qui ne dit pas lequel des deux comptes du connecteur a poste le
+    commentaire — indebogable cote client. On nomme donc l'auteur et,
+    quand un second compte existe, celui a reessayer.
+    """
+    author = raw.get("name") or raw.get("username") or f"user_id={raw.get('user_id')}"
+    hint = (
+        f"Kanboard n'autorise que l'auteur du commentaire (ou un administrateur) "
+        f"a le {action}. Le commentaire #{comment_id} a ete poste par {author}, "
+        f"l'appel a ete signe par le compte '{account}'. "
+    )
+    if KANBOARD_USER_ALT and KANBOARD_TOKEN_ALT:
+        hint += f"Reessayer avec as_user='{_other_account(account)}'."
+    else:
+        # Sans second compte configure, suggerer "l'autre compte" enverrait
+        # sur une fausse piste : tout retombe sur primary.
+        hint += (
+            "Aucun second compte n'est configure (KANBOARD_USER_ALT/"
+            "KANBOARD_TOKEN_ALT vides) : le commentaire appartient a un autre "
+            "utilisateur Kanboard, hors de portee de ce connecteur."
+        )
+    payload: dict[str, Any] = {
+        "success": False,
+        "error": "permission_denied",
+        "action": action,
+        "comment_id": comment_id,
+        "attempted_as_user": account,
+        "comment_author": author,
+        "comment_author_user_id": raw.get("user_id"),
+        "hint": hint,
+    }
+    if detail:
+        payload["api_detail"] = detail
+    return _dumps(payload)
+
+
+@mcp.tool()
+async def kanboard_list_comments(task_id: int = 0, as_user: str = "") -> str:
+    """Liste tous les commentaires d'une tache, contenu integral.
+
+    C'est le tool de reference pour recuperer le texte complet d'un
+    commentaire avant reecriture : contrairement a kanboard_get_task, il
+    n'applique aucune troncature.
+
+    Parametres :
+    - task_id : ID de la tache (obligatoire)
+    - as_user : compte de lecture ("" = defaut, "primary"/"agent")
+
+    Retourne pour chaque commentaire : id, task_id, user_id, username, name,
+    date_creation, date_modification, comment.
+    """
+    if not task_id:
+        return "Erreur : task_id est obligatoire."
+    try:
+        comments = await kb_call("getAllComments", {"task_id": task_id}, as_user=as_user)
+        return _dumps([_comment_row(c) for c in (comments or [])])
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_get_comment(comment_id: int = 0, as_user: str = "") -> str:
+    """Detail d'un commentaire par son ID, contenu integral (aucune troncature).
+
+    Parametres :
+    - comment_id : ID du commentaire (obligatoire)
+    - as_user : compte de lecture ("" = defaut, "primary"/"agent")
+
+    Retourne : id, task_id, user_id, username, name, date_creation,
+    date_modification, comment.
+    """
+    if not comment_id:
+        return "Erreur : comment_id est obligatoire."
+    try:
+        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
+        if not raw:
+            return f"Commentaire #{comment_id} introuvable."
+        return _dumps(_comment_row(raw))
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_update_comment(
+    comment_id: int = 0,
+    comment: str = "",
+    as_user: str = "",
+) -> str:
+    """Modifie le texte d'un commentaire existant.
+
+    Confirmation utilisateur requise avant execution.
+
+    Kanboard ne versionne pas les commentaires : la reecriture ecrase
+    definitivement l'ancien texte. Il est donc relu avant l'ecriture et
+    renvoye dans `previous_comment`, seule trace restante.
+
+    Kanboard verifie l'auteur : hors administrateur, un compte ne peut
+    modifier que ses propres commentaires. Un commentaire poste par
+    'primary' n'est donc pas modifiable via 'agent', et inversement.
+
+    Parametres :
+    - comment_id : ID du commentaire (obligatoire)
+    - comment : nouveau texte du commentaire (obligatoire)
+    - as_user : compte qui modifie ("" = defaut, "primary"/"agent")
+
+    Retourne l'ancien texte (`previous_comment`) et le nouveau.
+    """
+    if not comment_id:
+        return "Erreur : comment_id est obligatoire."
+    if not comment:
+        return "Erreur : comment est obligatoire."
+    try:
+        # Compte *effectif* : si "agent" n'est pas configure, l'ecriture est
+        # signee par primary. Diagnostiquer sur le compte demande enverrait
+        # sur une fausse piste ("reessayer avec primary" alors qu'on y etait).
+        _, _, account = _get_credentials(as_user)
+
+        # Relecture prealable : sans elle, l'ancien texte est perdu sans recours.
+        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
+        if not raw:
+            return f"Commentaire #{comment_id} introuvable."
+        previous = raw.get("comment") or ""
+
+        try:
+            # L'API attend `content` ; le parametre expose s'appelle `comment`
+            # pour rester aligne sur kanboard_add_comment.
+            success = await kb_call("updateComment", {
+                "id": comment_id,
+                "content": comment,
+            }, as_user=as_user)
+        except Exception as exc:
+            if _is_permission_error(exc):
+                return _comment_denied("modifier", comment_id, raw, account, str(exc))
+            raise
+
+        if not success:
+            return _comment_denied("modifier", comment_id, raw, account)
+
+        return _dumps({
+            "success": True,
+            "comment_id": comment_id,
+            "task_id": raw.get("task_id"),
+            "as_user": account,
+            "previous_comment": previous,
+            "new_comment": comment,
+        })
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_remove_comment(comment_id: int = 0, as_user: str = "") -> str:
+    """Supprime definitivement un commentaire.
+
+    ATTENTION : suppression irreversible. Kanboard ne conserve aucune
+    copie ; le contenu supprime est renvoye dans la reponse pour qu'il
+    reste recuperable dans l'historique de conversation.
+
+    Confirmation utilisateur requise avant execution.
+
+    Kanboard verifie l'auteur : hors administrateur, un compte ne peut
+    supprimer que ses propres commentaires.
+
+    Parametres :
+    - comment_id : ID du commentaire (obligatoire)
+    - as_user : compte qui supprime ("" = defaut, "primary"/"agent")
+
+    Retourne le contenu supprime (`deleted_comment`) et sa tache d'origine.
+    """
+    if not comment_id:
+        return "Erreur : comment_id est obligatoire."
+    try:
+        # Compte effectif (cf. kanboard_update_comment).
+        _, _, account = _get_credentials(as_user)
+
+        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
+        if not raw:
+            return f"Commentaire #{comment_id} introuvable."
+
+        try:
+            success = await kb_call(
+                "removeComment", {"comment_id": comment_id}, as_user=as_user
+            )
+        except Exception as exc:
+            if _is_permission_error(exc):
+                return _comment_denied("supprimer", comment_id, raw, account, str(exc))
+            raise
+
+        if not success:
+            return _comment_denied("supprimer", comment_id, raw, account)
+
+        return _dumps({
+            "success": True,
+            "comment_id": comment_id,
+            "task_id": raw.get("task_id"),
+            "as_user": account,
+            "action": "deleted",
+            "deleted_comment": raw.get("comment") or "",
+            "deleted_comment_author": raw.get("name") or raw.get("username", ""),
+        })
     except Exception as exc:
         return _format_error(exc)
 
