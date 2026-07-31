@@ -51,6 +51,40 @@ environment variables — no host, login or secret is baked into the code.
 - `dolibarr_validate_proposal` — Valide une proposition commerciale brouillon via POST /proposals/{id}/validate
 - `dolibarr_get_invoice_pdf_url` — Retourne l'URL Dolibarr du PDF d'une facture (lien direct pour téléchargement
 
+## Durations are seconds, everywhere
+
+Dolibarr stores and returns **every** duration in seconds, usually as a string
+(`"117000"`). Read as hours, that is a figure 3600 times too high — and nothing
+errors out. Every tool that exposes a duration therefore returns it twice: a
+converted value rounded to two decimals (`spent_hours`, `planned_hours`,
+`total_spent_hours`) alongside the untouched original (`spent_seconds`,
+`planned_seconds`, `total_spent_seconds`). A task carrying 32.5 h reports
+`spent_hours: 32.5` and `spent_seconds: 117000`.
+
+A missing duration reports `null`, never `0` — zero would read as "no time
+logged" when the information is simply absent.
+
+In the other direction, `dolibarr_log_time` takes `duration` in **hours** and
+converts it before the call (1.5 → 5400), because the API accepts seconds only.
+
+## Time logging: one route out of three works
+
+Three near-identical routes exist and only one accepts a `POST`; the other two
+answer with a bare `404` that is indistinguishable from a permission problem or
+a bad id.
+
+| Route | Verb | Result |
+|---|---|---|
+| `tasks/{id}/addtimespent` | `POST` | the correct one |
+| `tasks/{id}/timespent` | `GET` only | a `POST` here returns `404` |
+| `projects/tasks/{id}/…` | — | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
+
+Because a naked 404 is undebuggable, `dolibarr_log_time` diagnoses failures
+instead of forwarding the status code: it names the cause (`tache_inexistante`,
+`route_ou_methode_invalide`, `droits_insuffisants`,
+`utilisateur_non_affecte_ou_erreur_interne`), echoes the endpoint it used, and
+surfaces Dolibarr's own error body when there is one.
+
 ## Extending the connector
 
 This connector is **extensible without forking**. At startup it discovers any

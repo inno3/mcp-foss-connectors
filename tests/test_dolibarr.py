@@ -4,6 +4,7 @@ import json
 import os
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 # Définir les variables d'environnement avant l'import
@@ -11,6 +12,7 @@ os.environ.setdefault("DOLIBARR_API_KEY", "test-key-123")
 os.environ.setdefault("DOLIBARR_URL", "https://dolibarr.test.local")
 
 from dolibarr_mcp.server import (
+    TIMESPENT_ENDPOINT,
     DolibarrAPIError,
     _api_get_list,
     _clamp_limit,
@@ -20,7 +22,10 @@ from dolibarr_mcp.server import (
     _line_type_label,
     _num,
     _parse_json_or_raise,
+    _seconds_int,
+    _seconds_to_hours,
     _strip_html,
+    dolibarr_close_task,
     dolibarr_create_project,
     dolibarr_dashboard,
     dolibarr_get_invoice,
@@ -30,7 +35,9 @@ from dolibarr_mcp.server import (
     dolibarr_list_projects,
     dolibarr_list_proposals,
     dolibarr_list_supplier_invoices,
+    dolibarr_list_tasks,
     dolibarr_list_thirdparties,
+    dolibarr_log_time,
 )
 
 
@@ -976,3 +983,236 @@ class TestGetDocumentLines:
         assert "<br>" not in data["note_public"]
         assert "&nbsp;" not in data["note_public"]
         assert "Commande n°655969" in data["note_public"]
+
+
+def _http_error(status: int, body: object | None = None) -> httpx.HTTPStatusError:
+    """Fabrique l'erreur HTTP que httpx lève sur une reponse 4xx/5xx."""
+    request = httpx.Request("POST", "https://dolibarr.test.local/api/index.php/x")
+    response = (
+        httpx.Response(status, request=request)
+        if body is None
+        else httpx.Response(status, request=request, json=body)
+    )
+    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+
+
+def _task(**over: object) -> dict:
+    """Tâche telle que Dolibarr la renvoie : durées en SECONDES, et en chaîne."""
+    raw = {
+        "id": "42",
+        "ref": "TK2607-0042",
+        "label": "Audit",
+        "progress": "50",
+        "duration_effective": "117000",   # 32,5 h
+        "planned_workload": "144000",     # 40 h
+    }
+    raw.update(over)  # type: ignore[arg-type]
+    return raw
+
+
+class TestDurationHelpers:
+    """Dolibarr renvoie les durées en secondes, souvent sous forme de chaîne."""
+
+    def test_string_seconds_become_hours(self) -> None:
+        assert _seconds_to_hours("117000") == 32.5
+
+    def test_rounds_to_two_decimals(self) -> None:
+        assert _seconds_to_hours(5000) == 1.39
+
+    def test_missing_stays_none_never_zero(self) -> None:
+        # 0 se lirait « aucun temps passé » alors que l'information manque.
+        assert _seconds_to_hours(None) is None
+        assert _seconds_to_hours("") is None
+        assert _seconds_to_hours("n/a") is None
+
+    def test_raw_seconds_are_preserved_as_int(self) -> None:
+        assert _seconds_int("117000") == 117000
+        assert _seconds_int(None) is None
+
+
+@pytest.mark.asyncio
+class TestLogTimeRouteAndConversion:
+    """Le 404 systématique venait de la route ; l'unité, elle, est un piège muet."""
+
+    async def test_posts_on_the_addtimespent_route(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1.5)
+
+        endpoint = post.call_args[0][0]
+        assert endpoint == TIMESPENT_ENDPOINT.format(task_id=42)
+        assert endpoint == "tasks/42/addtimespent"
+        # La classe Tasks est montée à la racine : un préfixe /projects rend un
+        # 404 sec. Ce test épingle la route vérifiée contre le swagger de l'API.
+        assert "projects/" not in endpoint
+        # tasks/{id}/timespent existe mais est en lecture seule (GET).
+        assert endpoint.endswith("/addtimespent")
+
+    async def test_hours_are_converted_to_seconds(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1.5)
+
+        payload = post.call_args[0][1]
+        assert payload["duration"] == 5400  # 1,5 h — l'API n'accepte que des secondes
+        assert isinstance(payload["duration"], int)
+
+    async def test_sends_the_field_names_dolibarr_expects(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=2, date="2026-07-31",
+                                    note="Audit", user_id=7)
+
+        payload = post.call_args[0][1]
+        assert set(payload) == {"date", "duration", "note", "user_id"}
+        # dol_stringtotime attend une date lisible, pas un timestamp Unix.
+        assert payload["date"] == "2026-07-31 00:00:00"
+        assert payload["user_id"] == 7
+
+    async def test_user_id_is_omitted_rather_than_sent_null(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1)
+
+        assert "user_id" not in post.call_args[0][1]
+
+    async def test_success_reports_hours_and_raw_seconds(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            data = json.loads(await dolibarr_log_time(task_id=42, duration=1.5))
+
+        assert data["success"] is True
+        assert data["logged_hours"] == 1.5
+        assert data["logged_seconds"] == 5400
+        # Le total revient en chaîne de secondes : diviser sans convertir levait
+        # un TypeError sur le chemin nominal.
+        assert data["total_spent_hours"] == 32.5
+        assert data["total_spent_seconds"] == 117000
+        assert data["planned_hours"] == 40.0
+
+    async def test_rejects_a_non_positive_duration(self) -> None:
+        assert "supérieure à 0" in await dolibarr_log_time(task_id=42, duration=0)
+
+    async def test_requires_a_task_id(self) -> None:
+        assert "task_id" in await dolibarr_log_time(duration=1)
+
+
+@pytest.mark.asyncio
+class TestLogTimeErrorDiagnosis:
+    """Un 404 nu est indébogable : chaque cause doit être nommée."""
+
+    async def _fail_with(self, exc: Exception, task_reply: object = None,
+                         task_raises: Exception | None = None) -> dict:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if task_raises is not None:
+                raise task_raises
+            return task_reply
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            post.side_effect = exc
+            return json.loads(await dolibarr_log_time(task_id=42, duration=1))
+
+    async def test_missing_task_is_named_as_such(self) -> None:
+        data = await self._fail_with(
+            _http_error(404, {"error": {"code": 404, "message": "Task not found"}}),
+            task_raises=_http_error(404),
+        )
+        assert data["cause"] == "tache_inexistante"
+        assert "dolibarr_list_tasks" in data["hint"]
+
+    async def test_existing_task_points_at_the_route(self) -> None:
+        data = await self._fail_with(_http_error(404), task_reply=_task())
+        assert data["cause"] == "route_ou_methode_invalide"
+        assert "addtimespent" in data["hint"]
+
+    async def test_permission_refusal_is_not_confused_with_a_missing_task(self) -> None:
+        data = await self._fail_with(
+            _http_error(403, {"error": {"code": 403, "message": "Access not allowed"}})
+        )
+        assert data["cause"] == "droits_insuffisants"
+        assert data["dolibarr_error"] == "Access not allowed"
+
+    async def test_unassigned_user_is_the_named_suspect_on_a_5xx(self) -> None:
+        data = await self._fail_with(_http_error(500), task_reply=_task())
+        assert data["cause"] == "utilisateur_non_affecte_ou_erreur_interne"
+        assert "affect" in data["hint"]
+
+    async def test_the_four_causes_produce_four_distinct_messages(self) -> None:
+        """Le point du correctif : chaque échec doit se distinguer des autres."""
+        cases = [
+            await self._fail_with(_http_error(404), task_raises=_http_error(404)),
+            await self._fail_with(_http_error(404), task_reply=_task()),
+            await self._fail_with(_http_error(403)),
+            await self._fail_with(_http_error(500), task_reply=_task()),
+        ]
+        assert all(c["success"] is False for c in cases)
+        assert len({c["cause"] for c in cases}) == 4
+        assert len({c["hint"] for c in cases}) == 4
+        # La route en cause est toujours remontée, pour rendre l'échec debuggable.
+        assert all(c["endpoint"] == "tasks/42/addtimespent" for c in cases)
+
+    async def test_dolibarr_error_body_is_surfaced(self) -> None:
+        data = await self._fail_with(
+            _http_error(500, {"error": {"code": 500, "message": "Error when adding time"}}),
+            task_reply=_task(),
+        )
+        assert data["dolibarr_error"] == "Error when adding time"
+
+    async def test_empty_error_body_does_not_invent_a_message(self) -> None:
+        data = await self._fail_with(_http_error(500), task_reply=_task())
+        assert data["dolibarr_error"] is None
+
+
+@pytest.mark.asyncio
+class TestTaskDurationsExposedInHours:
+    """`spent_hours` portait des secondes : un temps 3600 fois trop élevé."""
+
+    async def test_seconds_are_converted_and_the_raw_value_kept(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_task()]
+            data = json.loads(await dolibarr_list_tasks(project_id=9))
+
+        task = data["tasks"][0]
+        assert task["spent_hours"] == 32.5      # et non 117000
+        assert task["spent_seconds"] == 117000  # rien n'est perdu
+
+    async def test_planned_workload_gets_the_same_treatment(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_task()]
+            data = json.loads(await dolibarr_list_tasks(project_id=9))
+
+        task = data["tasks"][0]
+        assert task["planned_hours"] == 40.0
+        assert task["planned_seconds"] == 144000
+
+    async def test_a_task_without_durations_reports_none_not_zero(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_task(duration_effective="", planned_workload=None)]
+            data = json.loads(await dolibarr_list_tasks(project_id=9))
+
+        task = data["tasks"][0]
+        assert task["spent_hours"] is None
+        assert task["planned_hours"] is None
+
+    async def test_close_task_survives_string_seconds(self) -> None:
+        """Diviser la chaîne '117000' levait un TypeError sur le chemin nominal."""
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock), \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = _task()
+            data = json.loads(await dolibarr_close_task(task_id=42))
+
+        assert data["success"] is True
+        assert data["total_spent_hours"] == 32.5
+        assert data["total_spent_seconds"] == 117000
