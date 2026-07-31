@@ -702,28 +702,44 @@ async def kanboard_search_tasks(
 ) -> str:
     """Recherche de taches par mot-cle dans tous les projets accessibles.
 
+    Kanboard n'expose pas de recherche globale en JSON-RPC : le connecteur
+    balaie les projets un par un et filtre cote client. Ce balayage s'arrete
+    des que `limit` est atteint, donc une absence de resultat ne prouve rien
+    tant que `projects_scanned` est inferieur a `projects_total`.
+
     Parametres :
     - query : texte a rechercher (insensible a la casse)
     - limit : nombre max de resultats (defaut 20, max 100)
 
-    Retourne les taches dont le titre ou la description contient le texte.
+    Retourne : count, scope, has_more, projects_scanned, projects_total, et
+    results (taches dont le titre ou la description contient le texte).
+
+    `scope` vaut "all" ou "member" selon que le compte est administrateur ou
+    non : en "member" le balayage ne couvre que les projets dont il est membre.
     """
     if not query:
         return "Erreur : query est obligatoire."
     try:
         # Kanboard n'a pas de recherche globale en JSON-RPC.
         # On itere sur les projets et filtre cote client.
-        projects, _scope = await _projects_for_account()
-        if not projects:
-            return _dumps([])
+        projects, scope = await _projects_for_account()
+        active = [
+            p for p in (projects or [])
+            if p.get("is_active") and p.get("is_active") != "0"
+        ]
+        if not active:
+            return _dumps({
+                "count": 0, "scope": scope, "has_more": False,
+                "projects_scanned": 0, "projects_total": 0, "results": [],
+            })
 
         query_lower = query.lower()
         results: list[dict] = []
         limit_val = _clamp_limit(limit)
+        scanned = 0
 
-        for p in projects:
-            if not p.get("is_active") or p.get("is_active") == "0":
-                continue
+        for p in active:
+            scanned += 1
             try:
                 tasks = await kb_call("getAllTasks", {"project_id": p["id"], "status_id": 1})
             except Exception:
@@ -740,7 +756,16 @@ async def kanboard_search_tasks(
             if len(results) >= limit_val:
                 break
 
-        return _dumps(results)
+        return _dumps({
+            "count": len(results),
+            "scope": scope,
+            # Le balayage s'arrete a `limit` : sans ce drapeau, une recherche
+            # coupee en cours de route se lit comme exhaustive.
+            "has_more": scanned < len(active),
+            "projects_scanned": scanned,
+            "projects_total": len(active),
+            "results": results,
+        })
     except Exception as exc:
         return _format_error(exc)
 

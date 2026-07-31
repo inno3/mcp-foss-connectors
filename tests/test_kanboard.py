@@ -35,6 +35,7 @@ from kanboard_mcp.server import (  # noqa: E402
     kanboard_my_dashboard,
     kanboard_recent_activity,
     kanboard_remove_comment,
+    kanboard_search_tasks,
     kanboard_update_comment,
 )
 
@@ -856,6 +857,51 @@ class TestCheckProjectAccess:
             data = json.loads(await kanboard_check_project_access(project_id=999))
         assert data["writable_by"] == []
         assert "hors de portee" in data["hint"]
+
+    async def test_search_tasks_reports_scope_and_incomplete_sweep(self) -> None:
+        """Le balayage s'arrete a `limit` : « rien trouve » ne vaut pas « rien »."""
+        projects = [
+            {"id": i, "name": f"Projet {i}", "is_active": "1"} for i in range(1, 6)
+        ]
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                raise _http_403()
+            if method == "getMyProjects":
+                return projects
+            if method == "getAllTasks":
+                return [{"id": 1, "title": "cible", "description": "", "project_id": 1}]
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(await kanboard_search_tasks(query="cible", limit=1))
+        assert data["scope"] == "member"
+        assert data["count"] == 1
+        assert data["projects_scanned"] == 1
+        assert data["projects_total"] == 5
+        assert data["has_more"] is True
+
+    async def test_search_tasks_full_sweep_has_no_more(self) -> None:
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                return [{"id": 1, "name": "P1", "is_active": "1"}]
+            if method == "getAllTasks":
+                return []
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            data = json.loads(await kanboard_search_tasks(query="absent"))
+        assert data["has_more"] is False
+        assert data["projects_scanned"] == data["projects_total"] == 1
+        assert data["results"] == []
 
     async def test_gap_list_is_clamped_and_says_so(self) -> None:
         primary = {str(i): f"Projet {i}" for i in range(1, 40)}

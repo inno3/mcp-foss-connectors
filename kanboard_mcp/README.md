@@ -106,6 +106,11 @@ reach a given project, rather than discovering it as a 403 at post time. Without
 arguments it reports the gap between the two accounts; with `project_id` it
 answers directly with `writable_by`.
 
+`kanboard_search_tasks` reports the same `scope`, plus `projects_scanned` /
+`projects_total` — Kanboard has no global search, so the connector sweeps
+projects one by one and stops at `limit`. An empty result is not proof of
+absence while `projects_scanned` is below `projects_total`.
+
 ## Known API ceiling: project activity
 
 Kanboard caps `getProjectActivity` at **50 events** and exposes no way to raise
