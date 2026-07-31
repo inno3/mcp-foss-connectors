@@ -22,7 +22,7 @@ tool, whether self-hosted or managed.
 | Connector | Server name | Tools | Integrates with | Auth |
 |---|---|--:|---|---|
 | **Dolibarr ERP** | `dolibarr-mcp` | 36¹ | Dolibarr 16+ REST API | `DOLAPIKEY` API key |
-| **Kanboard** | `kanboard-mcp` | 48 | Kanboard JSON-RPC API | personal API token |
+| **Kanboard** | `kanboard-mcp` | 49 | Kanboard JSON-RPC API | personal API token |
 | **WordPress** | `wordpress-mcp` | 26 | WP REST API (+ ACF) | Application Password |
 | **n8n** | `n8n-mcp` | 17 | n8n public REST API | `X-N8N-API-KEY` |
 | **Matrix** | `matrix-mcp` | 10 | Matrix client-server API | access token |

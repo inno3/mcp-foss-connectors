@@ -57,6 +57,14 @@ MAX_LIMIT = 100
 # pour le contenu integral.
 COMMENT_PREVIEW_CHARS = 500
 
+# Plafond d'activite impose par l'API Kanboard, non configurable : la procedure
+# getProjectActivity ne prend que project_id (tout parametre `limit` ressort en
+# -32602 "Too many arguments"), et le modele coupe a 50 evenements. Le plafond
+# est GLOBAL, pas par projet : getProjectActivities sur plusieurs projets rend
+# 50 evenements au total, un projet peu actif pouvant n'en avoir aucun.
+# Verifie sur Kanboard 1.2.53.
+ACTIVITY_API_CAP = 50
+
 # Retry
 _MAX_RETRIES = 2
 _RETRY_DELAY = 1.0  # secondes, double à chaque tentative
@@ -191,6 +199,43 @@ def _format_error(exc: Exception) -> str:
             return "Erreur 404 : endpoint Kanboard introuvable. Verifier KANBOARD_URL."
         return f"Erreur HTTP {status} : {exc.response.text[:500]}"
     return f"Erreur : {exc}"
+
+
+# Marqueurs textuels d'un refus Kanboard. Un refus ne remonte pas toujours un
+# code HTTP : selon la procedure, il ressort en erreur JSON-RPC applicative.
+_PERMISSION_MARKERS = (
+    "forbidden", "not authorized", "unauthorized",
+    "permission", "access denied", "denied",
+)
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    """Vrai si l'exception ressemble a un refus de permission Kanboard."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+        return True
+    return any(marker in str(exc).lower() for marker in _PERMISSION_MARKERS)
+
+
+async def _projects_for_account(as_user: str = "") -> tuple[list[dict], str]:
+    """Retourne (projets, portee) pour un compte, sans exiger les droits admin.
+
+    `getAllProjects` est reserve aux administrateurs : un compte agent non-admin
+    y prend un 403 sec, qui cassait my_dashboard et my_overdue des qu'on passait
+    as_user='agent'. On retombe alors sur `getMyProjects` (projets dont le compte
+    est membre).
+
+    La portee retournee ("all" ou "member") n'est pas cosmetique : "member" est
+    un sous-ensemble, et un appelant qui le prendrait pour l'inventaire complet
+    conclurait a tort a l'absence d'un projet.
+    """
+    try:
+        projects = await kb_call("getAllProjects", as_user=as_user)
+        return (projects or []), "all"
+    except Exception as exc:
+        if not _is_permission_error(exc):
+            raise
+        projects = await kb_call("getMyProjects", as_user=as_user)
+        return (projects or []), "member"
 
 
 def _dumps(data: Any) -> str:
@@ -368,7 +413,7 @@ async def _get_my_tasks(status_id: int = 1, as_user: str = "") -> tuple[list[dic
     if my_uid <= 0:
         return [], err
 
-    projects = await kb_call("getAllProjects", as_user=account)
+    projects, _scope = await _projects_for_account(as_user=account)
     if not projects:
         return [], ""
 
@@ -470,11 +515,15 @@ async def kanboard_list_projects(
       "[Pilotage] Coordination")
 
     Retourne : total_available (avant pagination), offset, count, has_more,
-    et projects (id, nom, identifiant, description tronquee a 200 caracteres,
-    is_active, nb_open_tasks).
+    scope, et projects (id, nom, identifiant, description tronquee a 200
+    caracteres, is_active, nb_open_tasks).
+
+    `scope` vaut "all" (tous les projets de l'instance) ou "member" quand le
+    compte n'est pas administrateur : la liste se limite alors aux projets dont
+    il est membre, et n'est donc pas l'inventaire complet.
     """
     try:
-        projects = await kb_call("getAllProjects") or []
+        projects, scope = await _projects_for_account()
 
         # Filtrage cote MCP : getAllProjects ne prend aucun critere.
         needle = _fold(name_filter)
@@ -506,6 +555,7 @@ async def kanboard_list_projects(
             "offset": start,
             "count": len(results),
             "has_more": start + len(results) < total,
+            "scope": scope,
             "projects": results,
         })
     except Exception as exc:
@@ -663,7 +713,7 @@ async def kanboard_search_tasks(
     try:
         # Kanboard n'a pas de recherche globale en JSON-RPC.
         # On itere sur les projets et filtre cote client.
-        projects = await kb_call("getAllProjects")
+        projects, _scope = await _projects_for_account()
         if not projects:
             return _dumps([])
 
@@ -978,9 +1028,9 @@ async def kanboard_assign_task(
       d'utiliser kanboard_assign_project_user.
 
     Exemples :
-    - kanboard_assign_task(task_id=7152, user_id=4)              -> assigne user 4
-    - kanboard_assign_task(task_id=7152, user_name="Benjamin")    -> resolution auto
-    - kanboard_assign_task(task_id=7152, user_id=0)              -> desassigne
+    - kanboard_assign_task(task_id=1234, user_id=4)             -> assigne user 4
+    - kanboard_assign_task(task_id=1234, user_name="alice")     -> resolution auto
+    - kanboard_assign_task(task_id=1234, user_id=0)             -> desassigne
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
@@ -1846,19 +1896,41 @@ async def kanboard_recent_activity(
 
     Utile pour faire un sync rapide en debut de session.
 
+    ATTENTION — plafond impose par l'API : Kanboard ne rend jamais plus de 50
+    evenements. La procedure getProjectActivity n'accepte que project_id ; tout
+    parametre `limit` cote API ressort en erreur -32602. `limit` ici ne peut
+    donc que reduire, jamais elargir. Sur un projet tres actif, ces 50
+    evenements peuvent ne couvrir que quelques jours.
+
+    Consequence sur since_iso : le filtre s'applique APRES ce plafond, donc une
+    date anterieure au plus vieil evenement disponible ne ramene pas l'histoire
+    manquante. Ce cas est signale par `window_incomplete`.
+
     Parametres :
     - project_id : ID du projet (obligatoire)
-    - since_iso : filtre date ISO (YYYY-MM-DD), vide = tout l'historique disponible
-    - limit : nombre max d'evenements (defaut 20, max 100)
+    - since_iso : filtre date ISO (YYYY-MM-DD), vide = toute la fenetre disponible
+    - limit : nombre max d'evenements a renvoyer (defaut 20 ; plafonne a 50 par l'API)
 
-    Retourne : event_type, date, user, task_id, task_title, summary.
+    Retourne : count, api_cap_reached, oldest_available, newest_available, et
+    events (event_type, date, user, task_id, task_title, summary).
     """
     if not project_id:
         return "Erreur : project_id est obligatoire."
     try:
         events = await kb_call("getProjectActivity", {"project_id": project_id})
         if not events:
-            return _dumps([])
+            return _dumps({"count": 0, "api_cap_reached": False, "events": []})
+
+        # Une fenetre pleine signifie « il y a probablement plus, hors de portee ».
+        cap_reached = len(events) >= ACTIVITY_API_CAP
+
+        timestamps = []
+        for e in events:
+            try:
+                timestamps.append(int(e.get("date_creation") or 0))
+            except (ValueError, TypeError):
+                pass
+        oldest_ts = min(timestamps) if timestamps else 0
 
         # Filtre date
         threshold_ts = 0
@@ -1887,7 +1959,26 @@ async def kanboard_recent_activity(
             })
             if len(results) >= _clamp_limit(limit):
                 break
-        return _dumps(results)
+
+        payload: dict[str, Any] = {
+            "count": len(results),
+            "api_cap_reached": cap_reached,
+            "oldest_available": _ts_to_datetime(oldest_ts),
+            "newest_available": _ts_to_datetime(max(timestamps) if timestamps else 0),
+            "events": results,
+        }
+        if cap_reached:
+            payload["api_cap"] = ACTIVITY_API_CAP
+            payload["note"] = (
+                f"L'API Kanboard plafonne a {ACTIVITY_API_CAP} evenements et n'expose "
+                "aucun parametre pour l'elargir : l'historique anterieur a "
+                f"{payload['oldest_available']} est hors de portee de ce tool."
+            )
+        # since_iso remonte plus haut que la fenetre : le resultat est forcement
+        # partiel, et sans ce drapeau il se lirait comme exhaustif.
+        if cap_reached and threshold_ts and oldest_ts and threshold_ts < oldest_ts:
+            payload["window_incomplete"] = True
+        return _dumps(payload)
     except Exception as exc:
         return _format_error(exc)
 
@@ -2320,21 +2411,6 @@ def _other_account(account: str) -> str:
     return "primary" if account == "agent" else "agent"
 
 
-# Marqueurs textuels d'un refus Kanboard. La verification d'auteur ne remonte
-# pas toujours un code HTTP : selon la version, elle ressort en erreur JSON-RPC.
-_PERMISSION_MARKERS = (
-    "forbidden", "not authorized", "unauthorized",
-    "permission", "access denied", "denied",
-)
-
-
-def _is_permission_error(exc: Exception) -> bool:
-    """Vrai si l'exception ressemble a un refus de permission Kanboard."""
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
-        return True
-    return any(marker in str(exc).lower() for marker in _PERMISSION_MARKERS)
-
-
 def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detail: str = "") -> str:
     """Message d'echec explicite quand Kanboard refuse une ecriture sur commentaire.
 
@@ -2546,6 +2622,100 @@ async def kanboard_remove_comment(comment_id: int = 0, as_user: str = "") -> str
 # ---------------------------------------------------------------------------
 # Tools -- Diagnostic (multi-compte)
 # ---------------------------------------------------------------------------
+
+
+async def _visible_projects(as_user: str) -> tuple[dict[str, str], str]:
+    """Retourne ({project_id: nom}, erreur) visibles par un compte.
+
+    Passe par getMyProjectsList, qui ne demande aucun droit admin — contrairement
+    a getAllProjects, refuse aux comptes non-administrateurs.
+    """
+    try:
+        raw = await kb_call("getMyProjectsList", as_user=as_user)
+        return {str(k): str(v) for k, v in (raw or {}).items()}, ""
+    except Exception as exc:
+        return {}, _format_error(exc)
+
+
+@mcp.tool()
+async def kanboard_check_project_access(project_id: int = 0, limit: int = DEFAULT_LIMIT) -> str:
+    """Diagnostic : quels projets chaque compte configure peut-il atteindre.
+
+    A lancer AVANT une ecriture plutot que de decouvrir un 403 au moment de
+    poster : les deux comptes n'ont pas le meme perimetre, et un compte agent
+    non-admin n'est rattache qu'a une partie des projets.
+
+    Parametres :
+    - project_id : verifier un projet precis (0 = comparer les perimetres)
+    - limit : nombre max de projets listes dans les ecarts (defaut 20, max 100)
+
+    Retourne, par compte : nombre de projets visibles, droits admin
+    (getAllProjects passe ou non), et les projets visibles par un seul des deux
+    comptes. Avec project_id : `writable_by`, la liste des comptes utilisables
+    comme as_user pour ce projet.
+    """
+    try:
+        accounts = ["primary"]
+        if KANBOARD_USER_ALT and KANBOARD_TOKEN_ALT:
+            accounts.append("agent")
+
+        report: dict[str, Any] = {"accounts_configured": accounts}
+        visible: dict[str, dict[str, str]] = {}
+
+        for acc in accounts:
+            projects, err = await _visible_projects(acc)
+            visible[acc] = projects
+            entry: dict[str, Any] = {"visible_projects": len(projects)}
+            if err:
+                entry["error"] = err
+            # Le droit admin change la portee de list_projects et search_tasks :
+            # sans lui, elles retombent sur les projets dont le compte est membre.
+            try:
+                await kb_call("getAllProjects", as_user=acc)
+                entry["is_admin"] = True
+            except Exception as exc:
+                entry["is_admin"] = False if _is_permission_error(exc) else None
+            report[acc] = entry
+
+        if project_id:
+            pid = str(project_id)
+            writable = [acc for acc in accounts if pid in visible.get(acc, {})]
+            name = next((visible[acc][pid] for acc in writable), "")
+            report["project_id"] = project_id
+            report["project_name"] = name
+            report["writable_by"] = writable
+            if not writable:
+                report["hint"] = (
+                    f"Projet #{project_id} hors de portee de tous les comptes configures. "
+                    "Rattacher le compte au projet (kanboard_assign_project_user) "
+                    "ou verifier l'ID."
+                )
+            elif len(writable) < len(accounts):
+                missing = [a for a in accounts if a not in writable]
+                report["hint"] = (
+                    f"Projet #{project_id} accessible uniquement via as_user="
+                    f"'{writable[0]}'. Compte(s) sans acces : {', '.join(missing)} "
+                    "-> une ecriture y prendrait un 403."
+                )
+        elif len(accounts) == 2:
+            only_primary = sorted(set(visible["primary"]) - set(visible["agent"]))
+            only_agent = sorted(set(visible["agent"]) - set(visible["primary"]))
+            capped = _clamp_limit(limit)
+            report["only_primary_count"] = len(only_primary)
+            report["only_agent_count"] = len(only_agent)
+            report["only_primary"] = [
+                {"id": p, "name": visible["primary"][p]} for p in only_primary[:capped]
+            ]
+            report["only_agent"] = [
+                {"id": p, "name": visible["agent"][p]} for p in only_agent[:capped]
+            ]
+            # Meme regle que partout : une liste coupee doit le dire.
+            if len(only_primary) > capped or len(only_agent) > capped:
+                report["truncated"] = True
+
+        return _dumps(report)
+    except Exception as exc:
+        return _format_error(exc)
 
 
 @mcp.tool()
