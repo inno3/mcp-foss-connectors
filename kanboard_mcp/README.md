@@ -84,6 +84,16 @@ editable as `agent`, and vice versa. The API answers a bare `false` in that case
 `kanboard_update_comment` and `kanboard_remove_comment` turn it into an explicit
 message naming the comment's author and the `as_user` value to retry with.
 
+### A bad id and a real refusal look identical
+
+Kanboard answers **403 rather than an empty result** when a comment or task id
+does not exist — its authorization layer cannot resolve the object's project, so
+it denies (verified on 1.2.53 with a deliberately absurd id). A bare "insufficient
+permissions" would send you hunting for a rights problem that isn't there, and is
+in any case indistinguishable from a genuine one. All four comment tools return
+`not_found_or_forbidden` naming both causes, and point at
+`kanboard_check_project_access` to tell them apart.
+
 Comments are not versioned by Kanboard. Both tools re-read the comment before
 writing and return the previous text (`previous_comment` / `deleted_comment`),
 which is the only remaining trace of it. To fetch a full comment before rewriting

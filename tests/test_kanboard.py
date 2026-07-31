@@ -456,7 +456,57 @@ class TestGetComment:
             new_callable=AsyncMock,
             return_value=None,
         ):
-            assert "introuvable" in await kanboard_get_comment(comment_id=7)
+            data = json.loads(await kanboard_get_comment(comment_id=7))
+        assert data["error"] == "not_found_or_forbidden"
+        assert data["comment_id"] == 7
+
+    async def test_bad_id_403_names_both_causes(self) -> None:
+        """Kanboard rend 403 sur un id inexistant, pas un resultat vide.
+
+        Un « permissions insuffisantes » nu envoyait chercher un probleme de
+        droits qui n'existe pas, et restait indiscernable d'un vrai refus.
+        """
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_http_403(),
+        ):
+            data = json.loads(await kanboard_get_comment(comment_id=99999999))
+        assert data["error"] == "not_found_or_forbidden"
+        assert "n'existe pas" in data["hint"]
+        assert "hors de portee" in data["hint"]
+        assert "kanboard_check_project_access" in data["hint"]
+
+    async def test_list_comments_bad_task_id_names_both_causes(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_http_403(),
+        ):
+            data = json.loads(await kanboard_list_comments(task_id=99999999))
+        assert data["error"] == "not_found_or_forbidden"
+        assert data["task_id"] == 99999999
+
+    async def test_write_tools_stop_at_the_failed_preread(self) -> None:
+        """Un 403 a la relecture ne doit surtout pas laisser passer l'ecriture."""
+        calls: list[str] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append(method)
+            if method == "getComment":
+                raise _http_403()
+            raise AssertionError(f"ecriture tentee malgre la relecture ratee : {method}")
+
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            upd = json.loads(await kanboard_update_comment(comment_id=999, comment="x"))
+            rm = json.loads(await kanboard_remove_comment(comment_id=999))
+        assert upd["error"] == "not_found_or_forbidden"
+        assert rm["error"] == "not_found_or_forbidden"
+        assert calls == ["getComment", "getComment"]
 
 
 @pytest.mark.asyncio
@@ -492,8 +542,9 @@ class TestUpdateComment:
             new_callable=AsyncMock,
             return_value=None,
         ) as mock_call:
-            out = await kanboard_update_comment(comment_id=7, comment="x")
-        assert "introuvable" in out
+            data = json.loads(await kanboard_update_comment(comment_id=7, comment="x"))
+        assert data["error"] == "not_found_or_forbidden"
+        # L'ecriture ne doit pas avoir eu lieu.
         assert [c[0][0] for c in mock_call.call_args_list] == ["getComment"]
 
     async def test_requires_both_arguments(self) -> None:

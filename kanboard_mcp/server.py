@@ -2436,6 +2436,46 @@ def _other_account(account: str) -> str:
     return "primary" if account == "agent" else "agent"
 
 
+def _not_found_or_forbidden(kind: str, obj_id: int, account: str, detail: str = "") -> str:
+    """Message pour un 403 rendu par une LECTURE de commentaire.
+
+    Kanboard repond 403 — et non un resultat vide — quand l'identifiant
+    n'existe pas : l'autorisation n'arrive pas a resoudre le projet de l'objet
+    et refuse par defaut (verifie sur 1.2.53 avec un id volontairement absurde).
+    Un « permissions insuffisantes » nu envoie donc chercher un probleme de
+    droits qui n'existe pas, et il est de toute facon indiscernable d'un vrai.
+    Les deux causes sont nommees, avec le tool qui tranche.
+    """
+    payload: dict[str, Any] = {
+        "success": False,
+        "error": "not_found_or_forbidden",
+        f"{kind}_id": obj_id,
+        "as_user": account,
+        "hint": (
+            f"Kanboard rend le meme 403 dans deux cas : le {kind}_id #{obj_id} n'existe "
+            f"pas, ou il appartient a un projet hors de portee du compte '{account}'. "
+            "Verifier l'identifiant, puis le perimetre du compte avec "
+            "kanboard_check_project_access."
+        ),
+    }
+    if detail:
+        payload["api_detail"] = detail
+    return _dumps(payload)
+
+
+async def _fetch_comment(comment_id: int, as_user: str, account: str) -> tuple[dict | None, str]:
+    """Relit un commentaire. Retourne (commentaire, message d'erreur pret a rendre)."""
+    try:
+        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
+    except Exception as exc:
+        if _is_permission_error(exc):
+            return None, _not_found_or_forbidden("comment", comment_id, account, str(exc))
+        raise
+    if not raw:
+        return None, _not_found_or_forbidden("comment", comment_id, account)
+    return raw, ""
+
+
 def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detail: str = "") -> str:
     """Message d'echec explicite quand Kanboard refuse une ecriture sur commentaire.
 
@@ -2494,7 +2534,13 @@ async def kanboard_list_comments(task_id: int = 0, as_user: str = "") -> str:
     if not task_id:
         return "Erreur : task_id est obligatoire."
     try:
-        comments = await kb_call("getAllComments", {"task_id": task_id}, as_user=as_user)
+        try:
+            comments = await kb_call("getAllComments", {"task_id": task_id}, as_user=as_user)
+        except Exception as exc:
+            if _is_permission_error(exc):
+                _, _, account = _get_credentials(as_user)
+                return _not_found_or_forbidden("task", task_id, account, str(exc))
+            raise
         return _dumps([_comment_row(c) for c in (comments or [])])
     except Exception as exc:
         return _format_error(exc)
@@ -2514,9 +2560,10 @@ async def kanboard_get_comment(comment_id: int = 0, as_user: str = "") -> str:
     if not comment_id:
         return "Erreur : comment_id est obligatoire."
     try:
-        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
-        if not raw:
-            return f"Commentaire #{comment_id} introuvable."
+        _, _, account = _get_credentials(as_user)
+        raw, err = await _fetch_comment(comment_id, as_user, account)
+        if err:
+            return err
         return _dumps(_comment_row(raw))
     except Exception as exc:
         return _format_error(exc)
@@ -2558,9 +2605,9 @@ async def kanboard_update_comment(
         _, _, account = _get_credentials(as_user)
 
         # Relecture prealable : sans elle, l'ancien texte est perdu sans recours.
-        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
-        if not raw:
-            return f"Commentaire #{comment_id} introuvable."
+        raw, err = await _fetch_comment(comment_id, as_user, account)
+        if err:
+            return err
         previous = raw.get("comment") or ""
 
         try:
@@ -2615,9 +2662,9 @@ async def kanboard_remove_comment(comment_id: int = 0, as_user: str = "") -> str
         # Compte effectif (cf. kanboard_update_comment).
         _, _, account = _get_credentials(as_user)
 
-        raw = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
-        if not raw:
-            return f"Commentaire #{comment_id} introuvable."
+        raw, err = await _fetch_comment(comment_id, as_user, account)
+        if err:
+            return err
 
         try:
             success = await kb_call(
