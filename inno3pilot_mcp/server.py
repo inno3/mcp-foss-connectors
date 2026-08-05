@@ -121,15 +121,15 @@ async def _request(method: str, path: str, payload: dict | None = None) -> Any:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def inno3pilot_list_boards(fk_projet: int = 0) -> str:
+async def inno3pilot_list_boards(project_id: int = 0) -> str:
     """Liste les boards inno3pilot (tous, ou ceux d'un projet).
 
     Paramètres :
-    - fk_projet : 0 = tous les boards de l'entité ; sinon les boards du projet.
+    - project_id : 0 = tous les boards de l'entité ; sinon les boards du projet.
 
     Retourne : rowid, label, board_type (projet|perso|equipe), fk_projet, active.
     """
-    path = "/boards" + (f"?fk_projet={int(fk_projet)}" if fk_projet else "")
+    path = "/boards" + (f"?project_id={int(project_id)}" if project_id else "")
     return _dumps(await _request("GET", path))
 
 
