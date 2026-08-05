@@ -35,7 +35,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Runtime deps every connector needs (kept in sync with pyproject.toml).
-RUNTIME_DEPS = ["mcp", "httpx"]
+# Contraintes ALIGNÉES sur pyproject.toml : sans elles, pip prend la dernière
+# version publiée et mcp 2.0 supprime `mcp.server.fastmcp` -> tous les serveurs
+# du bundle plantent au démarrage avec ModuleNotFoundError (constaté 05/08/2026
+# sur le bundle inno3pilot fraîchement construit).
+RUNTIME_DEPS = ["mcp>=1.0.0,<2.0", "httpx>=0.27"]
 
 
 def _connectors() -> dict[str, Path]:
