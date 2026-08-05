@@ -1,0 +1,52 @@
+{
+  "manifest_version": "0.3",
+  "name": "inno3pilot-mcp",
+  "display_name": "Inno3Pilot (boards Dolibarr)",
+  "version": "0.1.0",
+  "description": "Connecteur inno3pilot : boards Kanban polymorphes dans Dolibarr — boards, colonnes, cartes résolues (tâches/tickets/CR), déplacement avec synchro du statut natif. 6 tools.",
+  "author": {
+    "name": "inno³",
+    "url": "https://inno3.fr"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/src/lib",
+        "DOLIBARR_URL": "${user_config.dolibarr_url}",
+        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "dolibarr_url": {
+      "type": "string",
+      "title": "URL Dolibarr",
+      "description": "URL de base de l'instance Dolibarr hébergeant le module inno3pilot (ex: https://erp.monentreprise.fr). Sans slash final.",
+      "required": true,
+      "sensitive": false
+    },
+    "dolibarr_api_key": {
+      "type": "string",
+      "title": "Clé API Dolibarr (DOLAPIKEY)",
+      "description": "Clé API d'un utilisateur Dolibarr ayant les droits inno3pilot (read/write). À générer dans Dolibarr : fiche utilisateur > onglet 'Clé API'.",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    { "name": "inno3pilot_list_boards", "description": "Liste les boards (tous ou par projet)" },
+    { "name": "inno3pilot_get_board", "description": "Détail d'un board : colonnes + types activés" },
+    { "name": "inno3pilot_get_cards", "description": "Cartes d'un board avec résumés résolus" },
+    { "name": "inno3pilot_move_card", "description": "Déplace une carte (+ synchro statut natif)" },
+    { "name": "inno3pilot_add_card", "description": "Ajoute une carte référençant un objet natif" },
+    { "name": "inno3pilot_add_column", "description": "Ajoute une colonne à un board" }
+  ],
+  "keywords": ["dolibarr", "kanban", "board", "inno3pilot", "projets"],
+  "license": "Apache-2.0"
+}
