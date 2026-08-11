@@ -80,6 +80,11 @@ class TestListFiles:
             raw = await nextcloud_list_files("/Documents", depth=1)
         assert mock_dav.call_args[0][0] == "PROPFIND"
         data = json.loads(raw)
-        # depth=1 strips the folder itself -> only the pdf remains
-        assert data["count"] == 1
+        # depth=1 strips the folder itself -> only the pdf remains.
+        # Le retrait se fait désormais par comparaison de chemin, plus par
+        # position : trier avant de retirer la première entrée écartait un
+        # élément au hasard.
+        assert data["total"] == 1
+        assert data["returned"] == 1
+        assert data["has_more"] is False
         assert data["items"][0]["filename"] == "rapport.pdf"

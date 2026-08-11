@@ -20,6 +20,7 @@ import logging
 import mimetypes
 import os
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -1453,12 +1454,183 @@ async def wordpress_delete_redirection(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Version du core et extensions actives
+#
+# L'API REST n'expose ni l'une ni les autres. Portes depuis le connecteur
+# prive le 11/08/2026 : ce sont les deux informations que reclame un audit
+# de vulnerabilites, et elles manquaient au connecteur public.
+# ---------------------------------------------------------------------------
+
+
+def _xml_escape(value: str) -> str:
+    """Échappe les caractères spéciaux XML (corps des requêtes XML-RPC)."""
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _parse_xmlrpc_software_version(xml_text: str) -> str | None:
+    """Extrait `software_version` d'une réponse XML-RPC wp.getOptions.
+
+    Structure retournée par WordPress :
+    struct → member[name=software_version] → struct → member[name=value] → string
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    for member in root.iter("member"):
+        name_el = member.find("name")
+        if name_el is None or (name_el.text or "").strip() != "software_version":
+            continue
+        for sub in member.iter("member"):
+            sub_name = sub.find("name")
+            if sub_name is not None and (sub_name.text or "").strip() == "value":
+                val = sub.find("./value/string")
+                if val is not None and val.text and val.text.strip():
+                    return val.text.strip()
+    return None
+
+
+async def _fetch_core_version(server: str, subsite: str = "") -> tuple[str | None, str, str]:
+    """Détermine la version du core WordPress. Retourne (version, source, note).
+
+    L'API REST n'expose **pas** la version du core (`/wp-json/` ne la contient
+    pas, `wp-site-health/v1` non plus). Trois stratégies successives :
+
+    1. XML-RPC `wp.getOptions` → option `software_version`. Authentifié via
+       l'Application Password (accepté par XML-RPC comme par REST) : c'est la
+       source la plus fiable, et la seule qui fonctionne quand le thème ou un
+       durcissement supprime le tag generator — cas vérifié en production.
+    2. `<meta name="generator" content="WordPress X.Y.Z">` de la home.
+    3. Paramètre `?ver=` d'un asset `wp-includes/` de la home.
+
+    Si aucune ne fonctionne, retourne (None, "", note explicative) — jamais
+    d'échec silencieux.
+    """
+    cfg = _SERVER_CONFIGS[server]
+    base, _ = _subsite_route(server, subsite)
+    verify_ssl = cfg.get("verify_ssl", True)
+    notes: list[str] = []
+
+    async with httpx.AsyncClient(verify=verify_ssl, timeout=30, follow_redirects=True) as client:
+        # 1. XML-RPC wp.getOptions
+        if cfg.get("user") and cfg.get("password"):
+            payload = (
+                '<?xml version="1.0"?><methodCall>'
+                "<methodName>wp.getOptions</methodName><params>"
+                "<param><value><int>1</int></value></param>"
+                f"<param><value><string>{_xml_escape(cfg['user'])}</string></value></param>"
+                f"<param><value><string>{_xml_escape(cfg['password'])}</string></value></param>"
+                "<param><value><array><data>"
+                "<value><string>software_version</string></value>"
+                "</data></array></value></param>"
+                "</params></methodCall>"
+            )
+            headers = {"Content-Type": "text/xml; charset=utf-8"}
+            # Basic Auth serveur (Nginx) éventuelle — les credentials WP sont
+            # dans le corps XML-RPC, pas dans l'en-tête.
+            if cfg.get("server_auth_user") and cfg.get("server_auth_pass"):
+                headers["Authorization"] = _get_auth_header(server)
+            try:
+                resp = await client.post(
+                    f"{cfg['url']}/xmlrpc.php", content=payload.encode("utf-8"), headers=headers
+                )
+                if resp.status_code == 200:
+                    version = _parse_xmlrpc_software_version(resp.text)
+                    if version:
+                        return version, "xmlrpc:wp.getOptions", ""
+                    notes.append("XML-RPC joignable mais wp.getOptions n'a pas retourné software_version")
+                else:
+                    notes.append(f"XML-RPC indisponible (HTTP {resp.status_code})")
+            except Exception as exc:
+                notes.append(f"XML-RPC en erreur ({type(exc).__name__})")
+        else:
+            notes.append("XML-RPC non tenté (Application Password non configuré)")
+
+        # 2 & 3. Page d'accueil : meta generator puis ?ver= d'un asset core
+        try:
+            home = await client.get(f"{base}/", headers={"Accept": "text/html"})
+            if home.status_code == 200:
+                gen = re.search(
+                    r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']WordPress\s+([0-9][0-9.]*)',
+                    home.text, re.I,
+                )
+                if gen:
+                    return gen.group(1), "meta:generator", ""
+                notes.append("meta generator absent de la home (hardening ou thème)")
+
+                vers = re.findall(r'wp-includes/[^"\' ]*?[?&]ver=([0-9]+\.[0-9]+(?:\.[0-9]+)?)', home.text)
+                if vers:
+                    return max(vers), "asset:?ver=", ""
+                notes.append("aucun asset wp-includes avec ?ver= exploitable")
+            else:
+                notes.append(f"home injoignable (HTTP {home.status_code})")
+        except Exception as exc:
+            notes.append(f"lecture de la home en erreur ({type(exc).__name__})")
+
+    return None, "", " ; ".join(notes)
+
+
+async def _fetch_active_plugins(server: str, subsite: str = "") -> tuple[list[dict] | None, str]:
+    """Liste les extensions actives avec leur version (utile pour un audit CVE).
+
+    Utilise `/wp/v2/plugins` (WP 5.5+), qui exige la capacité `activate_plugins`.
+    Retourne (liste, note) — liste None si l'endpoint est refusé/absent, avec
+    une note expliquant pourquoi.
+    """
+    try:
+        data = await _wp_get(server, "plugins", subsite=subsite)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status in (401, 403):
+            return None, (
+                f"/wp/v2/plugins refusé (HTTP {status}) : l'Application Password utilisé "
+                "n'a pas la capacité 'activate_plugins'."
+            )
+        if status == 404:
+            return None, "/wp/v2/plugins absent (WordPress < 5.5 ou endpoint désactivé)."
+        return None, f"/wp/v2/plugins en erreur (HTTP {status})."
+    except Exception as exc:
+        return None, f"/wp/v2/plugins injoignable ({type(exc).__name__})."
+
+    if not isinstance(data, list):
+        return None, "/wp/v2/plugins a retourné une réponse inattendue."
+
+    actives = [
+        {
+            "name": p.get("name", ""),
+            "version": p.get("version", ""),
+            "plugin": p.get("plugin", ""),
+            "status": p.get("status", ""),
+        }
+        for p in data
+        if p.get("status") in ("active", "network-active")
+    ]
+    return actives, ""
+
+
 @mcp.tool()
 async def wordpress_site_info(
     server: str = "prod",
     subsite: str = "",
 ) -> str:
-    """Informations générales sur le site WordPress (nom, URL, version, multisite...).
+    """Informations générales sur le site WordPress (nom, URL, version du core,
+    extensions actives, multisite...).
+
+    La version du core n'est **pas** exposée par l'API REST : elle est obtenue
+    via XML-RPC `wp.getOptions` (authentifié), avec repli sur le tag
+    `<meta name="generator">` puis sur le `?ver=` d'un asset core. Si aucune
+    méthode n'aboutit, `core_version` vaut null et `core_version_note` explique
+    pourquoi (jamais d'échec silencieux).
+
+    Les extensions actives sont listées avec leur version (audit CVE) via
+    `/wp/v2/plugins` ; en cas de droits insuffisants, `plugins_note` le signale.
 
     Args:
         server: "prod" ou "test"
@@ -1468,14 +1640,18 @@ async def wordpress_site_info(
         cfg = _SERVER_CONFIGS[server]
         if not cfg["url"]:
             return f"Serveur '{server}' non configuré (WP_{server.upper()}_URL manquant)."
-        url = f"{cfg['url']}/wp-json/"
+        base, _ = _subsite_route(server, subsite)
+        url = f"{base}/wp-json/"
         auth = _get_auth_header(server)
         async with httpx.AsyncClient(verify=cfg.get("verify_ssl", True), timeout=30) as client:
             resp = await client.get(url, headers={"Authorization": auth, "Accept": "application/json"})
             resp.raise_for_status()
             data = resp.json()
 
-        return json.dumps({
+        core_version, core_source, core_note = await _fetch_core_version(server, subsite)
+        plugins, plugins_note = await _fetch_active_plugins(server, subsite)
+
+        result: dict[str, Any] = {
             "server": server,
             "url": cfg["url"],
             "name": data.get("name", ""),
@@ -1485,7 +1661,23 @@ async def wordpress_site_info(
             "gmt_offset": data.get("gmt_offset", 0),
             "timezone": data.get("timezone_string", ""),
             "namespaces": data.get("namespaces", []),
-        }, ensure_ascii=False, separators=(",", ":"))
+            "core_version": core_version,
+            "core_version_source": core_source,
+        }
+        if core_version is None:
+            result["core_version_note"] = (
+                "Version du core indéterminable : "
+                + (core_note or "aucune source disponible")
+                + ". Vérifier manuellement dans wp-admin → Tableau de bord → Mises à jour."
+            )
+        if plugins is None:
+            result["plugins_active"] = None
+            result["plugins_note"] = plugins_note
+        else:
+            result["plugins_active"] = plugins
+            result["plugins_active_count"] = len(plugins)
+
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
