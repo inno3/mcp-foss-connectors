@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,43 @@ def _connectors() -> dict[str, Path]:
     return out
 
 
+def _extension_tools(ext: Path) -> "list[dict]":
+    """Noms et descriptions des outils qu'une extension enregistre.
+
+    Lecture statique du source (ast) plutôt qu'import : importer l'extension
+    exigerait le connecteur et ses dépendances dans l'interpréteur qui construit
+    le bundle, alors qu'elles ne sont vendorisées que dans le bundle lui-même.
+    """
+    import ast
+
+    # `pip install` laisse un build/lib/ contenant une COPIE du paquet : sans ce
+    # filtre chaque outil est compté deux fois, et la copie peut être périmée.
+    skip = {".venv", "build", "dist", ".git", "__pycache__", ".pytest_cache", ".ruff_cache"}
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for py in sorted(ext.rglob("*.py")):
+        if skip & set(py.parts) or py.name.startswith("test_"):
+            continue
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError:
+            continue
+        registered = set(re.findall(r"mcp\.tool\(\)\((\w+)\)", py.read_text()))
+        if not registered:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name not in registered or node.name in seen:
+                continue
+            seen.add(node.name)
+            doc = (ast.get_docstring(node) or "").strip().splitlines()
+            desc = doc[0] if doc else node.name
+            out.append({"name": node.name, "description": desc[:200]})
+    return out
+
+
 def build(name: str, pkg: Path, output_dir: Path,
           extensions: "list[Path] | None" = None) -> Path:
     manifest_path = pkg / "manifest.json"
@@ -70,8 +108,20 @@ def build(name: str, pkg: Path, output_dir: Path,
         lib = src / "lib"
         lib.mkdir(parents=True)
 
-        # 1. Manifest at the root.
-        shutil.copy2(manifest_path, stage / "manifest.json")
+        # 1. Manifest at the root. Quand une extension est embarquée, ses outils
+        #    sont ajoutés à la liste déclarée : celle-ci ne sert qu'à l'affichage,
+        #    mais un bundle qui annonce 42 outils et en expose 71 se lit comme un
+        #    chargement partiel. Le manifeste versionné, lui, reste générique.
+        bundled = dict(manifest)
+        extra = [t for ext in extensions or [] for t in _extension_tools(ext)]
+        if extra:
+            known = {t["name"] for t in bundled.get("tools", [])}
+            bundled["tools"] = bundled.get("tools", []) + [
+                t for t in extra if t["name"] not in known
+            ]
+        (stage / "manifest.json").write_text(
+            json.dumps(bundled, ensure_ascii=False, indent=2) + "\n"
+        )
 
         # 2. All Python modules of the package, flattened into src/.
         for py in sorted(pkg.glob("*.py")):
