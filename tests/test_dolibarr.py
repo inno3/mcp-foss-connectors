@@ -38,6 +38,7 @@ from dolibarr_mcp.server import (
     dolibarr_list_tasks,
     dolibarr_list_thirdparties,
     dolibarr_log_time,
+    dolibarr_update_invoice,
 )
 
 
@@ -1216,3 +1217,160 @@ class TestTaskDurationsExposedInHours:
         assert data["success"] is True
         assert data["total_spent_hours"] == 32.5
         assert data["total_spent_seconds"] == 117000
+
+
+@pytest.mark.asyncio
+class TestUpdateInvoice:
+    """dolibarr_update_invoice — PUT /invoices/{id}.
+
+    Le rattachement d'une facture à un projet a longtemps été fait à la main
+    dans `card.php` faute d'outil. Vérifié en production le 11/08/2026 sur
+    FA2608-0939 : l'API accepte `fk_project` sur une facture **validée non
+    payée** et le persiste (`Facture::update()` écrit `fk_projet` sans garde de
+    statut). Ces tests figent le contrat côté client.
+    """
+
+    @staticmethod
+    def _invoice(**over) -> dict:
+        base = {
+            "id": "445", "ref": "FA2608-0939", "socid": "12",
+            "fk_project": "180", "fk_statut": "1", "status": "1", "paye": "0",
+            "total_ht": "6000.00000000", "total_ttc": "7200.00000000",
+        }
+        base.update(over)
+        return base
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_project_link_uses_fk_project(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """`fk_project` et non `fk_projet` : l'API expose la propriété, pas la colonne."""
+        mock_get.return_value = self._invoice()
+
+        data = json.loads(await dolibarr_update_invoice(invoice_id=445, project_id=180))
+
+        endpoint, payload = mock_put.call_args[0]
+        assert endpoint == "invoices/445"
+        assert payload == {"fk_project": "180"}
+        assert data["success"] is True
+        assert data["fk_project"] == "180"
+        assert "project_link_warning" not in data
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_validated_unpaid_invoice_is_updatable(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """Statut 1 / paye 0 : cas réel de FA2608-0939, aucun blocage attendu."""
+        mock_get.return_value = self._invoice(fk_statut="1", paye="0")
+
+        data = json.loads(await dolibarr_update_invoice(invoice_id=445, project_id=180))
+
+        assert data["success"] is True
+        assert data["status_label"]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_project_zero_leaves_link_untouched(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """project_id=0 = « ne pas toucher », pas « détacher »."""
+        mock_get.return_value = self._invoice()
+
+        await dolibarr_update_invoice(invoice_id=445, note_public="Relance")
+
+        _, payload = mock_put.call_args[0]
+        assert "fk_project" not in payload
+        assert payload == {"note_public": "Relance"}
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_unpersisted_project_link_is_reported(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """Une facture sur un projet inexistant : le PUT rend 200, le lien ne prend pas."""
+        mock_get.return_value = self._invoice(fk_project=None)
+
+        data = json.loads(await dolibarr_update_invoice(invoice_id=445, project_id=999))
+
+        assert "project_link_warning" in data
+        assert "999" in data["project_link_warning"]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_invoice_on_closed_project_reads_back_its_id(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """L'UI masque les projets fermés ; l'API, elle, rend bien fk_project."""
+        mock_get.return_value = self._invoice(fk_project="42")
+
+        data = json.loads(await dolibarr_update_invoice(invoice_id=445, project_id=42))
+
+        assert data["fk_project"] == "42"
+        assert "project_link_warning" not in data
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_due_date_is_sent_as_timestamp(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """date_lim_reglement est un timestamp Unix : une chaîne s'afficherait en 1970."""
+        mock_get.return_value = self._invoice()
+
+        await dolibarr_update_invoice(invoice_id=445, date_due="2026-08-31")
+
+        _, payload = mock_put.call_args[0]
+        assert payload["date_lim_reglement"] == 1788134400
+
+    async def test_bad_due_date_is_rejected_before_the_put(self) -> None:
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock) as put:
+            out = await dolibarr_update_invoice(invoice_id=445, date_due="31/08/2026")
+        assert "YYYY-MM-DD" in out
+        put.assert_not_called()
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_ref_customer_maps_to_ref_client(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        mock_get.return_value = self._invoice()
+
+        await dolibarr_update_invoice(invoice_id=445, ref_customer="BC-2026-77")
+
+        _, payload = mock_put.call_args[0]
+        assert payload == {"ref_client": "BC-2026-77"}
+
+    async def test_no_field_means_no_call(self) -> None:
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock) as put:
+            out = await dolibarr_update_invoice(invoice_id=445)
+        assert "Aucun champ" in out
+        put.assert_not_called()
+
+    async def test_missing_id_is_rejected(self) -> None:
+        assert "invoice_id" in await dolibarr_update_invoice(invoice_id=0, project_id=1)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_write_is_reported_even_if_refetch_fails(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """Le PUT a abouti : le taire ferait rejouer une écriture déjà passée."""
+        mock_get.side_effect = RuntimeError("boom")
+
+        data = json.loads(await dolibarr_update_invoice(invoice_id=445, project_id=180))
+
+        assert data["success"] is True
+        assert "refetch_warning" in data
+
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_http_error_is_formatted(self, mock_put: AsyncMock) -> None:
+        request = httpx.Request("PUT", "https://dolibarr.test.local/x")
+        mock_put.side_effect = httpx.HTTPStatusError(
+            "denied", request=request,
+            response=httpx.Response(403, request=request),
+        )
+
+        out = await dolibarr_update_invoice(invoice_id=445, project_id=180)
+
+        assert "403" in out
