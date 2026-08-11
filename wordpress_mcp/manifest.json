@@ -26,7 +26,9 @@
         "WP_TEST_APP_PASSWORD": "${user_config.wp_test_app_password}",
         "WP_TEST_VERIFY_SSL": "${user_config.wp_test_verify_ssl}",
         "WP_TEST_SERVER_AUTH_USER": "${user_config.wp_test_server_auth_user}",
-        "WP_TEST_SERVER_AUTH_PASS": "${user_config.wp_test_server_auth_pass}"
+        "WP_TEST_SERVER_AUTH_PASS": "${user_config.wp_test_server_auth_pass}",
+        "WP_PROD_SUBSITES": "${user_config.wp_prod_subsites}",
+        "WP_TEST_SUBSITES": "${user_config.wp_test_subsites}"
       }
     }
   },
@@ -99,6 +101,20 @@
       "required": false,
       "sensitive": true,
       "default": ""
+    },
+    "wp_prod_subsites": {
+      "type": "string",
+      "title": "Sous-sites du serveur de production (JSON)",
+      "description": "Déclaration JSON des sous-sites multisite/multilingue, ex : {\"en\": \"/en\"} pour un sous-répertoire, {\"en\": \"https://en.exemple.org\"} pour un domaine, {\"en\": {\"lang\": \"en\"}} pour Polylang/WPML. Vide = site unique.",
+      "required": false,
+      "sensitive": false
+    },
+    "wp_test_subsites": {
+      "type": "string",
+      "title": "Sous-sites du serveur de test (JSON)",
+      "description": "Même format que WP_PROD_SUBSITES, pour le serveur de test.",
+      "required": false,
+      "sensitive": false
     }
   },
   "tools": [

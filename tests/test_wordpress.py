@@ -17,8 +17,10 @@ os.environ.setdefault("WP_PROD_APP_PASSWORD", "xxxx xxxx xxxx xxxx xxxx xxxx")
 import wordpress_mcp.server as wp  # noqa: E402
 from wordpress_mcp.server import (  # noqa: E402
     _content_fields,
+    _fetch_active_plugins,
     _format_page,
     _format_post,
+    _parse_xmlrpc_software_version,
     _strip_html,
     wordpress_get_custom_post,
     wordpress_get_page,
@@ -329,3 +331,68 @@ class TestSubsiteRouting:
         assert wp._parse_subsites("") == {}
         assert wp._parse_subsites("not json") == {}
         assert wp._parse_subsites('{"en":"/en"}') == {"en": "/en"}
+
+
+# --------------------------------------------------------------------------
+# Version du core et extensions actives (portés avec les helpers, 11/08/2026)
+# --------------------------------------------------------------------------
+
+
+XMLRPC_FAULT = (
+    '<?xml version="1.0"?><methodResponse><fault><value><struct>'
+    "<member><name>faultCode</name><value><int>403</int></value></member>"
+    "</struct></value></fault></methodResponse>"
+)
+
+
+XMLRPC_OK = (
+    '<?xml version="1.0" encoding="UTF-8"?><methodResponse><params><param><value>'
+    "<struct><member><name>software_version</name><value><struct>"
+    "<member><name>desc</name><value><string>Version du logiciel</string></value></member>"
+    "<member><name>readonly</name><value><boolean>1</boolean></value></member>"
+    "<member><name>value</name><value><string>7.0.2</string></value></member>"
+    "</struct></value></member></struct>"
+    "</value></param></params></methodResponse>"
+)
+
+
+class TestParseXmlrpcSoftwareVersion:
+    """La version du core n'est exposée nulle part dans l'API REST."""
+
+    def test_extrait_la_version(self) -> None:
+        assert _parse_xmlrpc_software_version(XMLRPC_OK) == "7.0.2"
+
+    def test_fault_retourne_none(self) -> None:
+        assert _parse_xmlrpc_software_version(XMLRPC_FAULT) is None
+
+    def test_xml_invalide_retourne_none(self) -> None:
+        assert _parse_xmlrpc_software_version("<pas du xml") is None
+
+
+@pytest.mark.asyncio
+class TestFetchActivePlugins:
+    """Liste des extensions actives avec version — matière première d'un audit CVE."""
+
+    async def test_ne_garde_que_les_actives(self) -> None:
+        payload = [
+            {"name": "ACF PRO", "version": "6.8.6", "plugin": "acf/acf", "status": "network-active"},
+            {"name": "Autre", "version": "1.0.0", "plugin": "autre/autre", "status": "active"},
+            {"name": "Désactivée", "version": "0.1", "plugin": "off/off", "status": "inactive"},
+        ]
+        with patch("wordpress_mcp.server._wp_get", new_callable=AsyncMock, return_value=payload):
+            plugins, note = await _fetch_active_plugins("prod")
+        assert note == ""
+        assert [p["name"] for p in plugins] == ["ACF PRO", "Autre"]
+        assert plugins[0]["version"] == "6.8.6"
+
+    async def test_droits_insuffisants_explique_le_manque(self) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://example.test/wp-json/wp/v2/plugins")
+        exc = httpx.HTTPStatusError(
+            "forbidden", request=request, response=httpx.Response(403, request=request)
+        )
+        with patch("wordpress_mcp.server._wp_get", new_callable=AsyncMock, side_effect=exc):
+            plugins, note = await _fetch_active_plugins("prod")
+        assert plugins is None
+        assert "activate_plugins" in note

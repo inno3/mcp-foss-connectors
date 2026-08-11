@@ -20,7 +20,9 @@
         "PYTHONPATH": "${__dirname}/src/lib",
         "NEXTCLOUD_URL": "${user_config.nextcloud_url}",
         "NEXTCLOUD_USER": "${user_config.nextcloud_user}",
-        "NEXTCLOUD_APP_PASSWORD": "${user_config.nextcloud_app_password}"
+        "NEXTCLOUD_APP_PASSWORD": "${user_config.nextcloud_app_password}",
+        "NEXTCLOUD_DOWNLOAD_DIR": "${user_config.nextcloud_download_dir}",
+        "NEXTCLOUD_MAX_SAVE_BYTES": "${user_config.nextcloud_max_save_bytes}"
       }
     }
   },
@@ -45,6 +47,20 @@
       "description": "Mot de passe d'application généré dans Nextcloud (Paramètres > Sécurité > Mot de passe d'application). Format : xxxx-xxxx-xxxx-xxxx-xxxx.",
       "required": true,
       "sensitive": true
+    },
+    "nextcloud_download_dir": {
+      "type": "string",
+      "title": "Dossier de téléchargement local",
+      "description": "Racine imposée pour toute écriture sur disque de nextcloud_download_file. Tout chemin demandé est traité comme RELATIF à cette racine : c'est ce qui empêche d'écraser un fichier arbitraire accessible au serveur. Défaut : ~/Downloads.",
+      "required": false,
+      "sensitive": false
+    },
+    "nextcloud_max_save_bytes": {
+      "type": "string",
+      "title": "Taille maximale d'un fichier écrit sur disque (octets)",
+      "description": "Plafond par fichier enregistré localement. Le corps de la réponse étant bufferisé, ce plafond borne aussi la mémoire utilisée. Défaut : 26214400 (25 Mo).",
+      "required": false,
+      "sensitive": false
     }
   },
   "tools": [
