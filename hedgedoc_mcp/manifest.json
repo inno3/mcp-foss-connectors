@@ -20,7 +20,8 @@
         "PYTHONPATH": "${__dirname}/src/lib",
         "HEDGEDOC_URL": "${user_config.hedgedoc_url}",
         "HEDGEDOC_USER": "${user_config.hedgedoc_user}",
-        "HEDGEDOC_PASSWORD": "${user_config.hedgedoc_password}"
+        "HEDGEDOC_PASSWORD": "${user_config.hedgedoc_password}",
+        "HEDGEDOC_API_TOKEN": "${user_config.hedgedoc_api_token}"
       }
     }
   },
@@ -47,6 +48,13 @@
       "required": false,
       "sensitive": true,
       "default": ""
+    },
+    "hedgedoc_api_token": {
+      "type": "string",
+      "title": "Jeton d'API HedgeDoc",
+      "description": "Jeton d'API optionnel, utilisé en en-tête Authorization quand l'instance en expose un. Sans lui, l'authentification passe par login/mot de passe et cookie de session.",
+      "required": false,
+      "sensitive": true
     }
   },
   "tools": [

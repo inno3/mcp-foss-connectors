@@ -21,7 +21,7 @@ Everything here runs **offline** — no live server, token, or network is requir
   errors that an already-installed source tree hides — e.g. a malformed
   `[project]` table).
 - [ ] `ruff check .` → "All checks passed!"
-- [ ] `pytest -q` → all green (currently 268 tests on py3.11 / py3.12).
+- [ ] `pytest -q` → all green (currently 359 tests on py3.11 / py3.12).
 
 The CI configs (`.github/workflows/ci.yml`, `.gitlab-ci.yml`) run exactly these
 three steps on Python 3.11 and 3.12.
