@@ -2915,6 +2915,110 @@ async def dolibarr_validate_invoice(invoice_id: int) -> str:
 
 
 @mcp.tool()
+async def dolibarr_update_invoice(
+    invoice_id: int,
+    project_id: int = 0,
+    ref_customer: str = "",
+    note_public: str = "",
+    note_private: str = "",
+    date_due: str = "",
+) -> str:
+    """Met à jour une facture existante dans Dolibarr (PUT /invoices/{id}).
+
+    Confirmation utilisateur requise avant exécution. Seuls les champs non vides
+    sont transmis.
+
+    Paramètres :
+    - invoice_id   : ID de la facture (obligatoire)
+    - project_id   : rattacher la facture à ce projet — champ API `fk_project`.
+                     0 = ne pas toucher au lien projet.
+    - ref_customer : référence client (champ API `ref_client`)
+    - note_public  : note publique
+    - note_private : note privée
+    - date_due     : date limite de règlement (format YYYY-MM-DD)
+
+    Statut — vérifié en production le 11/08/2026 sur FA2608-0939 (Dolibarr
+    23.0.0) : un PUT sur une facture **validée non payée** (fk_statut=1,
+    paye=0) renvoie HTTP 200 et le champ est persisté. `Facture::update()`
+    écrit `fk_projet` sans aucun garde de statut, et `api_invoices::put()`
+    n'en pose pas non plus. Le rattachement projet ne demande donc pas de
+    repasser la facture en brouillon.
+
+    Effet de bord mesuré sur ce même essai : `fk_user_modif` prend l'id de
+    l'utilisateur de la clé API et le trigger FACTURE_MODIFY se déclenche.
+    Aucun autre champ ne bouge — `Facture::update()` réécrit toute la ligne,
+    mais à partir de l'objet relu juste avant, donc à valeurs identiques.
+
+    Piège d'interface, sans rapport avec l'API : dans `card.php`, le sélecteur
+    de projet d'une facture **ne liste pas les projets fermés**. Un champ qui
+    paraît vide dans l'UI ne signifie donc pas « aucun projet rattaché » —
+    seule la valeur `fk_project` rendue ici fait foi.
+
+    Retour JSON : success, invoice_id, ref, status, status_label, fk_project,
+    updated_fields, et le cas échéant project_link_warning / refetch_warning.
+    """
+    try:
+        if not invoice_id:
+            return "Veuillez fournir un invoice_id."
+
+        data: dict[str, Any] = {}
+        if project_id:
+            data["fk_project"] = str(project_id)
+        if ref_customer:
+            data["ref_client"] = ref_customer
+        if note_public:
+            data["note_public"] = note_public
+        if note_private:
+            data["note_private"] = note_private
+        if date_due:
+            try:
+                # date_lim_reglement est stockée en timestamp Unix entier.
+                data["date_lim_reglement"] = _date_str_to_ts(date_due)
+            except ValueError:
+                return f"Format date_due invalide : '{date_due}'. Attendu : YYYY-MM-DD."
+
+        if not data:
+            return "Aucun champ à mettre à jour fourni."
+
+        await api_put(f"invoices/{invoice_id}", data)
+
+        # Read-after-write : relire la facture pour (a) remonter ref/statut/lien
+        # projet réels et (b) détecter un rattachement projet non persisté.
+        response: dict[str, Any] = {
+            "success": True,
+            "invoice_id": invoice_id,
+            "updated_fields": list(data.keys()),
+        }
+        try:
+            inv = await api_get(f"invoices/{invoice_id}")
+            if isinstance(inv, dict):
+                response["ref"] = inv.get("ref")
+                response["status"] = inv.get("fk_statut") or inv.get("status")
+                response["status_label"] = _format_invoice_status(
+                    inv.get("fk_statut") or inv.get("status"), inv.get("paye")
+                )
+                response["fk_project"] = inv.get("fk_project")
+                if project_id and str(inv.get("fk_project") or "") != str(project_id):
+                    response["project_link_warning"] = (
+                        f"Le rattachement au projet {project_id} ne semble pas avoir été "
+                        f"persisté (fk_project={inv.get('fk_project')!r}). Vérifier que le "
+                        f"projet existe et les droits de l'utilisateur API."
+                    )
+        except Exception as refetch_exc:
+            response["refetch_warning"] = (
+                f"Mise à jour envoyée mais relecture échouée : {refetch_exc}"
+            )
+
+        response["message"] = (
+            f"Facture {invoice_id} mise à jour ({', '.join(data.keys())})."
+        )
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
 async def dolibarr_validate_proposal(proposal_id: int) -> str:
     """Valide une proposition commerciale brouillon via POST /proposals/{id}/validate.
 

@@ -12,7 +12,7 @@ environment variables — no host, login or secret is baked into the code.
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
 
-## Tools (36)
+## Tools (37)
 
 - `dolibarr_list_projects` — Liste les projets Dolibarr
 - `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
@@ -48,6 +48,7 @@ environment variables — no host, login or secret is baked into the code.
 - `dolibarr_get_proposal` — Détail d'une proposition commerciale par ID numérique ou par référence
 - `dolibarr_get_supplier_invoice` — Détail d'une facture FOURNISSEUR par ID numérique ou par référence
 - `dolibarr_validate_invoice` — Valide une facture brouillon (statut 0 → 1) via POST /invoices/{id}/validate
+- `dolibarr_update_invoice` — Met à jour une facture : projet, référence client, notes, date d'échéance
 - `dolibarr_validate_proposal` — Valide une proposition commerciale brouillon via POST /proposals/{id}/validate
 - `dolibarr_get_invoice_pdf_url` — Retourne l'URL Dolibarr du PDF d'une facture (lien direct pour téléchargement
 
@@ -106,7 +107,7 @@ def register(mcp):
 ```
 
 A bad extension can never break the core: load failures are caught and logged
-to stderr, and the server keeps running with its 36 generic tools.
+to stderr, and the server keeps running with its 37 generic tools.
 
 ### inno³ extension package
 
@@ -114,7 +115,7 @@ Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`
 (7 tools) and the signed `inno3dashboard` / `supportcredits` portal URLs
 (2 tools) — are published as a separate add-on, **`inno3-mcp-extensions`**, *not* in
 this repository. Installing it next to `dolibarr-mcp` raises the tool count from
-36 to 45; uninstalling it restores the generic 36. No environment flag needed.
+37 to 59; uninstalling it restores the generic 37. No environment flag needed.
 
 ## License
 

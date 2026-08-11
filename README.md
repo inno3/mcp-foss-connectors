@@ -21,7 +21,7 @@ tool, whether self-hosted or managed.
 
 | Connector | Server name | Tools | Integrates with | Auth |
 |---|---|--:|---|---|
-| **Dolibarr ERP** | `dolibarr-mcp` | 36¹ | Dolibarr 16+ REST API | `DOLAPIKEY` API key |
+| **Dolibarr ERP** | `dolibarr-mcp` | 37¹ | Dolibarr 16+ REST API | `DOLAPIKEY` API key |
 | **Kanboard** | `kanboard-mcp` | 53 | Kanboard JSON-RPC API | personal API token |
 | **WordPress** | `wordpress-mcp` | 26 | WP REST API (+ ACF) | Application Password |
 | **n8n** | `n8n-mcp` | 17 | n8n public REST API | `X-N8N-API-KEY` |
@@ -34,7 +34,7 @@ All servers target **Python 3.11+** and use the official `mcp` library.
 A per-connector README in each `*_mcp/` directory documents its environment
 variables and tools in detail.
 
-¹ Dolibarr exposes **36** vendor-neutral tools. Organisation-specific tools
+¹ Dolibarr exposes **37** vendor-neutral tools. Organisation-specific tools
 that depend on *custom* Dolibarr modules (e.g. inno³'s MeetingNotes and signed
 portal URLs) are **not** shipped here: they live in a separate package that
 plugs in via the `dolibarr_mcp.extensions` entry-point group. See
