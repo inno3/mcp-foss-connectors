@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "dolibarr-mcp",
   "display_name": "Dolibarr ERP",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures, propositions, tickets, comptes-rendus. API REST Dolibarr 16+.",
   "author": {
     "name": "inno³",
@@ -19,8 +19,7 @@
       "env": {
         "PYTHONPATH": "${__dirname}/src/lib",
         "DOLIBARR_URL": "${user_config.dolibarr_url}",
-        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}",
-        "DOLIBARR_ENABLE_INNO3_EXTENSIONS": "${user_config.dolibarr_enable_inno3_extensions}"
+        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}"
       }
     }
   },
@@ -164,6 +163,26 @@
     {
       "name": "dolibarr_validate_proposal",
       "description": "Valide une proposition brouillon"
+    },
+    {
+      "name": "dolibarr_update_proposal",
+      "description": "Met à jour une proposition (projet, titre, dates, notes)"
+    },
+    {
+      "name": "dolibarr_set_proposal_draft",
+      "description": "Repasse une proposition validée en brouillon"
+    },
+    {
+      "name": "dolibarr_delete_proposal",
+      "description": "Supprime une proposition commerciale"
+    },
+    {
+      "name": "dolibarr_update_proposal_line",
+      "description": "Met à jour une ligne de proposition (brouillon)"
+    },
+    {
+      "name": "dolibarr_delete_proposal_line",
+      "description": "Supprime une ligne de proposition (brouillon)"
     },
     {
       "name": "dolibarr_list_tickets",

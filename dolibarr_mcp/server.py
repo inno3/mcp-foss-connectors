@@ -2619,6 +2619,21 @@ def _format_proposal_status(fk_statut: Any) -> str:
     return mapping.get(str(fk_statut or "0"), str(fk_statut))
 
 
+async def _proposal_is_draft(proposal_id: int) -> "tuple[bool, str]":
+    """Retourne (is_draft, status_label) pour une propale.
+
+    Sert de garde-fou aux éditions de ligne : Dolibarr verrouille les lignes
+    d'une propale non-brouillon et ignore SILENCIEUSEMENT un PUT/DELETE de ligne
+    (réponse HTTP 200 sans effet). En cas d'échec de lecture, considère la propale
+    comme brouillon (best-effort : ne pas bloquer sur un hoquet réseau)."""
+    try:
+        p = await api_get(f"proposals/{proposal_id}")
+        st = (p.get("fk_statut") or p.get("status")) if isinstance(p, dict) else "0"
+    except Exception:
+        return True, "?"
+    return str(st) == "0", _format_proposal_status(st)
+
+
 def _strip_html(text: Any) -> str:
     """Nettoie un texte HTML Dolibarr (descriptions de lignes) : convertit les
     sauts de ligne (<br>, </p>…), supprime les balises, décode les entités
@@ -3053,6 +3068,484 @@ async def dolibarr_validate_proposal(proposal_id: int) -> str:
             })
         except Exception:
             return _dumps({"success": True, "proposal_id": proposal_id, "message": "Validation OK (re-fetch échoué)."})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_update_proposal(
+    proposal_id: int,
+    project_id: int = 0,
+    title: str = "",
+    date: str = "",
+    date_validity: str = "",
+    note_public: str = "",
+    note_private: str = "",
+    ref_customer: str = "",
+) -> str:
+    """Met à jour une proposition commerciale existante dans Dolibarr.
+
+    Calqué sur dolibarr_update_project. Confirmation utilisateur requise avant
+    exécution. Seuls les champs non vides sont transmis (PUT /proposals/{id}).
+
+    Paramètres :
+    - proposal_id   : ID de la proposition (obligatoire)
+    - project_id    : rattacher la propal à ce projet — champ API `fk_project`.
+                      0 = ne pas toucher au lien projet.
+    - title         : titre/objet de la proposition (champ `titre`)
+    - date          : date de la proposition (format YYYY-MM-DD)
+    - date_validity : date de fin de validité (format YYYY-MM-DD)
+    - note_public   : note publique
+    - note_private  : note privée
+    - ref_customer  : référence client (champ API `ref_client`)
+
+    Lien projet — vérifié en prod (Dolibarr 23.0.0) : l'API REST expose la
+    propriété `fk_project` (PAS `fk_projet`, qui est l'orthographe de la colonne
+    SQL) ; `Propal::update()` persiste bien le lien. Un PUT {"fk_project":"258"}
+    relu via GET renvoie fk_project="258".
+
+    Statut — l'update est autorisé quel que soit le statut : rattacher un projet
+    et éditer les notes restent possibles sur une propale *validée* (comme dans
+    l'UI Dolibarr). Pour les propales validées/signées/facturées, Dolibarr peut
+    cependant ignorer certains champs (dates, montants) ; la réponse relit la
+    propale et signale via `project_link_warning` tout rattachement projet
+    demandé qui n'aurait pas été persisté.
+
+    Retour JSON : success, proposal_id, ref, status, status_label, fk_project,
+    updated_fields, et le cas échéant project_link_warning / refetch_warning.
+    """
+    try:
+        if not proposal_id:
+            return "Veuillez fournir un proposal_id."
+
+        data: dict[str, Any] = {}
+        if project_id:
+            data["fk_project"] = str(project_id)
+        if title:
+            data["titre"] = title
+        if date:
+            try:
+                # Dolibarr stocke la date de propal en timestamp Unix entier
+                # (cohérent avec dolibarr_create_proposal).
+                data["date"] = _date_str_to_ts(date)
+            except ValueError:
+                return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+        if date_validity:
+            try:
+                # fin_validite = timestamp Unix (sinon bug d'affichage 15/02/1970).
+                data["fin_validite"] = _date_str_to_ts(date_validity)
+            except ValueError:
+                return f"Format date_validity invalide : '{date_validity}'. Attendu : YYYY-MM-DD."
+        if note_public:
+            data["note_public"] = note_public
+        if note_private:
+            data["note_private"] = note_private
+        if ref_customer:
+            data["ref_client"] = ref_customer
+
+        if not data:
+            return "Aucun champ à mettre à jour fourni."
+
+        await api_put(f"proposals/{proposal_id}", data)
+
+        # Read-after-write : relire la propale pour (a) remonter ref/statut/lien
+        # projet réels et (b) détecter un rattachement projet non persisté (cas
+        # d'une propale verrouillée par son statut ou de droits insuffisants).
+        response: dict[str, Any] = {
+            "success": True,
+            "proposal_id": proposal_id,
+            "updated_fields": list(data.keys()),
+        }
+        try:
+            p = await api_get(f"proposals/{proposal_id}")
+            if isinstance(p, dict):
+                response["ref"] = p.get("ref")
+                response["status"] = p.get("fk_statut") or p.get("status")
+                response["status_label"] = _format_proposal_status(
+                    p.get("fk_statut") or p.get("status")
+                )
+                response["fk_project"] = p.get("fk_project")
+                if project_id and str(p.get("fk_project") or "") != str(project_id):
+                    response["project_link_warning"] = (
+                        f"Le rattachement au projet {project_id} ne semble pas avoir été "
+                        f"persisté (fk_project={p.get('fk_project')!r}). Vérifier le statut "
+                        f"de la propale (verrouillage) ou les droits de l'utilisateur API."
+                    )
+        except Exception as refetch_exc:
+            response["refetch_warning"] = (
+                f"Mise à jour envoyée mais relecture échouée : {refetch_exc}"
+            )
+
+        response["message"] = (
+            f"Proposition {proposal_id} mise à jour ({', '.join(data.keys())})."
+        )
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str:
+    """Supprime une proposition commerciale via DELETE /api/proposals/{id}.
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+    Pendant propal de dolibarr_delete_project.
+
+    Paramètres :
+    - proposal_id : ID de la proposition à supprimer (obligatoire)
+    - force       : défaut False — seuls les BROUILLONS (statut 0) sont
+                    supprimables. Passer force=True pour supprimer malgré tout
+                    une propale validée/signée/refusée/facturée (assumé par
+                    l'appelant : liens commandes/factures potentiellement
+                    orphelins).
+
+    Comportement :
+    - Succès → `{success: true, proposal_id, ref, message}`. Vérifié en prod
+      23.0.0 : la réponse Dolibarr est HTTP 200 + `{"success":{"code":200,
+      "message":"Commercial Proposal deleted"}}`, et un GET ultérieur renvoie 404.
+    - HTTP 500 (trigger custom qui crashe, FK orpheline, lien element_element non
+      géré) → diagnostic complet : état courant (ref, statut, socid), nombre de
+      lignes, extrait du corps d'erreur Dolibarr et pistes SQL de nettoyage.
+
+    Garde-fou statut : si la propale n'est PAS en brouillon, l'outil REFUSE la
+    suppression (`error: "proposal_not_draft"`) sauf force=True. Statut
+    invérifiable (échec de lecture hors 404) → refus également (`error:
+    "status_unverifiable"`) sauf force=True. Propale introuvable → `error:
+    "not_found"` sans tenter le DELETE. Pour les propales engagées, préférer
+    les classer (refusée) dans Dolibarr plutôt que les supprimer.
+    """
+    try:
+        if not proposal_id:
+            return "Veuillez fournir un proposal_id."
+
+        # Snapshot état avant suppression (garde-fou statut + diagnostic si 500)
+        snapshot: dict[str, Any] = {}
+        snapshot_error: str | None = None
+        lines_count: int | None = None
+        try:
+            p = await api_get(f"proposals/{proposal_id}")
+            if isinstance(p, dict):
+                snapshot = {
+                    "ref": p.get("ref"),
+                    "status": p.get("fk_statut") or p.get("status"),
+                    "status_label": _format_proposal_status(
+                        p.get("fk_statut") or p.get("status")
+                    ),
+                    "socid": p.get("socid"),
+                    "fk_project": p.get("fk_project"),
+                }
+                lines = p.get("lines")
+                lines_count = len(lines) if isinstance(lines, list) else None
+        except httpx.HTTPStatusError as get_exc:
+            if get_exc.response.status_code == 404:
+                return _dumps({
+                    "success": False,
+                    "proposal_id": proposal_id,
+                    "error": "not_found",
+                    "message": (
+                        f"Proposition {proposal_id} introuvable (404) — rien à supprimer."
+                    ),
+                })
+            snapshot_error = str(get_exc)
+        except Exception as get_exc:
+            snapshot_error = str(get_exc)
+
+        # Garde-fou : seuls les brouillons sont supprimables, sauf force=True.
+        # (Cohérent avec update/delete_proposal_line ; évite de détruire une
+        # propale engagée — validée/signée/facturée — sur un simple appel.)
+        if not force:
+            if snapshot_error is not None or not snapshot:
+                return _dumps({
+                    "success": False,
+                    "proposal_id": proposal_id,
+                    "error": "status_unverifiable",
+                    "read_error": snapshot_error,
+                    "message": (
+                        f"Impossible de vérifier le statut de la proposition "
+                        f"{proposal_id} avant suppression. Réessayer, ou relancer "
+                        f"avec force=True en connaissance de cause."
+                    ),
+                })
+            if str(snapshot.get("status")) != "0":
+                return _dumps({
+                    "success": False,
+                    "proposal_id": proposal_id,
+                    "ref": snapshot.get("ref"),
+                    "error": "proposal_not_draft",
+                    "status_label": snapshot.get("status_label"),
+                    "message": (
+                        f"La proposition {proposal_id} est "
+                        f"« {snapshot.get('status_label')} » : suppression refusée "
+                        f"(seuls les brouillons sont supprimables). Préférer la "
+                        f"classer refusée dans Dolibarr, ou relancer avec force=True "
+                        f"en connaissance de cause (liens commandes/factures "
+                        f"potentiellement orphelins)."
+                    ),
+                })
+
+        try:
+            await api_delete(f"proposals/{proposal_id}")
+            forced = bool(force and str(snapshot.get("status") or "") != "0")
+            return _dumps({
+                "success": True,
+                "proposal_id": proposal_id,
+                "ref": snapshot.get("ref"),
+                "forced": forced,
+                "message": f"Proposition {proposal_id} supprimée."
+                + (f" (ref={snapshot.get('ref')})" if snapshot.get("ref") else "")
+                + (" [force=True : propale non-brouillon supprimée]" if forced else ""),
+            })
+        except httpx.HTTPStatusError as http_exc:
+            status = http_exc.response.status_code
+            body = http_exc.response.text[:800]
+            if status == 500:
+                return _dumps({
+                    "success": False,
+                    "proposal_id": proposal_id,
+                    "http_status": 500,
+                    "proposal_state": snapshot,
+                    "lines_count": lines_count,
+                    "dolibarr_body": body,
+                    "diagnostic": (
+                        "HTTP 500 sur DELETE /proposals/{id}. Causes typiques :\n"
+                        "  1. Lien element_element (propal↔projet/commande/facture) non géré.\n"
+                        "  2. Trigger PROPAL_DELETE custom qui lève une exception PHP.\n"
+                        "  3. Propale engagée (signée/facturée) avec dépendances.\n"
+                        "Étapes recommandées :\n"
+                        "  a. Log Apache Cloudron :\n"
+                        "     `cloudron logs --app dolibarr.inno3.eu --tail 200 | grep -iE 'propal|fatal|error'`\n"
+                        "  b. Inspecter les liens et lignes avant nettoyage SQL :\n"
+                        "     SELECT * FROM llx_element_element WHERE fk_source="
+                        f"{proposal_id} AND sourcetype='propal';\n"
+                        "     SELECT * FROM llx_element_element WHERE fk_target="
+                        f"{proposal_id} AND targettype='propal';\n"
+                        "     SELECT rowid FROM llx_propaldet WHERE fk_propal="
+                        f"{proposal_id};\n"
+                        "  c. En dernier recours (irréversible — backup DB avant !) :\n"
+                        f"     DELETE FROM llx_propal_extrafields WHERE fk_object={proposal_id};\n"
+                        f"     DELETE FROM llx_propaldet WHERE fk_propal={proposal_id};\n"
+                        f"     DELETE FROM llx_element_contact WHERE element_id={proposal_id} "
+                        "AND element_type='propal';\n"
+                        f"     DELETE FROM llx_propal WHERE rowid={proposal_id};\n"
+                    ),
+                })
+            # 4xx ou autre 5xx : remonter tel quel
+            raise
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_update_proposal_line(
+    proposal_id: int,
+    line_id: int,
+    fields: dict,
+) -> str:
+    """Met à jour une ligne existante d'une proposition (PUT /proposals/{id}/lines/{line_id}).
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - proposal_id : ID de la proposition (obligatoire)
+    - line_id     : ID de la ligne à modifier (= line_id/rowid renvoyé par
+                    dolibarr_get_proposal, obligatoire)
+    - fields      : dict des champs à modifier, parmi :
+        - description / desc : libellé
+        - qty                : quantité
+        - subprice           : prix unitaire HT
+        - remise_percent     : remise en % sur la ligne
+        - tva_tx             : taux TVA en %
+        - product_type       : 0=produit, 1=service
+        - date_start / date_end : dates de prestation (timestamp Unix)
+
+    ⚠ La propale doit être en BROUILLON (status 0). Dolibarr verrouille les
+    lignes d'une propale validée/signée/facturée → l'API renvoie alors une
+    erreur. Repasser la propale en brouillon avant (UI : bouton « Modifier »),
+    puis revalider.
+
+    Exemple — porter une remise de 15 % sur une ligne existante (au lieu d'une
+    ligne de remise négative séparée) : fields={"remise_percent": 15}.
+
+    Retourne : success, proposal_id, line_id, champs envoyés, et les totaux
+    relus de la proposition (total_ht/total_ttc).
+    """
+    try:
+        if not proposal_id or not line_id:
+            return "Veuillez fournir proposal_id et line_id."
+        if not fields:
+            return "Aucun champ à mettre à jour (fields est vide)."
+
+        # Garde-fou statut : sur une propale non-brouillon, Dolibarr accepte le PUT
+        # (HTTP 200) mais N'APPLIQUE PAS la modification → faux succès. On refuse.
+        is_draft, status_label = await _proposal_is_draft(proposal_id)
+        if not is_draft:
+            return _dumps({
+                "success": False,
+                "proposal_id": proposal_id,
+                "line_id": line_id,
+                "error": "proposal_not_draft",
+                "status_label": status_label,
+                "message": (
+                    f"La proposition {proposal_id} est « {status_label} » : ses lignes "
+                    f"sont verrouillées (Dolibarr ignore silencieusement l'édition). "
+                    f"Repassez-la en brouillon (dolibarr_set_proposal_draft), éditez la "
+                    f"ligne, puis revalidez (dolibarr_validate_proposal)."
+                ),
+            })
+
+        allowed = {
+            "description", "desc", "qty", "subprice", "remise_percent",
+            "tva_tx", "product_type", "date_start", "date_end", "rang", "label",
+        }
+        line_data: dict[str, Any] = {}
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            # Normaliser description → desc (champ attendu par l'API).
+            line_data["desc" if k == "description" else k] = v
+        if not line_data:
+            return (
+                "Aucun champ reconnu dans fields. Champs supportés : "
+                + ", ".join(sorted(allowed))
+            )
+
+        # PUT /proposals/{id}/lines/{lineid} attend l'objet ligne directement
+        # (pas le tableau attendu par POST /lines).
+        await api_put(f"proposals/{proposal_id}/lines/{line_id}", line_data)
+
+        response: dict[str, Any] = {
+            "success": True,
+            "proposal_id": proposal_id,
+            "line_id": line_id,
+            "updated_fields": list(line_data.keys()),
+        }
+        try:
+            p = await api_get(f"proposals/{proposal_id}")
+            if isinstance(p, dict):
+                response["total_ht"] = p.get("total_ht")
+                response["total_ttc"] = p.get("total_ttc")
+        except Exception:
+            pass
+        response["message"] = (
+            f"Ligne {line_id} de la proposition {proposal_id} mise à jour."
+        )
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_proposal_line(proposal_id: int, line_id: int) -> str:
+    """Supprime une ligne d'une proposition (DELETE /proposals/{id}/lines/{line_id}).
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+
+    Paramètres :
+    - proposal_id : ID de la proposition (obligatoire)
+    - line_id     : ID de la ligne à supprimer (obligatoire)
+
+    ⚠ Même contrainte que dolibarr_update_proposal_line : la propale doit être
+    en BROUILLON. Utile notamment pour retirer une ligne de remise négative
+    après avoir porté la remise sur la ligne de prestation via remise_percent.
+
+    Retourne : success, proposal_id, line_id, et les totaux relus (total_ht/ttc).
+    """
+    try:
+        if not proposal_id or not line_id:
+            return "Veuillez fournir proposal_id et line_id."
+
+        # Même garde-fou que update_proposal_line : suppression de ligne ignorée
+        # silencieusement par Dolibarr sur une propale non-brouillon.
+        is_draft, status_label = await _proposal_is_draft(proposal_id)
+        if not is_draft:
+            return _dumps({
+                "success": False,
+                "proposal_id": proposal_id,
+                "line_id": line_id,
+                "error": "proposal_not_draft",
+                "status_label": status_label,
+                "message": (
+                    f"La proposition {proposal_id} est « {status_label} » : ses lignes "
+                    f"sont verrouillées. Repassez-la en brouillon "
+                    f"(dolibarr_set_proposal_draft) avant de supprimer la ligne, "
+                    f"puis revalidez (dolibarr_validate_proposal)."
+                ),
+            })
+
+        await api_delete(f"proposals/{proposal_id}/lines/{line_id}")
+
+        response: dict[str, Any] = {
+            "success": True,
+            "proposal_id": proposal_id,
+            "line_id": line_id,
+        }
+        try:
+            p = await api_get(f"proposals/{proposal_id}")
+            if isinstance(p, dict):
+                response["total_ht"] = p.get("total_ht")
+                response["total_ttc"] = p.get("total_ttc")
+                lines = p.get("lines")
+                response["lines_remaining"] = (
+                    len(lines) if isinstance(lines, list) else None
+                )
+        except Exception:
+            pass
+        response["message"] = (
+            f"Ligne {line_id} supprimée de la proposition {proposal_id}."
+        )
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_set_proposal_draft(proposal_id: int) -> str:
+    """Repasse une proposition en BROUILLON via POST /proposals/{id}/settodraft.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Nécessaire pour éditer/supprimer les lignes d'une propale déjà validée
+    (Dolibarr les verrouille sinon — voir dolibarr_update_proposal_line). Workflow
+    type pour corriger une ligne d'une propale validée :
+      1. dolibarr_set_proposal_draft(id)            → statut 1→0
+      2. dolibarr_update_proposal_line / dolibarr_delete_proposal_line
+      3. dolibarr_validate_proposal(id)             → statut 0→1, PDF régénéré
+
+    La ref définitive (PRyymm-xxxx) est CONSERVÉE : settodraft ne reprovisionne
+    pas la numérotation, et revalider une ref déjà définitive ne la renomme pas.
+    Vérifié en prod 23.0.0 (round-trip complet, totaux et ref inchangés).
+
+    Retourne : success, proposal_id, ref, status, status_label.
+    """
+    try:
+        if not proposal_id:
+            return "Veuillez fournir un proposal_id."
+
+        # settodraft accepte un corps vide ; certaines versions tolèrent
+        # {"notrigger": 0}. Le corps vide suffit en 23.0.0.
+        await api_post(f"proposals/{proposal_id}/settodraft", {})
+
+        try:
+            p = await api_get(f"proposals/{proposal_id}")
+            return _dumps({
+                "success": True,
+                "proposal_id": proposal_id,
+                "ref": p.get("ref"),
+                "status": p.get("fk_statut") or p.get("status"),
+                "status_label": _format_proposal_status(p.get("fk_statut") or p.get("status")),
+                "message": f"Proposition {proposal_id} repassée en brouillon.",
+            })
+        except Exception:
+            return _dumps({
+                "success": True,
+                "proposal_id": proposal_id,
+                "message": "settodraft OK (re-fetch échoué).",
+            })
 
     except Exception as exc:
         return _format_error(exc)

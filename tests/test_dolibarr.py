@@ -1374,3 +1374,268 @@ class TestUpdateInvoice:
         out = await dolibarr_update_invoice(invoice_id=445, project_id=180)
 
         assert "403" in out
+@pytest.mark.asyncio
+class TestUpdateProposal:
+    """dolibarr_update_proposal — rattachement projet (fk_project), conversions
+    de dates, read-after-write et warning de lien non persisté."""
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_maps_project_id_to_fk_project_and_confirms(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """project_id=258 → PUT {fk_project:"258"} ; read-after-write confirme."""
+        from dolibarr_mcp.server import dolibarr_update_proposal
+
+        mock_put.return_value = {"success": "updated"}
+        mock_get.return_value = {"ref": "PR2606-0134", "status": 1, "fk_project": "258"}
+
+        data = json.loads(await dolibarr_update_proposal(157, project_id=258))
+        assert data["success"] is True
+        assert data["fk_project"] == "258"
+        assert data["updated_fields"] == ["fk_project"]
+        assert "project_link_warning" not in data
+        # Le champ envoyé est bien fk_project (PAS fk_projet)
+        payload = mock_put.call_args_list[0].args[1]
+        assert payload == {"fk_project": "258"}
+        assert mock_put.call_args_list[0].args[0] == "proposals/157"
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_project_link_warning_when_not_persisted(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """Si le relire ne montre pas le projet demandé → project_link_warning."""
+        from dolibarr_mcp.server import dolibarr_update_proposal
+
+        mock_put.return_value = {"success": "updated"}
+        mock_get.return_value = {"ref": "PR2606-0134", "status": 4, "fk_project": None}
+
+        data = json.loads(await dolibarr_update_proposal(157, project_id=258))
+        assert data["success"] is True
+        assert "project_link_warning" in data
+        assert "258" in data["project_link_warning"]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    async def test_dates_converted_to_timestamp_and_ref_client(
+        self, mock_put: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        """date/date_validity → timestamps entiers ; ref_customer → ref_client."""
+        from dolibarr_mcp.server import _date_str_to_ts, dolibarr_update_proposal
+
+        mock_put.return_value = {"success": "updated"}
+        mock_get.return_value = {"ref": "PR2606-0134", "status": 0, "fk_project": None}
+
+        await dolibarr_update_proposal(
+            157, date="2026-06-24", date_validity="2026-08-08", ref_customer="BC-42")
+        payload = mock_put.call_args_list[0].args[1]
+        assert payload["date"] == _date_str_to_ts("2026-06-24")
+        assert payload["fin_validite"] == _date_str_to_ts("2026-08-08")
+        assert payload["ref_client"] == "BC-42"
+        assert isinstance(payload["date"], int)
+
+    async def test_no_fields_rejected(self) -> None:
+        from dolibarr_mcp.server import dolibarr_update_proposal
+        result = await dolibarr_update_proposal(157)
+        assert "Aucun champ" in result
+
+    async def test_missing_id_rejected(self) -> None:
+        from dolibarr_mcp.server import dolibarr_update_proposal
+        result = await dolibarr_update_proposal(0, project_id=258)
+        assert "proposal_id" in result
+
+
+@pytest.mark.asyncio
+class TestDeleteProposal:
+    """dolibarr_delete_proposal — succès + diagnostic 500 (calqué delete_project)."""
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_success(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        mock_get.return_value = {"ref": "(PROV159)", "status": 0, "socid": "213", "lines": []}
+        mock_delete.return_value = {"success": {"code": 200, "message": "Commercial Proposal deleted"}}
+
+        data = json.loads(await dolibarr_delete_proposal(159))
+        assert data["success"] is True
+        assert data["proposal_id"] == 159
+        assert data["ref"] == "(PROV159)"
+        assert mock_delete.call_args_list[0].args[0] == "proposals/159"
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_500_returns_diagnostic(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        import httpx
+
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        mock_get.return_value = {"ref": "PR2606-0134", "status": 1, "socid": "213",
+                                 "lines": [{"id": 1}, {"id": 2}]}
+        request = httpx.Request("DELETE", "http://test")
+        response = httpx.Response(500, request=request, text="Cannot delete, child exists")
+        mock_delete.side_effect = httpx.HTTPStatusError("", request=request, response=response)
+
+        # Propale validée (status 1) → force=True requis pour atteindre le DELETE.
+        data = json.loads(await dolibarr_delete_proposal(157, force=True))
+        assert data["success"] is False
+        assert data["http_status"] == 500
+        assert data["lines_count"] == 2
+        assert "diagnostic" in data
+        assert "llx_propaldet" in data["diagnostic"]
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_refused_on_validated_without_force(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        """Propale validée sans force → refus explicite, aucun DELETE émis."""
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        mock_get.return_value = {"ref": "PR2606-0134", "fk_statut": "1", "status": 1,
+                                 "socid": "213", "lines": [{"id": 1}]}
+        data = json.loads(await dolibarr_delete_proposal(157))
+        assert data["success"] is False
+        assert data["error"] == "proposal_not_draft"
+        assert "validée" in data["status_label"]
+        mock_delete.assert_not_called()
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_forced_on_validated(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        """force=True → DELETE effectué malgré le statut, réponse marquée forced."""
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        mock_get.return_value = {"ref": "PR2606-0134", "fk_statut": "1", "status": 1,
+                                 "socid": "213", "lines": []}
+        mock_delete.return_value = {"success": {"code": 200,
+                                                "message": "Commercial Proposal deleted"}}
+        data = json.loads(await dolibarr_delete_proposal(157, force=True))
+        assert data["success"] is True
+        assert data["forced"] is True
+        assert mock_delete.call_args_list[0].args[0] == "proposals/157"
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_refused_when_status_unverifiable(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        """Lecture du statut en échec (hors 404) sans force → refus prudent."""
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        mock_get.side_effect = RuntimeError("réseau indisponible")
+        data = json.loads(await dolibarr_delete_proposal(159))
+        assert data["success"] is False
+        assert data["error"] == "status_unverifiable"
+        mock_delete.assert_not_called()
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_not_found_no_delete_attempted(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        """Propale inexistante (GET 404) → not_found propre, aucun DELETE."""
+        import httpx
+
+        from dolibarr_mcp.server import dolibarr_delete_proposal
+
+        request = httpx.Request("GET", "http://test")
+        response = httpx.Response(404, request=request)
+        mock_get.side_effect = httpx.HTTPStatusError("", request=request, response=response)
+        data = json.loads(await dolibarr_delete_proposal(9999))
+        assert data["success"] is False
+        assert data["error"] == "not_found"
+        mock_delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestProposalLineOps:
+    """Garde-fou statut sur update/delete de ligne + set_proposal_draft."""
+
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_update_line_refused_on_validated(
+        self, mock_get: AsyncMock, mock_put: AsyncMock
+    ) -> None:
+        """Propale validée → refus explicite, aucun PUT (évite le faux succès)."""
+        from dolibarr_mcp.server import dolibarr_update_proposal_line
+
+        mock_get.return_value = {"status": 1, "fk_statut": "1"}
+        data = json.loads(await dolibarr_update_proposal_line(157, 356, {"remise_percent": 15}))
+        assert data["success"] is False
+        assert data["error"] == "proposal_not_draft"
+        assert "validée" in data["status_label"]
+        mock_put.assert_not_called()
+
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_update_line_ok_on_draft_maps_description(
+        self, mock_get: AsyncMock, mock_put: AsyncMock
+    ) -> None:
+        """Propale brouillon → PUT effectué, description normalisée en desc."""
+        from dolibarr_mcp.server import dolibarr_update_proposal_line
+
+        mock_get.return_value = {"status": 0, "fk_statut": "0",
+                                 "total_ht": "6290", "total_ttc": "7548"}
+        mock_put.return_value = {"success": "updated"}
+
+        data = json.loads(await dolibarr_update_proposal_line(
+            157, 356, {"remise_percent": 15, "description": "Mission"}))
+        assert data["success"] is True
+        assert mock_put.call_args_list[0].args[0] == "proposals/157/lines/356"
+        payload = mock_put.call_args_list[0].args[1]
+        assert payload["remise_percent"] == 15
+        assert payload["desc"] == "Mission"  # description → desc
+        assert "description" not in payload
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_line_refused_on_validated(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        from dolibarr_mcp.server import dolibarr_delete_proposal_line
+
+        mock_get.return_value = {"status": 2, "fk_statut": "2"}
+        data = json.loads(await dolibarr_delete_proposal_line(157, 357))
+        assert data["success"] is False
+        assert data["error"] == "proposal_not_draft"
+        mock_delete.assert_not_called()
+
+    @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_delete_line_ok_on_draft(
+        self, mock_get: AsyncMock, mock_delete: AsyncMock
+    ) -> None:
+        from dolibarr_mcp.server import dolibarr_delete_proposal_line
+
+        mock_get.return_value = {"status": 0, "fk_statut": "0",
+                                 "total_ht": "6290", "total_ttc": "7548", "lines": [{"id": 1}]}
+        mock_delete.return_value = {"success": {"code": 200}}
+
+        data = json.loads(await dolibarr_delete_proposal_line(157, 357))
+        assert data["success"] is True
+        assert mock_delete.call_args_list[0].args[0] == "proposals/157/lines/357"
+        assert data["lines_remaining"] == 1
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
+    async def test_set_proposal_draft_posts_settodraft(
+        self, mock_post: AsyncMock, mock_get: AsyncMock
+    ) -> None:
+        from dolibarr_mcp.server import dolibarr_set_proposal_draft
+
+        mock_post.return_value = {"id": "157"}
+        mock_get.return_value = {"ref": "PR2606-0134", "status": 0, "fk_statut": "0"}
+
+        data = json.loads(await dolibarr_set_proposal_draft(157))
+        assert data["success"] is True
+        assert data["status_label"] == "brouillon"
+        assert data["ref"] == "PR2606-0134"
+        assert mock_post.call_args_list[0].args[0] == "proposals/157/settodraft"

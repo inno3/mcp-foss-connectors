@@ -17,6 +17,13 @@ Usage:
     python scripts/build_mcpb.py gitlab
     python scripts/build_mcpb.py all
     python scripts/build_mcpb.py dolibarr --output-dir dist
+    python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions
+
+``--with-extension`` vendors an extra package into ``src/lib`` so the connector
+discovers its tools at startup through the ``dolibarr_mcp.extensions``
+entry-point group. The package is installed with pip, hence *with* its
+``.dist-info`` — without which ``importlib.metadata.entry_points()`` returns
+nothing and the extra tools are silently absent from the bundle.
 
 Requires ``pip`` on PATH. Bundles are written to ``dist/`` and are NOT committed.
 """
@@ -51,7 +58,8 @@ def _connectors() -> dict[str, Path]:
     return out
 
 
-def build(name: str, pkg: Path, output_dir: Path) -> Path:
+def build(name: str, pkg: Path, output_dir: Path,
+          extensions: "list[Path] | None" = None) -> Path:
     manifest_path = pkg / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     bundle_name = manifest["name"]  # e.g. "gitlab-mcp"
@@ -78,6 +86,20 @@ def build(name: str, pkg: Path, output_dir: Path) -> Path:
              "--target", str(lib), *RUNTIME_DEPS],
             check=True,
         )
+
+        # 3b. Optional tool extensions, vendored the same way. `--no-deps`
+        #     because an extension depends on this very connector: letting pip
+        #     resolve it would pull mcp-foss-connectors from an index and shadow
+        #     the modules already flattened into src/.
+        for ext in extensions or []:
+            if not (ext / "pyproject.toml").exists():
+                raise SystemExit(f"extension introuvable ou sans pyproject.toml : {ext}")
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", "--no-deps",
+                 "--target", str(lib), str(ext)],
+                check=True,
+            )
+
         # Drop console-script shims and bytecode caches (keeps the bundle small).
         shutil.rmtree(lib / "bin", ignore_errors=True)
         for cache in stage.rglob("__pycache__"):
@@ -99,15 +121,35 @@ def main() -> int:
     ap.add_argument("connector", help="connector short name, or 'all'",
                     choices=[*sorted(connectors), "all"])
     ap.add_argument("--output-dir", default=str(ROOT / "dist"), type=Path)
+    ap.add_argument(
+        "--with-extension", action="append", default=[], metavar="PATH", type=Path,
+        help="chemin d'un paquet d'extension à embarquer dans src/lib "
+             "(répétable ; ex: ../inno3-mcp-extensions)",
+    )
     args = ap.parse_args()
+
+    extensions = [p.resolve() for p in args.with_extension]
+    if extensions and args.connector == "all":
+        raise SystemExit(
+            "--with-extension vise un connecteur précis : une extension déclare "
+            "son point d'entrée pour un connecteur donné, l'embarquer dans tous "
+            "les bundles y ajouterait un paquet que rien ne charge."
+        )
 
     targets = connectors if args.connector == "all" else {
         args.connector: connectors[args.connector]
     }
     for name, pkg in targets.items():
-        out = build(name, pkg, Path(args.output_dir))
+        out = build(name, pkg, Path(args.output_dir), extensions)
         size_kb = out.stat().st_size / 1024
-        print(f"  ✓ {out.relative_to(ROOT)}  ({size_kb:.0f} KB)")
+        # relative_to() lève ValueError dès que --output-dir sort du dépôt : le
+        # bundle est déjà écrit à ce stade, planter sur son affichage donnerait
+        # à croire que la construction a échoué.
+        try:
+            shown = out.relative_to(ROOT)
+        except ValueError:
+            shown = out
+        print(f"  ✓ {shown}  ({size_kb:.0f} KB)")
     return 0
 
 

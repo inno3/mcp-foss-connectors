@@ -12,7 +12,7 @@ environment variables — no host, login or secret is baked into the code.
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
 
-## Tools (37)
+## Tools (42)
 
 - `dolibarr_list_projects` — Liste les projets Dolibarr
 - `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
@@ -50,6 +50,11 @@ environment variables — no host, login or secret is baked into the code.
 - `dolibarr_validate_invoice` — Valide une facture brouillon (statut 0 → 1) via POST /invoices/{id}/validate
 - `dolibarr_update_invoice` — Met à jour une facture : projet, référence client, notes, date d'échéance
 - `dolibarr_validate_proposal` — Valide une proposition commerciale brouillon via POST /proposals/{id}/validate
+- `dolibarr_update_proposal` — Met à jour une proposition : projet, titre, dates, notes, réf. client
+- `dolibarr_set_proposal_draft` — Repasse une proposition validée en brouillon (pour rééditer ses lignes)
+- `dolibarr_delete_proposal` — Supprime une proposition commerciale
+- `dolibarr_update_proposal_line` — Met à jour une ligne de proposition (brouillon uniquement)
+- `dolibarr_delete_proposal_line` — Supprime une ligne de proposition (brouillon uniquement)
 - `dolibarr_get_invoice_pdf_url` — Retourne l'URL Dolibarr du PDF d'une facture (lien direct pour téléchargement
 
 ## Durations are seconds, everywhere
@@ -107,15 +112,24 @@ def register(mcp):
 ```
 
 A bad extension can never break the core: load failures are caught and logged
-to stderr, and the server keeps running with its 37 generic tools.
+to stderr, and the server keeps running with its 42 generic tools.
 
 ### inno³ extension package
 
-Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`
-(7 tools) and the signed `inno3dashboard` / `supportcredits` portal URLs
-(2 tools) — are published as a separate add-on, **`inno3-mcp-extensions`**, *not* in
-this repository. Installing it next to `dolibarr-mcp` raises the tool count from
-37 to 59; uninstalling it restores the generic 37. No environment flag needed.
+Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`,
+`supportcredits` (carnets), `inno3pilot` (boards) and the signed
+`inno3dashboard` / `supportcredits` portal URLs — are published as a separate
+add-on, **`inno3-mcp-extensions`** (29 tools), *not* in this repository.
+Installing it next to `dolibarr-mcp` raises the tool count from 42 to 71;
+uninstalling it restores the generic 42. No environment flag needed.
+
+To ship both in a single Claude Desktop bundle, vendor the extension at build
+time — pip installs it *with* its `.dist-info`, without which the entry point is
+invisible and the extra tools silently absent:
+
+```sh
+python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions
+```
 
 ## License
 
