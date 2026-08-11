@@ -138,7 +138,12 @@ async def _hd_request(
 
     Retourne l'objet Response brut (le caller gère le parsing selon le type de
     réponse attendu : JSON, texte Markdown, ou redirection).
-    Relance un login si la session a expiré (401 → re-login → retry).
+
+    Relance un login si la session est invalide. Le déclencheur couvre **401 et
+    403** : HedgeDoc 1.x répond 403 (et non 401) sur les routes de l'espace
+    utilisateur quand la session n'est pas établie — c'est ce qui faisait passer
+    l'échec de `DELETE /history/<id>` pour un problème de droits sur la note
+    (« note privée ») alors qu'il s'agissait d'une session absente.
     """
     await _ensure_session()
 
@@ -156,9 +161,18 @@ async def _hd_request(
             ) as client:
                 logger.info("%s %s (tentative %d)", method, url, attempt + 1)
                 resp = await client.request(method, url, headers=headers, **kwargs)
-                # Session expirée → re-login et retry une seule fois
-                if resp.status_code == 401 and retry_on_401 and HEDGEDOC_USER:
-                    logger.info("Session HedgeDoc expirée, re-login...")
+                # Session expirée ou absente → re-login et retry une seule fois.
+                # 403 inclus : c'est le code que renvoie HedgeDoc 1.x sur
+                # /history et /me sans session valide.
+                if (
+                    resp.status_code in (401, 403)
+                    and retry_on_401
+                    and HEDGEDOC_USER
+                ):
+                    logger.info(
+                        "Session HedgeDoc invalide (HTTP %d), re-login...",
+                        resp.status_code,
+                    )
                     global _session_valid
                     _session_valid = False
                     await _login()
@@ -198,7 +212,15 @@ def _format_error(exc: Exception) -> str:
         if status == 401:
             return "Erreur 401 : session HedgeDoc expirée ou credentials invalides."
         if status == 403:
-            return "Erreur 403 : permissions insuffisantes (note privée — vérifier le login)."
+            # Ne plus affirmer « note privée » : sur HedgeDoc 1.x un 403 signale
+            # aussi bien une session absente qu'une option d'instance
+            # désactivée (allowFreeURL). Les outils concernés qualifient
+            # l'erreur eux-mêmes via _hd_auth_state().
+            return (
+                "Erreur 403 : HedgeDoc refuse la requête. Causes possibles : "
+                "session non établie, note privée, ou option d'instance "
+                "désactivée (alias / allowFreeURL). Vérifier avec hedgedoc_me()."
+            )
         if status == 404:
             return "Erreur 404 : note non trouvée dans HedgeDoc."
         if status == 500:
@@ -210,6 +232,57 @@ def _format_error(exc: Exception) -> str:
 def _dumps(data: Any) -> str:
     """Sérialise en JSON compact avec support UTF-8."""
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+async def _hd_auth_state() -> dict[str, Any]:
+    """État d'authentification courant, pour qualifier une erreur 403.
+
+    Sans cette information, « permissions insuffisantes » est indiscernable de
+    « pas connecté » : c'est exactement la confusion qui a fait chercher un
+    problème de droits sur `hedgedoc_delete_history_entry` le 30/07/2026.
+    """
+    state: dict[str, Any] = {
+        "credentials_configured": bool(HEDGEDOC_USER and HEDGEDOC_PASSWORD),
+        "session_established": _session_valid,
+        "logged_in": None,
+        "login": None,
+    }
+    try:
+        resp = await _hd_request("GET", "/me", content_type="", retry_on_401=False)
+        if resp.status_code == 200:
+            data = resp.json()
+            state["logged_in"] = bool(data.get("isLoggedIn", True))
+            state["login"] = data.get("name") or data.get("login") or None
+        else:
+            state["logged_in"] = False
+            state["me_http_status"] = resp.status_code
+    except Exception as exc:  # /me injoignable : on le dit, on ne devine pas
+        state["logged_in"] = None
+        state["me_error"] = str(exc)[:200]
+    return state
+
+
+def _hd_auth_hint(state: dict[str, Any]) -> str:
+    """Phrase de diagnostic dérivée de l'état d'authentification."""
+    if not state.get("credentials_configured"):
+        return (
+            "Aucun credential HedgeDoc configuré (HEDGEDOC_USER / "
+            "HEDGEDOC_PASSWORD) : le serveur travaille en mode anonyme, les "
+            "routes de l'espace utilisateur sont inaccessibles."
+        )
+    if state.get("logged_in") is False:
+        return (
+            "Session HedgeDoc non établie malgré des credentials configurés "
+            "(GET /me ne confirme pas la connexion) : problème "
+            "d'authentification, pas de droits."
+        )
+    if state.get("logged_in") is None:
+        return "État de connexion indéterminé (GET /me injoignable)."
+    return (
+        f"Session HedgeDoc active (utilisateur « {state.get('login')} ») : "
+        "l'échec porte donc bien sur les droits de la ressource, pas sur "
+        "l'authentification."
+    )
 
 
 def _extract_note_id_from_url(location: str) -> str:
@@ -312,6 +385,12 @@ async def hedgedoc_create_note(content: str, alias: str = "") -> str:
 
     Retourne : URL et ID de la note créée.
     Note : HedgeDoc 1.x répond par une redirection 302 vers la nouvelle note.
+
+    ⚠️ `alias` dépend d'une option d'instance : `POST /new/<alias>` n'est
+    autorisé que si `allowFreeURL` (variable `CMD_ALLOW_FREEURL`) est activé.
+    Sur l'instance visée il répond 403. Dans ce cas l'outil le dit explicitement
+    (`error: "hedgedoc_alias_forbidden"`) au lieu de laisser croire à un
+    problème de droits, et il suffit de rappeler l'outil **sans** alias.
     """
     try:
         path = "/new"
@@ -325,6 +404,29 @@ async def hedgedoc_create_note(content: str, alias: str = "") -> str:
             content=content.encode("utf-8"),
             follow_redirects=False,
         )
+
+        # 403 sur /new/<alias> : l'instance refuse les URL libres. À distinguer
+        # d'un souci de session, d'où la remontée de l'état d'authentification.
+        if resp.status_code == 403 and alias:
+            state = await _hd_auth_state()
+            return _dumps({
+                "success": False,
+                "error": "hedgedoc_alias_forbidden",
+                "alias": alias,
+                "http_status": 403,
+                "auth": state,
+                "message": (
+                    f"HedgeDoc refuse la création avec l'alias « {alias} » "
+                    "(HTTP 403 sur POST /new/<alias>). Cause la plus probable : "
+                    "l'option allowFreeURL (CMD_ALLOW_FREEURL) est désactivée "
+                    "sur l'instance, qui n'autorise donc que les identifiants "
+                    "générés. " + _hd_auth_hint(state)
+                ),
+                "workarounds": [
+                    "hedgedoc_create_note(content=...) sans alias",
+                    "Activer CMD_ALLOW_FREEURL côté configuration de l'instance",
+                ],
+            })
 
         # HedgeDoc 1.x répond 302 avec Location: /noteId
         if resp.status_code in (201, 302, 301, 200):
@@ -358,11 +460,27 @@ async def hedgedoc_create_note(content: str, alias: str = "") -> str:
 async def hedgedoc_update_note(note_id: str, content: str) -> str:
     """Met à jour le contenu Markdown d'une note HedgeDoc existante.
 
+    ⚠️ **Non supporté par HedgeDoc 1.x** (cas courant) : l'édition
+    d'une note passe uniquement par le protocole temps réel (socket.io) de
+    l'éditeur web. Il n'existe aucune route REST d'update — `/<noteId>` n'accepte
+    que GET/HEAD, seul `POST /new` (création) est exposé. Vérifié en prod le
+    26/07/2026 : `PUT /<noteId>` et `POST /<noteId>` renvoient tous deux
+    « Cannot PUT/POST » (404 Express), même avec une session authentifiée.
+
+    Le tool tente malgré tout le PUT (compatibilité avec une future instance
+    exposant une API d'écriture) puis, en cas d'absence de route, renvoie une
+    erreur explicite `hedgedoc_update_unsupported` plutôt qu'un « 404 note non
+    trouvée » trompeur.
+
+    Alternatives : `hedgedoc_create_note` pour publier une nouvelle version, ou
+    édition manuelle de la note dans le navigateur.
+
     Paramètres :
     - note_id : identifiant ou alias de la note
     - content : nouveau contenu Markdown complet (remplace le contenu existant)
 
-    Retourne : confirmation de mise à jour.
+    Retourne : confirmation de mise à jour, ou erreur explicite si l'instance
+    ne supporte pas l'édition via API.
     """
     try:
         resp = await _hd_request(
@@ -379,11 +497,59 @@ async def hedgedoc_update_note(note_id: str, content: str) -> str:
                 "message": f"Note '{note_id}' mise à jour avec succès.",
             })
 
+        # 404/405 = la route d'update n'existe pas (HedgeDoc 1.x). On distingue
+        # ce cas d'une note réellement absente en interrogeant /<noteId>/info.
+        if resp.status_code in (404, 405):
+            return _dumps(await _update_unsupported_payload(note_id, resp.status_code))
+
         resp.raise_for_status()
         return _dumps({"success": False, "message": "Réponse inattendue de HedgeDoc."})
 
     except Exception as exc:
         return _format_error(exc)
+
+
+async def _update_unsupported_payload(note_id: str, status: int) -> dict[str, Any]:
+    """Construit la réponse d'échec honnête de hedgedoc_update_note.
+
+    Distingue « la note n'existe pas » de « HedgeDoc n'expose pas d'update »
+    en vérifiant l'existence de la note via GET /<noteId>/info.
+    """
+    note_exists: bool | None = None
+    try:
+        info = await _hd_request("GET", f"/{note_id}/info", content_type="")
+        note_exists = info.status_code == 200
+    except Exception as exc:
+        logger.warning("Vérification d'existence de la note %s impossible : %s", note_id, exc)
+
+    if note_exists is False:
+        return {
+            "success": False,
+            "error": "note_not_found",
+            "note_id": note_id,
+            "message": (
+                f"Note '{note_id}' introuvable sur HedgeDoc (GET /{note_id}/info a échoué)."
+            ),
+        }
+
+    return {
+        "success": False,
+        "error": "hedgedoc_update_unsupported",
+        "note_id": note_id,
+        "http_status": status,
+        "note_exists": note_exists,
+        "message": (
+            "HedgeDoc 1.x ne permet pas l'édition d'une note via l'API REST : "
+            f"la route d'update n'existe pas (HTTP {status} « Cannot PUT /{note_id} »), "
+            "l'édition passe par le protocole temps réel (socket.io) de l'éditeur web. "
+            "Utilisez hedgedoc_create_note pour publier une nouvelle version, "
+            f"ou éditez la note dans le navigateur : {HEDGEDOC_URL}/{note_id}?both"
+        ),
+        "workarounds": [
+            "hedgedoc_create_note(content=...) → publier une nouvelle note",
+            f"Édition manuelle : {HEDGEDOC_URL}/{note_id}?both",
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -509,16 +675,34 @@ async def hedgedoc_delete_history_entry(note_id: str) -> str:
 
     Paramètre :
     - note_id : identifiant de la note à retirer de l'historique
+
+    Un échec 403 ici vient presque toujours d'une session non établie, pas des
+    droits sur la note : la réponse d'erreur porte l'état de connexion
+    (`auth`, issu de `/me`) pour trancher.
     """
     try:
         resp = await _hd_request("DELETE", f"/history/{note_id}", content_type="")
-        if resp.status_code == 401:
-            return "Erreur 401 : token HedgeDoc requis."
         if resp.status_code in (200, 204):
             return _dumps({
                 "success": True,
                 "note_id": note_id,
                 "message": f"Note '{note_id}' retirée de l'historique.",
+            })
+
+        if resp.status_code in (401, 403):
+            # Le re-login de _hd_request a déjà été tenté : si on est encore
+            # ici, ce n'est pas un simple cookie expiré.
+            state = await _hd_auth_state()
+            return _dumps({
+                "success": False,
+                "error": "hedgedoc_history_delete_denied",
+                "note_id": note_id,
+                "http_status": resp.status_code,
+                "auth": state,
+                "message": (
+                    f"HedgeDoc refuse DELETE /history/{note_id} "
+                    f"(HTTP {resp.status_code}). " + _hd_auth_hint(state)
+                ),
             })
 
         resp.raise_for_status()
