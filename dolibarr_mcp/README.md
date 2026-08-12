@@ -131,6 +131,18 @@ invisible and the extra tools silently absent:
 python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions
 ```
 
+**Updating an already-installed bundle.** A Desktop extension is identified by
+`<publisher>.<manifest name>` — that key indexes both its install directory and
+its settings file (URLs, secrets). Publishing under a different `name` therefore
+installs a *second* extension side by side and does not carry the configuration
+over. To update in place, republish under the name already installed, without
+touching the repository's generic manifest:
+
+```sh
+python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions \
+  --bundle-name my-org-dolibarr --display-name "Dolibarr ERP (my org)"
+```
+
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.

@@ -97,10 +97,12 @@ def _extension_tools(ext: Path) -> "list[dict]":
 
 
 def build(name: str, pkg: Path, output_dir: Path,
-          extensions: "list[Path] | None" = None) -> Path:
+          extensions: "list[Path] | None" = None,
+          bundle_name: "str | None" = None,
+          display_name: "str | None" = None) -> Path:
     manifest_path = pkg / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    bundle_name = manifest["name"]  # e.g. "gitlab-mcp"
+    bundle_name = bundle_name or manifest["name"]  # e.g. "gitlab-mcp"
 
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp)
@@ -113,6 +115,15 @@ def build(name: str, pkg: Path, output_dir: Path,
         #    mais un bundle qui annonce 42 outils et en expose 71 se lit comme un
         #    chargement partiel. Le manifeste versionné, lui, reste générique.
         bundled = dict(manifest)
+        # L'identite d'une extension installee est <publisher>.<name du
+        # manifeste> : c'est elle qui indexe le repertoire d'installation ET le
+        # fichier de reglages (URL, secrets). Republier sous un autre `name`
+        # installe donc une SECONDE extension a cote de la premiere, sans
+        # reprendre sa configuration. D'ou cette option : garder le depot
+        # generique tout en publiant sous le nom deja installe.
+        bundled["name"] = bundle_name
+        if display_name:
+            bundled["display_name"] = display_name
         extra = [t for ext in extensions or [] for t in _extension_tools(ext)]
         if extra:
             known = {t["name"] for t in bundled.get("tools", [])}
@@ -172,6 +183,17 @@ def main() -> int:
                     choices=[*sorted(connectors), "all"])
     ap.add_argument("--output-dir", default=str(ROOT / "dist"), type=Path)
     ap.add_argument(
+        "--bundle-name", metavar="NAME",
+        help="publier sous ce `name` de manifeste au lieu de celui du depot. "
+             "L'identite d'une extension installee etant <publisher>.<name>, "
+             "reutiliser le nom deja installe met a jour EN PLACE et conserve "
+             "la configuration ; un nom different installe une seconde extension.",
+    )
+    ap.add_argument(
+        "--display-name", metavar="TITLE",
+        help="libelle affiche dans le client (defaut : celui du depot)",
+    )
+    ap.add_argument(
         "--with-extension", action="append", default=[], metavar="PATH", type=Path,
         help="chemin d'un paquet d'extension à embarquer dans src/lib "
              "(répétable ; ex: ../inno3-mcp-extensions)",
@@ -179,6 +201,11 @@ def main() -> int:
     args = ap.parse_args()
 
     extensions = [p.resolve() for p in args.with_extension]
+    if args.bundle_name and args.connector == "all":
+        raise SystemExit(
+            "--bundle-name vise un connecteur precis : les huit bundles ne "
+            "peuvent pas partager un meme nom d'extension."
+        )
     if extensions and args.connector == "all":
         raise SystemExit(
             "--with-extension vise un connecteur précis : une extension déclare "
@@ -190,7 +217,8 @@ def main() -> int:
         args.connector: connectors[args.connector]
     }
     for name, pkg in targets.items():
-        out = build(name, pkg, Path(args.output_dir), extensions)
+        out = build(name, pkg, Path(args.output_dir), extensions,
+                    args.bundle_name, args.display_name)
         size_kb = out.stat().st_size / 1024
         # relative_to() lève ValueError dès que --output-dir sort du dépôt : le
         # bundle est déjà écrit à ce stade, planter sur son affichage donnerait
