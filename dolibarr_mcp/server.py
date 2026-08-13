@@ -104,8 +104,15 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 resp = await client.request(method, url, headers=HEADERS, **kwargs)
 
                 # Cas normal : 2xx
-                if resp.status_code < 400:
+                if resp.status_code < 300:
                     return _parse_json_or_raise(resp, method, url)
+
+                # 3xx : Restler rend un 304 « nothing done » quand une écriture
+                # n'a rien changé. Le laisser passer pour un succès ferait
+                # rapporter une imputation ou une mise à jour qui n'a rien écrit.
+                if resp.status_code < 400:
+                    resp.raise_for_status()
+
 
                 # Erreurs client 4xx : lever immédiatement sans inspecter le corps
                 if resp.status_code < 500:
@@ -545,6 +552,42 @@ TASK_ROLE_MANAGER = "TASKEXECUTIVE"        # libellé standard : « Responsable 
 
 
 
+# Bug amont Dolibarr 23.0.x : POST tasks/{id}/addtimespent tue le process PHP
+# avant même d'exécuter la méthode. Le bloc de doc de Tasks::addTimeSpent()
+# déclare deux types union, « @param datetime|string $date » et
+# « @param int|null $progress », que le CommentParser de Restler rend sous
+# forme de tableau ; Validator.php ligne 427 s'en sert comme clé de tableau
+# (isset($preFilters[$info->type])), ce qui lève un TypeError fatal sous PHP 8 :
+#     Cannot access offset of type array in isset or empty
+# La fatale se produit pendant la validation des paramètres, donc AVANT le
+# fetch de la tâche : aucun contenu de requête ne permet de l'éviter, et le
+# corps de la réponse est vide (HTTP 500, content-type text/html, 0 octet).
+# Dolibarr 22 déclarait « @param datetime $date » sans union et sans $progress :
+# la route y fonctionne. C'est donc une régression de la 23.
+_UPSTREAM_BUG_ADDTIMESPENT = (
+    "Bug amont Dolibarr 23.0.x, pas un problème de configuration : "
+    "POST tasks/{id}/addtimespent lève une fatale PHP "
+    "(TypeError « Cannot access offset of type array in isset or empty », "
+    "includes/restler/framework/Luracast/Restler/Data/Validator.php ligne 427) "
+    "pendant la validation des paramètres, avant toute lecture de la tâche. "
+    "Aucun contenu de requête ne contourne la fatale. L'imputation doit passer "
+    "par l'interface web (projet/tasks/time.php) tant que l'instance n'est pas "
+    "corrigée. Les routes de LECTURE et de CORRECTION du temps, elles, "
+    "fonctionnent : dolibarr_list_time_entries, dolibarr_update_time_entry, "
+    "dolibarr_delete_time_entry."
+)
+
+
+def _is_empty_bodied_500(exc: httpx.HTTPStatusError) -> bool:
+    """Signature d'une fatale PHP : HTTP 500 et pas un octet de corps.
+
+    Une erreur applicative Dolibarr rend toujours un JSON
+    {"error": {"code":…, "message":…}} ; un corps vide veut dire que le process
+    est mort avant d'écrire quoi que ce soit (display_errors off).
+    """
+    return exc.response.status_code == 500 and not (exc.response.text or "").strip()
+
+
 async def _task_exists(task_id: int) -> bool | None:
     """True/False selon que la tâche existe, None si le diagnostic échoue lui-même.
 
@@ -553,6 +596,21 @@ async def _task_exists(task_id: int) -> bool | None:
     """
     try:
         return bool(await api_get(f"tasks/{task_id}"))
+    except httpx.HTTPStatusError as exc:
+        return False if exc.response.status_code == 404 else None
+    except Exception:
+        return None
+
+
+async def _user_exists(user_id: int) -> bool | None:
+    """True/False selon que l'utilisateur Dolibarr existe, None si indéterminé.
+
+    Un identifiant de contact (llx_socpeople) ou de salarié passé à la place
+    d'un identifiant d'utilisateur (llx_user) ne remonte aucune erreur parlante
+    côté imputation : on le vérifie explicitement.
+    """
+    try:
+        return bool(await api_get(f"users/{user_id}"))
     except httpx.HTTPStatusError as exc:
         return False if exc.response.status_code == 404 else None
     except Exception:
@@ -601,42 +659,89 @@ async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
     return [_format_task_contact(c) for c in raw if isinstance(c, dict)]
 
 
-async def _log_time_error(exc: Exception, task_id: int, endpoint: str) -> str:
+async def _log_time_error(
+    exc: Exception,
+    task_id: int,
+    endpoint: str,
+    user_id: int = 0,
+) -> str:
     """Explique l'échec d'une imputation de temps, cause par cause.
 
-    Un « 404 : ressource non trouvée » nu est indébogable côté client : il
-    recouvre des causes qui n'appellent pas du tout la même correction. On
-    interroge la tâche pour trancher, et on remonte toujours le corps d'erreur
-    Dolibarr quand il y en a un.
+    Un « 404 : ressource non trouvée » nu est indébogable côté client, et un
+    diagnostic inventé est pire encore : la version précédente affirmait
+    « utilisateur non affecté » sur tout 5xx alors que l'API n'exige AUCUNE
+    affectation pour imputer (Tasks::addTimeSpent ne contrôle que le droit
+    projet->creer et l'accès au projet). On ne nomme donc que ce qui a été
+    réellement vérifié, et le reste est rendu tel quel dans `checks`.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         return _format_error(exc)
 
     status = exc.response.status_code
+    body = _error_body(exc)
     payload: dict[str, Any] = {
         "success": False,
         "task_id": task_id,
         "endpoint": endpoint,
         "http_status": status,
-        "dolibarr_error": _error_body(exc) or None,
+        "dolibarr_error": body or None,
+        "dolibarr_error_body_empty": not body,
     }
+    checks: dict[str, Any] = {
+        "tache_existe": None,
+        "utilisateur_existe": None,
+        "utilisateur_affecte": None,
+    }
+    payload["checks"] = checks
+
+    # Fatale PHP : la cause est connue et n'a rien à voir avec l'appelant.
+    if _is_empty_bodied_500(exc) and endpoint.endswith("/addtimespent"):
+        payload["cause"] = "bug_dolibarr_addtimespent"
+        payload["hint"] = _UPSTREAM_BUG_ADDTIMESPENT
+        return _dumps(payload)
+
+    if status == 304:
+        payload["cause"] = "aucun_changement"
+        payload["hint"] = (
+            "Dolibarr a répondu « nothing done » : rien n'a été écrit. Vérifier "
+            "que la durée est bien strictement positive."
+        )
+        return _dumps(payload)
 
     if status in (401, 403):
         payload["cause"] = "droits_insuffisants"
         payload["hint"] = (
-            "Dolibarr refuse l'accès à cette tâche. Vérifier que la clé API "
-            "porte le droit « créer/modifier » sur les projets, et que le "
-            "user_id visé est bien affecté à la tâche."
+            "Dolibarr refuse l'accès. L'imputation exige que l'utilisateur de "
+            "la CLÉ API (distinct de l'utilisateur imputé) porte les droits "
+            "projet->lire et projet->creer, et ait accès à ce projet. "
+            "L'affectation de l'utilisateur imputé, elle, n'est pas contrôlée "
+            "par cette route."
         )
         return _dumps(payload)
 
-    exists = await _task_exists(task_id)
+    checks["tache_existe"] = await _task_exists(task_id)
+    if user_id:
+        checks["utilisateur_existe"] = await _user_exists(user_id)
+        contacts = await _fetch_task_contacts(task_id)
+        if contacts is not None:
+            checks["utilisateur_affecte"] = any(
+                c["user_id"] == user_id for c in contacts
+            )
+            checks["roles_utilisateur"] = [
+                c["role_code"] for c in contacts if c["user_id"] == user_id
+            ]
 
-    if exists is False:
+    if checks["tache_existe"] is False:
         payload["cause"] = "tache_inexistante"
         payload["hint"] = (
             f"La tâche #{task_id} est introuvable. Lister les tâches du projet "
             "avec dolibarr_list_tasks pour récupérer un id valide."
+        )
+    elif checks["utilisateur_existe"] is False:
+        payload["cause"] = "utilisateur_inconnu"
+        payload["hint"] = (
+            f"Aucun utilisateur Dolibarr #{user_id}. user_id attend un id de "
+            "llx_user, pas un id de contact tiers ni de salarié."
         )
     elif status == 404:
         # La tâche répond : ce n'est donc pas elle qui manque, c'est la route.
@@ -647,19 +752,25 @@ async def _log_time_error(exc: Exception, task_id: int, endpoint: str) -> str:
             "L'ajout de temps est un POST sur tasks/{id}/addtimespent — "
             "tasks/{id}/timespent est en lecture seule."
         )
-    elif exists is True:
-        payload["cause"] = "utilisateur_non_affecte_ou_erreur_interne"
+    elif status == 400:
+        payload["cause"] = "parametres_refuses"
         payload["hint"] = (
-            f"La tâche #{task_id} existe et la route répond. Cause la plus "
-            "fréquente : l'utilisateur visé n'est pas affecté à la tâche "
-            "(Dolibarr rejette l'imputation sans message explicite). "
-            "Vérifier l'affectation, ou passer un user_id explicite."
+            "Dolibarr a rejeté les paramètres de l'appel. Le message ci-dessus "
+            "(dolibarr_error) nomme le champ en cause."
+        )
+    elif body:
+        payload["cause"] = "erreur_interne_dolibarr"
+        payload["hint"] = (
+            "Dolibarr a renvoyé une erreur interne avec un message : c'est lui "
+            "qui fait foi (dolibarr_error), pas une hypothèse du connecteur."
         )
     else:
-        payload["cause"] = "indetermine"
+        payload["cause"] = "erreur_interne_sans_corps"
         payload["hint"] = (
-            "L'appel a échoué et la tâche n'a pas pu être interrogée pour "
-            "trancher. Vérifier la connectivité et les droits de la clé API."
+            f"HTTP {status} avec un corps vide : Dolibarr n'a rien dit. Le "
+            "détail n'existe que côté serveur, dans le log PHP de l'instance "
+            "(une fatale PHP ne laisse aucune trace dans le log applicatif "
+            "Dolibarr). Aucune cause ne peut être affirmée d'ici."
         )
     return _dumps(payload)
 
@@ -671,22 +782,42 @@ async def dolibarr_log_time(
     date: str = "",
     note: str = "",
     user_id: int = 0,
+    time: str = "",
+    progress: int = -1,
 ) -> str:
     """Saisir du temps passé sur une tâche Dolibarr.
+
+    ATTENTION : sur Dolibarr 23.0.x cette route est CASSÉE EN AMONT et tout
+    appel échoue, quel qu'en soit le contenu : POST tasks/{id}/addtimespent
+    lève une fatale PHP dans le validateur de Restler avant même de lire la
+    tâche. Ce n'est pas un problème de configuration, d'affectation ni de
+    droits, et le connecteur ne peut pas le contourner. Sur ces instances,
+    l'imputation se fait par l'interface web (projet/tasks/time.php) ; la
+    LECTURE du temps, elle, reste disponible par l'API. Détail complet
+    dans le champ `hint` de l'erreur retournée.
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
     - duration : durée en heures (ex: 1.5 pour 1h30)
     - date : date au format YYYY-MM-DD (défaut: aujourd'hui)
     - note : commentaire sur le temps passé
-    - user_id : ID utilisateur (défaut: utilisateur API)
+    - user_id : ID utilisateur Dolibarr imputé (défaut: utilisateur de la clé API)
+    - time : heure de la journée HH:MM ou HH:MM:SS (défaut: 09:00:00)
+    - progress : avancement 0-100 à appliquer au passage ; -1 (défaut) laisse
+      l'avancement inchangé, comme le fait l'API amont
 
     La durée est saisie en HEURES et convertie en secondes pour l'API, qui
     n'accepte que des secondes (1.5 → 5400).
 
+    Dolibarr stocke une date ET une heure (llx_element_time.element_datehour) :
+    le connecteur envoie donc toujours un horodatage complet, jamais une date
+    seule. Cet horodatage est interprété en GMT par l'API.
+
     Retourne : confirmation avec le temps total passé sur la tâche, en heures
     (`total_spent_hours`) et en secondes brutes (`total_spent_seconds`).
-    En cas d'échec, retourne la cause identifiée (`cause`) plutôt qu'un 404 nu.
+    En cas d'échec, retourne la cause identifiée (`cause`), ce que le
+    connecteur a réellement vérifié (`checks`) et le corps d'erreur Dolibarr
+    quand il y en a un. Jamais un diagnostic supposé.
     """
     try:
         task_id = int(task_id) if task_id else 0
@@ -694,23 +825,39 @@ async def dolibarr_log_time(
             return "Veuillez fournir un task_id."
         if duration <= 0:
             return "La durée doit être supérieure à 0."
+        if progress != -1 and not 0 <= progress <= 100:
+            return "progress doit valoir -1 (inchangé) ou un entier de 0 à 100."
 
         from datetime import datetime
 
-        if date:
-            dt = datetime.strptime(date, "%Y-%m-%d")
-        else:
-            dt = datetime.now().replace(hour=9, minute=0, second=0)
+        base = datetime.strptime(date, "%Y-%m-%d") if date else datetime.now()
+        hour, minute, second = 9, 0, 0
+        if time:
+            try:
+                parts = [int(p) for p in time.strip().split(":")]
+            except ValueError:
+                return "time doit être au format HH:MM ou HH:MM:SS."
+            if not 2 <= len(parts) <= 3:
+                return "time doit être au format HH:MM ou HH:MM:SS."
+            hour, minute = parts[0], parts[1]
+            second = parts[2] if len(parts) == 3 else 0
+        dt = base.replace(hour=hour, minute=minute, second=second, microsecond=0)
 
         duration_seconds = int(duration * 3600)
 
-        # Dolibarr v23 : POST tasks/{id}/addtimespent, champs date/duration/
-        # user_id/note. La date passe par dol_stringtotime() → format
+        # POST tasks/{id}/addtimespent, champs date/duration/user_id/note/
+        # progress. La date passe par dol_stringtotime() → format
         # "YYYY-MM-DD HH:MI:SS" attendu, PAS un timestamp Unix.
+        # progress est transmis systématiquement, comme le fait le formulaire
+        # web : -1 est la valeur que l'API amont interprète comme « ne pas
+        # toucher à l'avancement » (elle n'applique que 0 ≤ progress ≤ 100).
+        # Les Dolibarr antérieurs à la 23 ignorent la clé, qu'ils ne déclarent
+        # pas.
         data: dict[str, Any] = {
             "date": dt.strftime("%Y-%m-%d %H:%M:%S"),
             "duration": duration_seconds,
             "note": note,
+            "progress": progress,
         }
         # user_id absent = utilisateur de la clé API (envoyer None ferait échouer
         # la validation Restler du paramètre entier).
@@ -721,7 +868,7 @@ async def dolibarr_log_time(
         try:
             await api_post(endpoint, data)
         except Exception as exc:
-            return await _log_time_error(exc, task_id, endpoint)
+            return await _log_time_error(exc, task_id, endpoint, user_id)
 
         # Re-fetch task to get updated totals
         task = await api_get(f"tasks/{task_id}")
@@ -738,6 +885,7 @@ async def dolibarr_log_time(
             "planned_hours": _seconds_to_hours(task.get("planned_workload")),
             "planned_seconds": _seconds_int(task.get("planned_workload")),
             "date": dt.strftime("%Y-%m-%d"),
+            "datehour": dt.strftime("%Y-%m-%d %H:%M:%S"),
             "note": note,
         })
 

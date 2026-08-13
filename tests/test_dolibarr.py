@@ -1075,10 +1075,59 @@ class TestLogTimeRouteAndConversion:
                                     note="Audit", user_id=7)
 
         payload = post.call_args[0][1]
-        assert set(payload) == {"date", "duration", "note", "user_id"}
+        assert set(payload) == {"date", "duration", "note", "user_id", "progress"}
         # dol_stringtotime attend une date lisible, pas un timestamp Unix.
-        assert payload["date"] == "2026-07-31 00:00:00"
+        assert payload["date"] == "2026-07-31 09:00:00"
         assert payload["user_id"] == 7
+
+    async def test_a_full_timestamp_is_always_sent_never_a_bare_date(self) -> None:
+        """element_datehour stocke une heure : une date nue la perdrait."""
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1, date="2026-07-31")
+
+        sent = post.call_args[0][1]["date"]
+        assert sent == "2026-07-31 09:00:00"
+        assert len(sent) == 19  # et non "2026-07-31" tout court
+
+    async def test_the_hour_of_day_can_be_chosen(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1, date="2026-07-31",
+                                    time="14:30")
+
+        assert post.call_args[0][1]["date"] == "2026-07-31 14:30:00"
+
+    async def test_progress_is_always_transmitted_like_the_web_form(self) -> None:
+        """Le formulaire web transmet progress à chaque saisie ; l'API aussi."""
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1)
+
+        # -1 est la valeur que l'API amont lit comme « ne pas toucher à
+        # l'avancement » : elle n'applique que 0 <= progress <= 100.
+        assert post.call_args[0][1]["progress"] == -1
+
+    async def test_progress_can_be_set_explicitly(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = {}
+            get.return_value = _task()
+            await dolibarr_log_time(task_id=42, duration=1, progress=60)
+
+        assert post.call_args[0][1]["progress"] == 60
+
+    async def test_an_out_of_range_progress_is_refused_before_the_call(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            out = await dolibarr_log_time(task_id=42, duration=1, progress=140)
+        assert "progress" in out
+        post.assert_not_called()
 
     async def test_user_id_is_omitted_rather_than_sent_null(self) -> None:
         with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
@@ -1112,74 +1161,6 @@ class TestLogTimeRouteAndConversion:
         assert "task_id" in await dolibarr_log_time(duration=1)
 
 
-@pytest.mark.asyncio
-class TestLogTimeErrorDiagnosis:
-    """Un 404 nu est indébogable : chaque cause doit être nommée."""
-
-    async def _fail_with(self, exc: Exception, task_reply: object = None,
-                         task_raises: Exception | None = None) -> dict:
-        async def _get(endpoint: str, *a: object, **k: object) -> object:
-            if task_raises is not None:
-                raise task_raises
-            return task_reply
-
-        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
-             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
-                   side_effect=_get):
-            post.side_effect = exc
-            return json.loads(await dolibarr_log_time(task_id=42, duration=1))
-
-    async def test_missing_task_is_named_as_such(self) -> None:
-        data = await self._fail_with(
-            _http_error(404, {"error": {"code": 404, "message": "Task not found"}}),
-            task_raises=_http_error(404),
-        )
-        assert data["cause"] == "tache_inexistante"
-        assert "dolibarr_list_tasks" in data["hint"]
-
-    async def test_existing_task_points_at_the_route(self) -> None:
-        data = await self._fail_with(_http_error(404), task_reply=_task())
-        assert data["cause"] == "route_ou_methode_invalide"
-        assert "addtimespent" in data["hint"]
-
-    async def test_permission_refusal_is_not_confused_with_a_missing_task(self) -> None:
-        data = await self._fail_with(
-            _http_error(403, {"error": {"code": 403, "message": "Access not allowed"}})
-        )
-        assert data["cause"] == "droits_insuffisants"
-        assert data["dolibarr_error"] == "Access not allowed"
-
-    async def test_unassigned_user_is_the_named_suspect_on_a_5xx(self) -> None:
-        data = await self._fail_with(_http_error(500), task_reply=_task())
-        assert data["cause"] == "utilisateur_non_affecte_ou_erreur_interne"
-        assert "affect" in data["hint"]
-
-    async def test_the_four_causes_produce_four_distinct_messages(self) -> None:
-        """Le point du correctif : chaque échec doit se distinguer des autres."""
-        cases = [
-            await self._fail_with(_http_error(404), task_raises=_http_error(404)),
-            await self._fail_with(_http_error(404), task_reply=_task()),
-            await self._fail_with(_http_error(403)),
-            await self._fail_with(_http_error(500), task_reply=_task()),
-        ]
-        assert all(c["success"] is False for c in cases)
-        assert len({c["cause"] for c in cases}) == 4
-        assert len({c["hint"] for c in cases}) == 4
-        # La route en cause est toujours remontée, pour rendre l'échec debuggable.
-        assert all(c["endpoint"] == "tasks/42/addtimespent" for c in cases)
-
-    async def test_dolibarr_error_body_is_surfaced(self) -> None:
-        data = await self._fail_with(
-            _http_error(500, {"error": {"code": 500, "message": "Error when adding time"}}),
-            task_reply=_task(),
-        )
-        assert data["dolibarr_error"] == "Error when adding time"
-
-    async def test_empty_error_body_does_not_invent_a_message(self) -> None:
-        data = await self._fail_with(_http_error(500), task_reply=_task())
-        assert data["dolibarr_error"] is None
-
-
 def _contact(user_id: int, code: str = "TASKCONTRIBUTOR", **over: object) -> dict:
     """Intervenant tel que tasks/{id}/contacts le renvoie (tout en chaînes)."""
     raw = {
@@ -1205,6 +1186,186 @@ def _contact(user_id: int, code: str = "TASKCONTRIBUTOR", **over: object) -> dic
     return raw
 
 
+def _route_get(**by_suffix: object):
+    """Mock d'api_get qui répond selon la route, et non une valeur unique.
+
+    Le diagnostic interroge maintenant plusieurs routes (tâche, utilisateur,
+    intervenants) : un mock à réponse unique les confondrait toutes.
+    """
+    async def _get(endpoint: str, *a: object, **k: object) -> object:
+        for suffix, reply in by_suffix.items():
+            if endpoint.endswith(suffix.replace("__", "/")):
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+        raise _http_error(404)
+    return _get
+
+
+@pytest.mark.asyncio
+class TestLogTimeErrorDiagnosis:
+    """Un 404 nu est indébogable, et un diagnostic inventé est pire."""
+
+    async def _fail_with(self, exc: Exception, user_id: int = 0,
+                         **routes: object) -> dict:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_route_get(**routes)):
+            post.side_effect = exc
+            return json.loads(
+                await dolibarr_log_time(task_id=42, duration=1, user_id=user_id)
+            )
+
+    async def test_missing_task_is_named_as_such(self) -> None:
+        data = await self._fail_with(
+            _http_error(404, {"error": {"code": 404, "message": "Task not found"}}),
+            tasks__42=_http_error(404),
+        )
+        assert data["cause"] == "tache_inexistante"
+        assert "dolibarr_list_tasks" in data["hint"]
+
+    async def test_existing_task_points_at_the_route(self) -> None:
+        data = await self._fail_with(
+            _http_error(404, {"error": {"code": 404, "message": "no route"}}),
+            tasks__42=_task(),
+        )
+        assert data["cause"] == "route_ou_methode_invalide"
+        assert "addtimespent" in data["hint"]
+
+    async def test_permission_refusal_is_not_confused_with_a_missing_task(self) -> None:
+        data = await self._fail_with(
+            _http_error(403, {"error": {"code": 403, "message": "Access not allowed"}})
+        )
+        assert data["cause"] == "droits_insuffisants"
+        assert data["dolibarr_error"] == "Access not allowed"
+        # Le refus porte sur la clé API, pas sur une affectation.
+        assert "clé API" in data["hint"] or "CLÉ API" in data["hint"]
+
+    async def test_an_empty_bodied_500_names_the_upstream_dolibarr_bug(self) -> None:
+        """Le vrai symptôme : HTTP 500, zéro octet de corps = fatale PHP amont."""
+        data = await self._fail_with(_http_error(500), tasks__42=_task())
+        assert data["cause"] == "bug_dolibarr_addtimespent"
+        assert data["dolibarr_error"] is None
+        assert data["dolibarr_error_body_empty"] is True
+        assert "Validator.php" in data["hint"]
+        assert "interface web" in data["hint"]
+
+    async def test_it_no_longer_blames_an_unassigned_user(self) -> None:
+        """La route n'exige aucune affectation : l'accuser était un faux
+        diagnostic, et il envoyait corriger une configuration déjà correcte."""
+        data = await self._fail_with(_http_error(500), tasks__42=_task())
+        assert "non_affecte" not in data["cause"]
+        assert "pas affecté" not in data["hint"]
+        assert "non affecté" not in data["hint"]
+
+    async def test_assignment_is_only_reported_when_actually_checked(self) -> None:
+        """`checks` ne dit que ce qui a été vérifié, jamais une supposition."""
+        data = await self._fail_with(
+            _http_error(500, {"error": {"code": 500, "message": "boom"}}),
+            user_id=7,
+            tasks__42=_task(),
+            users__7={"id": "7"},
+            tasks__42__contacts=[_contact(9), _contact(7, "TASKEXECUTIVE")],
+        )
+        assert data["checks"]["tache_existe"] is True
+        assert data["checks"]["utilisateur_existe"] is True
+        assert data["checks"]["utilisateur_affecte"] is True
+        assert data["checks"]["roles_utilisateur"] == ["TASKEXECUTIVE"]
+
+    async def test_an_unchecked_assignment_stays_null_not_false(self) -> None:
+        data = await self._fail_with(
+            _http_error(500, {"error": {"code": 500, "message": "boom"}}),
+            tasks__42=_task(),
+        )
+        # Sans user_id, rien n'a pu être vérifié : ne rien affirmer.
+        assert data["checks"]["utilisateur_affecte"] is None
+        assert data["checks"]["utilisateur_existe"] is None
+
+    async def test_a_contact_id_passed_as_a_user_id_is_named(self) -> None:
+        data = await self._fail_with(
+            _http_error(500, {"error": {"code": 500, "message": "boom"}}),
+            user_id=7,
+            tasks__42=_task(),
+            users__7=_http_error(404),
+        )
+        assert data["cause"] == "utilisateur_inconnu"
+        assert "llx_user" in data["hint"]
+
+    async def test_each_cause_produces_a_distinct_message(self) -> None:
+        """Le point du correctif : chaque échec doit se distinguer des autres."""
+        cases = [
+            await self._fail_with(_http_error(404), tasks__42=_http_error(404)),
+            await self._fail_with(
+                _http_error(404, {"error": {"message": "x"}}), tasks__42=_task()),
+            await self._fail_with(_http_error(403)),
+            await self._fail_with(_http_error(500), tasks__42=_task()),
+            await self._fail_with(
+                _http_error(500, {"error": {"message": "SQL error"}}),
+                tasks__42=_task()),
+            await self._fail_with(
+                _http_error(400, {"error": {"message": "date is required"}}),
+                tasks__42=_task()),
+        ]
+        assert all(c["success"] is False for c in cases)
+        assert len({c["cause"] for c in cases}) == len(cases)
+        assert len({c["hint"] for c in cases}) == len(cases)
+        # La route en cause est toujours remontée, pour rendre l'échec debuggable.
+        assert all(c["endpoint"] == "tasks/42/addtimespent" for c in cases)
+
+    async def test_dolibarr_error_body_is_surfaced(self) -> None:
+        data = await self._fail_with(
+            _http_error(500, {"error": {"code": 500, "message": "Error when adding time"}}),
+            tasks__42=_task(),
+        )
+        assert data["dolibarr_error"] == "Error when adding time"
+        assert data["dolibarr_error_body_empty"] is False
+        assert data["cause"] == "erreur_interne_dolibarr"
+
+    async def test_a_non_addtimespent_route_keeps_a_neutral_5xx_message(self) -> None:
+        """Le bug amont est nommé pour addtimespent, pas plaqué sur tout 500."""
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_route_get(tasks__42=_task())):
+            from dolibarr_mcp.server import _log_time_error
+            data = json.loads(await _log_time_error(
+                _http_error(500), 42, "tasks/42/timespent/9"))
+        assert data["cause"] == "erreur_interne_sans_corps"
+        assert "log PHP" in data["hint"]
+
+
+@pytest.mark.asyncio
+class TestWriteThatChangedNothingIsNotASuccess:
+    """Restler rend un 304 « nothing done » : le lire comme un succès ferait
+    rapporter une imputation qui n'a rien écrit."""
+
+    async def test_a_304_is_raised_instead_of_being_parsed_as_a_payload(self) -> None:
+        import httpx
+
+        from dolibarr_mcp.server import _api_request
+
+        resp = httpx.Response(
+            304, json={"error": {"code": 304, "message": "Error nothing done"}},
+            request=httpx.Request("POST", "http://test"),
+        )
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, *a: object, **k: object): return resp
+
+        with patch("httpx.AsyncClient", lambda **k: _Client()):
+            with pytest.raises(httpx.HTTPStatusError):
+                await _api_request("POST", "tasks/42/addtimespent")
+
+    async def test_log_time_reports_the_304_as_a_failure(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.side_effect = _http_error(
+                304, {"error": {"code": 304, "message": "Error nothing done"}})
+            data = json.loads(await dolibarr_log_time(task_id=42, duration=1))
+        assert data["success"] is False
+        assert data["cause"] == "aucun_changement"
+
+
+@pytest.mark.asyncio
 @pytest.mark.asyncio
 class TestTaskContacts:
     """Lire et modifier les intervenants d'une tâche, sans id de rôle en dur."""
