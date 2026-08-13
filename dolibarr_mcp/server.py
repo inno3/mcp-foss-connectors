@@ -113,7 +113,6 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 if resp.status_code < 400:
                     resp.raise_for_status()
 
-
                 # Erreurs client 4xx : lever immédiatement sans inspecter le corps
                 if resp.status_code < 500:
                     resp.raise_for_status()
@@ -256,6 +255,28 @@ def _ts_to_date(value: Any) -> str:
     if len(s) >= 10 and s[4:5] == "-":
         return s[:10]
     return s
+
+
+def _ts_to_datetime(value: Any) -> str:
+    """Convertit un timestamp Unix Dolibarr en 'YYYY-MM-DD HH:MM:SS' GMT.
+
+    Les écritures de temps portent une heure de la journée
+    (llx_element_time.element_datehour) que la date seule perdrait. L'API
+    interprète et rend ces horodatages en GMT : on les formate donc en GMT,
+    sans quoi un aller-retour lecture/écriture décalerait l'écriture.
+    Retourne '' si la valeur n'est pas un timestamp.
+    """
+    if value in (None, ""):
+        return ""
+    from datetime import datetime, timezone
+    try:
+        ts = int(value)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _date_str_to_ts(date_str: str) -> int:
@@ -528,15 +549,20 @@ async def dolibarr_list_tasks(
         return _format_error(exc)
 
 
-# Route d'ajout de temps passé, vérifiée contre le swagger servi par l'API
-# elle-même (Dolibarr v23). Trois routes se ressemblent, une seule accepte
-# un POST — les deux autres rendent un 404 sec, indiscernable d'un problème
-# de droits ou d'identifiant :
-#   POST tasks/{id}/addtimespent   → la bonne
-#   GET  tasks/{id}/timespent      → lecture seule, un POST ici rend 404
-#   .../projects/tasks/{id}/…      → n'existe pas : la classe Tasks est montée
-#                                    à la racine, jamais sous /projects
+# Routes du temps passé, vérifiées contre le swagger servi par l'API elle-même
+# (Dolibarr v23). Plusieurs routes se ressemblent, une seule accepte un POST :
+# les autres rendent un 404 sec, indiscernable d'un problème de droits ou
+# d'identifiant.
+#   POST   tasks/{id}/addtimespent            → ajout (cassé en v23, cf. plus bas)
+#   GET    tasks/{id}/timespent               → lecture seule, un POST ici rend 404
+#   PUT    tasks/{id}/timespent/{entry_id}    → correction d'une écriture
+#   DELETE tasks/{id}/timespent/{entry_id}    → suppression d'une écriture
+#   .../projects/tasks/{id}/…                 → n'existe pas : la classe Tasks est
+#                                               montée à la racine, jamais sous
+#                                               /projects
 TIMESPENT_ENDPOINT = "tasks/{task_id}/addtimespent"
+TIMESPENT_LIST_ENDPOINT = "tasks/{task_id}/timespent"
+TIMESPENT_ITEM_ENDPOINT = "tasks/{task_id}/timespent/{entry_id}"
 
 # Intervenants d'une tâche : llx_element_contact, élément « project_task ».
 TASK_CONTACTS_ENDPOINT = "tasks/{task_id}/contacts"
@@ -549,8 +575,6 @@ TASK_CONTACT_ELEMENT = "project_task"
 # amont pose une valeur bien plus basse). Dolibarr résout le code lui-même.
 TASK_ROLE_CONTRIBUTOR = "TASKCONTRIBUTOR"  # libellé standard : « Intervenant »
 TASK_ROLE_MANAGER = "TASKEXECUTIVE"        # libellé standard : « Responsable »
-
-
 
 # Bug amont Dolibarr 23.0.x : POST tasks/{id}/addtimespent tue le process PHP
 # avant même d'exécuter la méthode. Le bloc de doc de Tasks::addTimeSpent()
@@ -793,8 +817,10 @@ async def dolibarr_log_time(
     tâche. Ce n'est pas un problème de configuration, d'affectation ni de
     droits, et le connecteur ne peut pas le contourner. Sur ces instances,
     l'imputation se fait par l'interface web (projet/tasks/time.php) ; la
-    LECTURE du temps, elle, reste disponible par l'API. Détail complet
-    dans le champ `hint` de l'erreur retournée.
+    LECTURE et la CORRECTION du temps, elles, restent disponibles par l'API
+    (dolibarr_list_time_entries, dolibarr_update_time_entry,
+    dolibarr_delete_time_entry). Détail complet dans le champ `hint` de
+    l'erreur retournée.
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
@@ -1117,6 +1143,303 @@ async def dolibarr_unassign_task_user(
             "role": code,
             "count": len(after) if after is not None else None,
             "contacts": after,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools : écritures de temps (lecture et correction)
+# ---------------------------------------------------------------------------
+
+
+def _format_time_entry(raw: dict) -> dict:
+    """Normalise une ligne de tasks/{id}/timespent.
+
+    Dolibarr préfixe tout de `timespent_line_` et rend la durée en secondes,
+    sous forme de chaîne : on expose les deux unités, comme partout ailleurs.
+    """
+    seconds = raw.get("timespent_line_duration")
+    return {
+        "entry_id": _id_int(raw.get("timespent_line_id")),
+        "task_id": _id_int(raw.get("fk_task")),
+        "task_ref": raw.get("task_ref"),
+        "task_label": raw.get("task_label"),
+        "project_id": _id_int(raw.get("fk_project")),
+        "project_ref": raw.get("project_ref"),
+        "date": _ts_to_date(raw.get("timespent_line_datehour")
+                            or raw.get("timespent_line_date")),
+        "datehour": _ts_to_datetime(raw.get("timespent_line_datehour")),
+        # Timestamp brut conservé : c'est lui qu'on renvoie tel quel lors d'une
+        # correction, pour qu'une simple retouche de note ne décale pas l'heure.
+        "datehour_ts": _seconds_int(raw.get("timespent_line_datehour")),
+        "hours": _seconds_to_hours(seconds),
+        "seconds": _seconds_int(seconds),
+        "user_id": _id_int(raw.get("timespent_line_fk_user")),
+        "product_id": _id_int(raw.get("timespent_line_fk_product")),
+        "note": raw.get("timespent_line_note"),
+    }
+
+
+async def _fetch_time_entries(task_id: int) -> list[dict]:
+    """Écritures de temps d'une tâche, normalisées. Liste vide si aucune."""
+    raw = await api_get(TIMESPENT_LIST_ENDPOINT.format(task_id=task_id))
+    if not isinstance(raw, list):
+        return []
+    return [_format_time_entry(e) for e in raw if isinstance(e, dict)]
+
+
+@mcp.tool()
+async def dolibarr_list_time_entries(
+    task_id: int = 0,
+    project_id: int = 0,
+    user_id: int = 0,
+    date_start: str = "",
+    date_end: str = "",
+    limit: int = DEFAULT_LIMIT,
+) -> str:
+    """Liste les écritures de temps d'une tâche ou de tout un projet.
+
+    Paramètres :
+    - task_id : ID d'une tâche (task_id OU project_id est obligatoire)
+    - project_id : ID d'un projet, pour agréger toutes ses tâches
+    - user_id : ne garder que les écritures de cet utilisateur
+    - date_start / date_end : bornes incluses, format YYYY-MM-DD
+    - limit : nombre max d'écritures RETOURNÉES (les totaux, eux, portent sur
+      l'intégralité des écritures filtrées)
+
+    Retourne, pour chaque écriture : `entry_id` (rowid de llx_element_time,
+    à passer à dolibarr_update_time_entry / dolibarr_delete_time_entry), date,
+    horodatage, durée en `hours` ET en `seconds`, utilisateur, note, et la
+    tâche de rattachement. Plus les totaux `total_hours` / `total_seconds`,
+    et une ventilation par utilisateur (`by_user`) et par tâche (`by_task`).
+
+    `matched` compte les écritures filtrées, `returned` celles effectivement
+    rendues : quand `truncated` vaut true, la liste est tronquée mais les
+    totaux restent complets.
+    """
+    try:
+        if not task_id and not project_id:
+            return "Fournir un task_id ou un project_id."
+
+        task_ids: list[int] = []
+        if task_id:
+            task_ids = [int(task_id)]
+        else:
+            tasks = await api_get(f"projects/{project_id}/tasks", {"limit": MAX_LIMIT})
+            task_ids = [int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")]
+
+        entries: list[dict] = []
+        for tid in task_ids:
+            entries.extend(await _fetch_time_entries(tid))
+
+        if user_id:
+            entries = [e for e in entries if e["user_id"] == user_id]
+        if date_start:
+            entries = [e for e in entries if e["date"] and e["date"] >= date_start]
+        if date_end:
+            entries = [e for e in entries if e["date"] and e["date"] <= date_end]
+
+        entries.sort(key=lambda e: (e["date"] or "", e["entry_id"] or 0))
+
+        total_seconds = sum(e["seconds"] or 0 for e in entries)
+        by_user: dict[str, int] = {}
+        by_task: dict[str, int] = {}
+        for e in entries:
+            by_user[str(e["user_id"])] = by_user.get(str(e["user_id"]), 0) + (e["seconds"] or 0)
+            key = e["task_ref"] or str(e["task_id"])
+            by_task[key] = by_task.get(key, 0) + (e["seconds"] or 0)
+
+        capped = _clamp_limit(limit)
+        shown = entries[:capped]
+
+        return _dumps({
+            "task_id": task_id or None,
+            "project_id": project_id or None,
+            "tasks_scanned": len(task_ids),
+            "matched": len(entries),
+            "returned": len(shown),
+            "truncated": len(shown) < len(entries),
+            "total_hours": _seconds_to_hours(total_seconds),
+            "total_seconds": total_seconds,
+            "by_user": {
+                u: {"hours": _seconds_to_hours(s), "seconds": s}
+                for u, s in sorted(by_user.items(), key=lambda kv: -kv[1])
+            },
+            "by_task": {
+                t: {"hours": _seconds_to_hours(s), "seconds": s}
+                for t, s in sorted(by_task.items(), key=lambda kv: -kv[1])
+            },
+            "entries": shown,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_update_time_entry(
+    task_id: int,
+    entry_id: int,
+    duration: float = -1,
+    date: str = "",
+    time: str = "",
+    note: str = "",
+    user_id: int = 0,
+) -> str:
+    """Corrige une écriture de temps existante sur une tâche Dolibarr.
+
+    Confirmation utilisateur requise avant execution.
+
+    Paramètres :
+    - task_id : ID de la tâche portant l'écriture (obligatoire)
+    - entry_id : ID de l'écriture, `entry_id` rendu par
+      dolibarr_list_time_entries (obligatoire)
+    - duration : nouvelle durée en HEURES ; -1 (défaut) = inchangée
+    - date : nouvelle date YYYY-MM-DD ; vide = inchangée
+    - time : nouvelle heure HH:MM ou HH:MM:SS ; vide = inchangée
+    - note : nouveau commentaire ; vide = inchangé
+    - user_id : nouvel utilisateur imputé ; 0 = inchangé
+
+    L'API amont ne fait PAS de mise à jour partielle : elle réécrit la ligne
+    avec ce qu'on lui passe, et ses valeurs par défaut sont destructrices :
+    un `note` omis vide le commentaire, et un `user_id` omis réaffecte
+    l'écriture à l'utilisateur 0. Le connecteur relit donc l'écriture et
+    renvoie tous les champs, en ne remplaçant que ceux demandés.
+
+    Retourne l'écriture avant/après, durées en heures et en secondes.
+    """
+    try:
+        if not task_id:
+            return "Le task_id est obligatoire."
+        if not entry_id:
+            return "L'entry_id est obligatoire."
+        if duration != -1 and duration <= 0:
+            return "La durée doit être supérieure à 0 (ou -1 pour la laisser inchangée)."
+
+        entries = await _fetch_time_entries(task_id)
+        current = next((e for e in entries if e["entry_id"] == int(entry_id)), None)
+        if current is None:
+            return _dumps({
+                "success": False,
+                "cause": "ecriture_introuvable",
+                "task_id": task_id,
+                "entry_id": entry_id,
+                "hint": (
+                    f"Aucune écriture #{entry_id} sur la tâche #{task_id}. "
+                    "Lister les écritures avec dolibarr_list_time_entries."
+                ),
+            })
+
+        from datetime import datetime, timezone
+
+        # L'horodatage stocké est relu en GMT puis renvoyé en GMT : sans cela,
+        # une simple correction de note décalerait la date de l'écriture.
+        stored = current.get("datehour_ts")
+        base = (
+            datetime.fromtimestamp(stored, timezone.utc)
+            if stored
+            else datetime.now(timezone.utc)
+        )
+        if date:
+            d = datetime.strptime(date, "%Y-%m-%d")
+            base = base.replace(year=d.year, month=d.month, day=d.day)
+        if time:
+            try:
+                parts = [int(p) for p in time.strip().split(":")]
+            except ValueError:
+                return "time doit être au format HH:MM ou HH:MM:SS."
+            if not 2 <= len(parts) <= 3:
+                return "time doit être au format HH:MM ou HH:MM:SS."
+            base = base.replace(
+                hour=parts[0], minute=parts[1],
+                second=parts[2] if len(parts) == 3 else 0, microsecond=0,
+            )
+
+        seconds = int(duration * 3600) if duration != -1 else current["seconds"]
+        payload: dict[str, Any] = {
+            "date": base.strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": seconds,
+            "user_id": user_id or current["user_id"],
+            "note": note if note else (current["note"] or ""),
+        }
+        if current["product_id"]:
+            payload["product_id"] = current["product_id"]
+
+        endpoint = TIMESPENT_ITEM_ENDPOINT.format(task_id=task_id, entry_id=entry_id)
+        try:
+            await api_put(endpoint, payload)
+        except Exception as exc:
+            return await _log_time_error(exc, task_id, endpoint, payload["user_id"])
+
+        after = await _fetch_time_entries(task_id)
+        updated = next((e for e in after if e["entry_id"] == int(entry_id)), None)
+
+        return _dumps({
+            "success": True,
+            "task_id": task_id,
+            "entry_id": int(entry_id),
+            "before": current,
+            "after": updated,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_time_entry(task_id: int, entry_id: int) -> str:
+    """Supprime une écriture de temps sur une tâche Dolibarr.
+
+    Confirmation utilisateur requise avant execution.
+    IRRÉVERSIBLE : la ligne de llx_element_time est détruite, sans corbeille
+    ni historique. Le temps total de la tâche est recalculé en conséquence.
+
+    Paramètres :
+    - task_id : ID de la tâche portant l'écriture (obligatoire)
+    - entry_id : ID de l'écriture (obligatoire)
+
+    L'écriture est relue AVANT la suppression, pour que la réponse dise ce qui
+    a disparu (durée, date, utilisateur, note), et non un simple booléen.
+    Exige le droit projet->supprimer sur la clé API (l'ajout et la correction
+    n'exigent que projet->creer).
+    """
+    try:
+        if not task_id:
+            return "Le task_id est obligatoire."
+        if not entry_id:
+            return "L'entry_id est obligatoire."
+
+        entries = await _fetch_time_entries(task_id)
+        deleted = next((e for e in entries if e["entry_id"] == int(entry_id)), None)
+        if deleted is None:
+            return _dumps({
+                "success": False,
+                "cause": "ecriture_introuvable",
+                "task_id": task_id,
+                "entry_id": entry_id,
+                "hint": (
+                    f"Aucune écriture #{entry_id} sur la tâche #{task_id} : rien "
+                    "n'a été supprimé. Lister les écritures avec "
+                    "dolibarr_list_time_entries."
+                ),
+            })
+
+        endpoint = TIMESPENT_ITEM_ENDPOINT.format(task_id=task_id, entry_id=entry_id)
+        try:
+            await api_delete(endpoint)
+        except Exception as exc:
+            return await _log_time_error(exc, task_id, endpoint, deleted["user_id"] or 0)
+
+        task = await api_get(f"tasks/{task_id}")
+        return _dumps({
+            "success": True,
+            "task_id": task_id,
+            "entry_id": int(entry_id),
+            "deleted": deleted,
+            "total_spent_hours": _seconds_to_hours(task.get("duration_effective")),
+            "total_spent_seconds": _seconds_int(task.get("duration_effective")),
         })
 
     except Exception as exc:

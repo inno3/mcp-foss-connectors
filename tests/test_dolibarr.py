@@ -14,6 +14,8 @@ os.environ.setdefault("DOLIBARR_URL", "https://dolibarr.test.local")
 from dolibarr_mcp.server import (
     TASK_CONTACTS_ENDPOINT,
     TIMESPENT_ENDPOINT,
+    TIMESPENT_ITEM_ENDPOINT,
+    TIMESPENT_LIST_ENDPOINT,
     DolibarrAPIError,
     _api_get_list,
     _clamp_limit,
@@ -26,10 +28,12 @@ from dolibarr_mcp.server import (
     _seconds_int,
     _seconds_to_hours,
     _strip_html,
+    _ts_to_datetime,
     dolibarr_assign_task_user,
     dolibarr_close_task,
     dolibarr_create_project,
     dolibarr_dashboard,
+    dolibarr_delete_time_entry,
     dolibarr_get_invoice,
     dolibarr_get_proposal,
     dolibarr_get_supplier_invoice,
@@ -40,9 +44,11 @@ from dolibarr_mcp.server import (
     dolibarr_list_task_contacts,
     dolibarr_list_tasks,
     dolibarr_list_thirdparties,
+    dolibarr_list_time_entries,
     dolibarr_log_time,
     dolibarr_unassign_task_user,
     dolibarr_update_invoice,
+    dolibarr_update_time_entry,
 )
 
 
@@ -1186,6 +1192,27 @@ def _contact(user_id: int, code: str = "TASKCONTRIBUTOR", **over: object) -> dic
     return raw
 
 
+def _entry(entry_id: int, **over: object) -> dict:
+    """Écriture de temps telle que tasks/{id}/timespent la renvoie."""
+    raw = {
+        "fk_project": "9",
+        "project_ref": "PJ2602-0009",
+        "project_label": "Refonte",
+        "fk_task": "42",
+        "task_ref": "TK2607-0042",
+        "task_label": "Audit",
+        "timespent_line_id": str(entry_id),
+        "timespent_line_date": 1770854400,
+        "timespent_line_datehour": 1770854400,   # 2026-02-12 00:00:00 GMT
+        "timespent_line_duration": "5400",       # 1,5 h
+        "timespent_line_fk_user": "7",
+        "timespent_line_fk_product": None,
+        "timespent_line_note": "Revue de code",
+    }
+    raw.update(over)  # type: ignore[arg-type]
+    return raw
+
+
 def _route_get(**by_suffix: object):
     """Mock d'api_get qui répond selon la route, et non une valeur unique.
 
@@ -1498,6 +1525,193 @@ class TestTaskContacts:
 
         assert data["cause"] == "utilisateur_non_affecte"
         dele.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestListTimeEntries:
+    """Reconstituer une ventilation sans rouvrir l'interface, écriture par écriture."""
+
+    async def test_durations_come_back_in_both_units(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264), _entry(2265, timespent_line_duration="3600")]
+            data = json.loads(await dolibarr_list_time_entries(task_id=42))
+
+        assert get.call_args[0][0] == TIMESPENT_LIST_ENDPOINT.format(task_id=42)
+        first = data["entries"][0]
+        assert first["hours"] == 1.5
+        assert first["seconds"] == 5400
+        assert data["total_hours"] == 2.5
+        assert data["total_seconds"] == 9000
+
+    async def test_the_entry_id_needed_to_correct_a_line_is_exposed(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264)]
+            data = json.loads(await dolibarr_list_time_entries(task_id=42))
+
+        entry = data["entries"][0]
+        assert entry["entry_id"] == 2264
+        assert entry["user_id"] == 7
+        assert entry["note"] == "Revue de code"
+        assert entry["date"] == "2026-02-12"
+        assert entry["datehour"] == "2026-02-12 00:00:00"
+
+    async def test_a_breakdown_by_user_and_by_task_is_computed(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [
+                _entry(1), _entry(2, timespent_line_fk_user="9",
+                                  timespent_line_duration="3600"),
+            ]
+            data = json.loads(await dolibarr_list_time_entries(task_id=42))
+
+        assert data["by_user"]["7"]["hours"] == 1.5
+        assert data["by_user"]["9"]["hours"] == 1.0
+        assert data["by_task"]["TK2607-0042"]["seconds"] == 9000
+
+    async def test_filters_narrow_the_set(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [
+                _entry(1),
+                _entry(2, timespent_line_fk_user="9"),
+                _entry(3, timespent_line_datehour=1767225600),  # 2026-01-01
+            ]
+            data = json.loads(await dolibarr_list_time_entries(task_id=42, user_id=7))
+
+        assert data["matched"] == 2
+        assert {e["entry_id"] for e in data["entries"]} == {1, 3}
+
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(1), _entry(3, timespent_line_datehour=1767225600)]
+            data = json.loads(await dolibarr_list_time_entries(
+                task_id=42, date_start="2026-02-01"))
+
+        assert [e["entry_id"] for e in data["entries"]] == [1]
+
+    async def test_a_project_aggregates_every_task(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.endswith("/tasks"):
+                return [{"id": "42"}, {"id": "43"}]
+            return [_entry(1)] if endpoint.startswith("tasks/42") else [_entry(2)]
+
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            data = json.loads(await dolibarr_list_time_entries(project_id=9))
+
+        assert data["tasks_scanned"] == 2
+        assert data["matched"] == 2
+        assert data["total_seconds"] == 10800
+
+    async def test_truncation_is_declared_and_totals_stay_complete(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(i) for i in range(1, 6)]
+            data = json.loads(await dolibarr_list_time_entries(task_id=42, limit=2))
+
+        assert data["returned"] == 2
+        assert data["matched"] == 5
+        assert data["truncated"] is True
+        assert data["total_seconds"] == 27000   # les 5, pas les 2
+
+    async def test_a_scope_is_required(self) -> None:
+        assert "project_id" in await dolibarr_list_time_entries()
+
+
+@pytest.mark.asyncio
+class TestUpdateAndDeleteTimeEntry:
+    """L'API amont réécrit la ligne entière : ses défauts sont destructeurs."""
+
+    async def test_omitted_fields_are_carried_over_not_wiped(self) -> None:
+        """note='' viderait le commentaire et user_id=0 réaffecterait la ligne
+        à l'utilisateur 0 : le connecteur relit et repasse les valeurs."""
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock) as put, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264)]
+            await dolibarr_update_time_entry(task_id=42, entry_id=2264, duration=2)
+
+        payload = put.call_args[0][1]
+        assert put.call_args[0][0] == TIMESPENT_ITEM_ENDPOINT.format(
+            task_id=42, entry_id=2264)
+        assert payload["duration"] == 7200
+        assert payload["note"] == "Revue de code"   # conservé
+        assert payload["user_id"] == 7              # conservé, pas remis à 0
+        assert payload["date"] == "2026-02-12 00:00:00"  # heure conservée
+
+    async def test_correcting_only_the_note_does_not_move_the_entry(self) -> None:
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock) as put, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264, timespent_line_datehour=1770886800)]
+            await dolibarr_update_time_entry(task_id=42, entry_id=2264,
+                                             note="Reventilation")
+
+        payload = put.call_args[0][1]
+        assert payload["note"] == "Reventilation"
+        assert payload["duration"] == 5400                 # durée inchangée
+        assert payload["date"] == "2026-02-12 09:00:00"    # horodatage inchangé
+
+    async def test_an_unknown_entry_is_refused_before_any_write(self) -> None:
+        with patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock) as put, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264)]
+            data = json.loads(await dolibarr_update_time_entry(
+                task_id=42, entry_id=999, duration=1))
+
+        assert data["cause"] == "ecriture_introuvable"
+        put.assert_not_called()
+
+    async def test_delete_says_what_disappeared(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.endswith("/timespent"):
+                return [_entry(2264)]
+            return _task(duration_effective="111600")
+
+        with patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock) as dele, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            data = json.loads(await dolibarr_delete_time_entry(task_id=42,
+                                                               entry_id=2264))
+
+        assert dele.call_args[0][0] == "tasks/42/timespent/2264"
+        assert data["deleted"]["hours"] == 1.5
+        assert data["deleted"]["note"] == "Revue de code"
+        assert data["total_spent_hours"] == 31.0
+
+    async def test_delete_refuses_an_unknown_entry(self) -> None:
+        with patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock) as dele, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(2264)]
+            data = json.loads(await dolibarr_delete_time_entry(task_id=42,
+                                                               entry_id=999))
+
+        assert data["cause"] == "ecriture_introuvable"
+        dele.assert_not_called()
+
+
+@pytest.mark.skip(
+    reason="test d'intégration : exige une instance Dolibarr réelle et écrit "
+           "dedans. Procédure et script complets dans dolibarr_mcp/README.md, "
+           "section « Manual integration test ». Attendu : affecter un "
+           "utilisateur, imputer 1,5 h, relire l'écriture, vérifier 5400 "
+           "secondes, puis supprimer l'écriture."
+)
+def test_integration_assign_log_reread_5400_seconds() -> None:
+    """Aller-retour complet contre une instance, à lancer à la main.
+
+    Sur Dolibarr 23.0.x l'étape d'imputation échoue en amont
+    (cause bug_dolibarr_addtimespent) : affectation, lecture et suppression
+    passent quand même, ce qui délimite précisément le bug.
+    """
+
+
+class TestGmtTimestampFormatting:
+    """L'API rend et relit les horodatages en GMT : un aller-retour ne doit
+    pas décaler l'écriture."""
+
+    def test_a_unix_timestamp_becomes_a_gmt_datetime(self) -> None:
+        assert _ts_to_datetime(1770854400) == "2026-02-12 00:00:00"
+        assert _ts_to_datetime("1770886800") == "2026-02-12 09:00:00"
+
+    def test_a_missing_timestamp_yields_an_empty_string(self) -> None:
+        assert _ts_to_datetime(None) == ""
+        assert _ts_to_datetime("") == ""
+        assert _ts_to_datetime("n/a") == ""
 
 
 @pytest.mark.asyncio

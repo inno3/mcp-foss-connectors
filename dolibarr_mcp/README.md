@@ -12,12 +12,15 @@ environment variables — no host, login or secret is baked into the code.
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
 
-## Tools (45)
+## Tools (48)
 
 - `dolibarr_list_projects` — Liste les projets Dolibarr
 - `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
 - `dolibarr_list_tasks` — Liste les tâches d'un projet Dolibarr
 - `dolibarr_log_time` — Saisir du temps passé sur une tâche Dolibarr
+- `dolibarr_list_time_entries` : Liste les écritures de temps d'une tâche ou d'un projet
+- `dolibarr_update_time_entry` : Corrige une écriture de temps existante
+- `dolibarr_delete_time_entry` : Supprime une écriture de temps
 - `dolibarr_list_task_contacts` : Liste les intervenants affectés à une tâche
 - `dolibarr_assign_task_user` : Affecte un utilisateur comme intervenant d'une tâche
 - `dolibarr_unassign_task_user` : Retire un utilisateur des intervenants d'une tâche
@@ -86,6 +89,8 @@ a bad id.
 |---|---|---|
 | `tasks/{id}/addtimespent` | `POST` | the only add route, **fatally broken on Dolibarr 23.0.x**; see below |
 | `tasks/{id}/timespent` | `GET` only | works; a `POST` here returns `404` |
+| `tasks/{id}/timespent/{entry_id}` | `PUT` / `DELETE` | work (Dolibarr 23+) |
+| `tasks/{id}/getTimeSpent/{entry_id}` | `GET` | works (Dolibarr 23+) |
 | `projects/tasks/{id}/…` | — | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
 
 ### Known upstream bug: adding time is impossible on Dolibarr 23.0.x
@@ -114,8 +119,10 @@ regression introduced in 23, of the same family as
 `/products/{id}/purchase_prices`.
 
 Until the instance is patched, **time entry goes through the web UI**
-(`projet/tasks/time.php`). Only the add route is affected: the read, update and
-delete routes above all work on 23.0.x.
+(`projet/tasks/time.php`). Reading and correcting time are unaffected:
+`dolibarr_list_time_entries`, `dolibarr_update_time_entry` and
+`dolibarr_delete_time_entry` all work on 23.0.x, so a mis-keyed entry can be
+repaired without reopening the interface.
 
 `dolibarr_log_time` detects this exact signature and returns
 `cause: bug_dolibarr_addtimespent` with the file and line above, rather than
@@ -165,6 +172,59 @@ message is empty.
 Assignment is **not** required to log time through the API, only through the web
 UI. That is precisely why it matters while the upstream bug above stands.
 
+## Correcting a time entry: the API overwrites, it does not patch
+
+`PUT tasks/{id}/timespent/{entry_id}` rewrites the whole row from what you send,
+and its server-side defaults are destructive: an omitted `note` empties the
+comment, and an omitted `user_id` reassigns the entry to user `0` (the signature
+is `$user_id = 0` and the code does `$user_id ?? …`, so `0` is kept rather than
+falling back to the caller). `dolibarr_update_time_entry` therefore re-reads the
+entry and resends every field, replacing only what was asked for. Timestamps are
+read and written back in GMT, so correcting a note does not shift the entry's
+date.
+
+## Manual integration test
+
+The unit suite is fully offline. This end-to-end check needs a real instance and
+is run by hand; it is the only way to prove the round trip against a given
+Dolibarr version. Use a throwaway task, and clean up after yourself.
+
+```sh
+export DOLIBARR_URL=https://erp.example.com DOLIBARR_API_KEY=…
+python - <<'PY'
+import asyncio, json
+from dolibarr_mcp.server import (dolibarr_assign_task_user, dolibarr_delete_time_entry,
+                                 dolibarr_list_task_contacts, dolibarr_list_time_entries,
+                                 dolibarr_log_time)
+TASK, USER = 0, 0   # <- id d'une tâche jetable, id d'un utilisateur llx_user
+
+async def main():
+    print(await dolibarr_assign_task_user(task_id=TASK, user_id=USER))
+    assert any(c["user_id"] == USER for c in
+               json.loads(await dolibarr_list_task_contacts(task_id=TASK))["contacts"])
+
+    logged = json.loads(await dolibarr_log_time(task_id=TASK, duration=1.5,
+                                                user_id=USER, note="test integration"))
+    if not logged.get("success"):
+        # Attendu sur Dolibarr 23.0.x : la route d'ajout est cassée en amont.
+        assert logged["cause"] == "bug_dolibarr_addtimespent", logged
+        print("ajout indisponible sur cette version :", logged["cause"]); return
+
+    listed = json.loads(await dolibarr_list_time_entries(task_id=TASK, user_id=USER))
+    entry = next(e for e in listed["entries"] if e["note"] == "test integration")
+    assert entry["seconds"] == 5400, entry     # 1,5 h stockée en secondes
+    assert entry["hours"] == 1.5, entry
+    print(await dolibarr_delete_time_entry(task_id=TASK, entry_id=entry["entry_id"]))
+
+asyncio.run(main())
+PY
+```
+
+Expected on a working instance: the entry reads back at **5400 seconds** and
+**1.5 hours**. Expected on Dolibarr 23.0.x: `dolibarr_log_time` fails with
+`cause: bug_dolibarr_addtimespent`. Assignment, reading and deletion still
+pass, which is exactly the boundary of the upstream bug.
+
 ## Extending the connector
 
 This connector is **extensible without forking**. At startup it discovers any
@@ -186,7 +246,7 @@ def register(mcp):
 ```
 
 A bad extension can never break the core: load failures are caught and logged
-to stderr, and the server keeps running with its 45 generic tools.
+to stderr, and the server keeps running with its 48 generic tools.
 
 ### inno³ extension package
 
@@ -194,8 +254,8 @@ Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`,
 `supportcredits` (carnets), `inno3pilot` (boards) and the signed
 `inno3dashboard` / `supportcredits` portal URLs — are published as a separate
 add-on, **`inno3-mcp-extensions`** (29 tools), *not* in this repository.
-Installing it next to `dolibarr-mcp` raises the tool count from 45 to 74;
-uninstalling it restores the generic 45. No environment flag needed.
+Installing it next to `dolibarr-mcp` raises the tool count from 48 to 77;
+uninstalling it restores the generic 48. No environment flag needed.
 
 To ship both in a single Claude Desktop bundle, vendor the extension at build
 time — pip installs it *with* its `.dist-info`, without which the entry point is
