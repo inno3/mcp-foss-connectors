@@ -76,23 +76,73 @@ logged" when the information is simply absent.
 In the other direction, `dolibarr_log_time` takes `duration` in **hours** and
 converts it before the call (1.5 → 5400), because the API accepts seconds only.
 
-## Time logging: one route out of three works
+## Time: which routes exist, and which one is broken
 
-Three near-identical routes exist and only one accepts a `POST`; the other two
+Several near-identical routes exist and only one accepts a `POST`; the others
 answer with a bare `404` that is indistinguishable from a permission problem or
 a bad id.
 
-| Route | Verb | Result |
+| Route | Verb | Status |
 |---|---|---|
-| `tasks/{id}/addtimespent` | `POST` | the correct one |
-| `tasks/{id}/timespent` | `GET` only | a `POST` here returns `404` |
+| `tasks/{id}/addtimespent` | `POST` | the only add route, **fatally broken on Dolibarr 23.0.x**; see below |
+| `tasks/{id}/timespent` | `GET` only | works; a `POST` here returns `404` |
 | `projects/tasks/{id}/…` | — | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
 
-Because a naked 404 is undebuggable, `dolibarr_log_time` diagnoses failures
-instead of forwarding the status code: it names the cause (`tache_inexistante`,
-`route_ou_methode_invalide`, `droits_insuffisants`,
-`utilisateur_non_affecte_ou_erreur_interne`), echoes the endpoint it used, and
-surfaces Dolibarr's own error body when there is one.
+### Known upstream bug: adding time is impossible on Dolibarr 23.0.x
+
+`POST tasks/{id}/addtimespent` returns **HTTP 500 with a zero-byte body** for
+every request, whatever it contains. It is a PHP fatal, not an application
+error:
+
+```
+PHP Fatal error: Uncaught TypeError: Cannot access offset of type array
+  in isset or empty
+  in includes/restler/framework/Luracast/Restler/Data/Validator.php:427
+```
+
+`Tasks::addTimeSpent()` declares two **union types** in its doc block:
+`@param datetime|string $date` and `@param int|null $progress`. Restler's
+comment parser turns a union into a PHP *array*, and `Validator.php:427` uses
+that value as an array key (`isset(static::$preFilters[$info->type])`), which
+PHP 8 rejects with a `TypeError`. The crash happens during **parameter
+validation**, before the task is even fetched, so no request body avoids it,
+and a `POST` on a task id that does not exist fails the same way instead of
+returning a clean `404`. Dolibarr 22 declared `@param datetime $date` with no
+union and had no `$progress` parameter: the route works there. This is a
+regression introduced in 23, of the same family as
+[Dolibarr#35373](https://github.com/Dolibarr/dolibarr/issues/35373) on
+`/products/{id}/purchase_prices`.
+
+Until the instance is patched, **time entry goes through the web UI**
+(`projet/tasks/time.php`). Only the add route is affected: the read, update and
+delete routes above all work on 23.0.x.
+
+`dolibarr_log_time` detects this exact signature and returns
+`cause: bug_dolibarr_addtimespent` with the file and line above, rather than
+sending the caller off to fix a configuration that is not at fault.
+
+### Failure diagnosis states what was verified, and nothing more
+
+Because a naked 404 is undebuggable, `dolibarr_log_time` names the cause
+instead of forwarding the status code: `bug_dolibarr_addtimespent`,
+`tache_inexistante`, `route_ou_methode_invalide`, `utilisateur_inconnu`,
+`droits_insuffisants`, `parametres_refuses`, `aucun_changement`,
+`erreur_interne_dolibarr`, `erreur_interne_sans_corps`. It echoes the endpoint
+it used and surfaces Dolibarr's own error body, saying so explicitly
+(`dolibarr_error_body_empty`) when there is none, rather than guessing.
+
+A previous version blamed "user not assigned to the task" on any 5xx. That was
+wrong: `Tasks::addTimeSpent()` checks the API key's `projet->creer` right and
+the caller's access to the project, and **never** looks at task assignment.
+Assignment now appears only under `checks`, and only when the connector really
+looked it up:
+
+```json
+"checks": {"tache_existe": true, "utilisateur_existe": true,
+           "utilisateur_affecte": false, "roles_utilisateur": []}
+```
+
+`null` means "not verified", never "false".
 
 ## Task assignment
 
@@ -112,8 +162,8 @@ instance's own dictionary (`setup/dictionary/contact_types?type=project_task`)
 before calling, because Dolibarr answers an unknown code with a `500` whose
 message is empty.
 
-Assignment is **not** required to log time through the API (`Tasks::addTimeSpent()`
-never looks at it), only through the web UI.
+Assignment is **not** required to log time through the API, only through the web
+UI. That is precisely why it matters while the upstream bug above stands.
 
 ## Extending the connector
 
