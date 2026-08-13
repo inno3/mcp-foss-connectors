@@ -77,6 +77,18 @@
       "description": "Saisit du temps passé sur une tâche"
     },
     {
+      "name": "dolibarr_list_task_contacts",
+      "description": "Liste les intervenants d'une tâche"
+    },
+    {
+      "name": "dolibarr_assign_task_user",
+      "description": "Affecte un utilisateur à une tâche"
+    },
+    {
+      "name": "dolibarr_unassign_task_user",
+      "description": "Retire un intervenant d'une tâche"
+    },
+    {
       "name": "dolibarr_list_thirdparties",
       "description": "Liste les tiers (clients/fournisseurs/prospects)"
     },
