@@ -12,12 +12,15 @@ environment variables — no host, login or secret is baked into the code.
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
 
-## Tools (42)
+## Tools (45)
 
 - `dolibarr_list_projects` — Liste les projets Dolibarr
 - `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
 - `dolibarr_list_tasks` — Liste les tâches d'un projet Dolibarr
 - `dolibarr_log_time` — Saisir du temps passé sur une tâche Dolibarr
+- `dolibarr_list_task_contacts` : Liste les intervenants affectés à une tâche
+- `dolibarr_assign_task_user` : Affecte un utilisateur comme intervenant d'une tâche
+- `dolibarr_unassign_task_user` : Retire un utilisateur des intervenants d'une tâche
 - `dolibarr_create_task` — Crée une tâche dans un projet Dolibarr
 - `dolibarr_close_task` — Marque une tâche Dolibarr comme terminée (progress=100 par défaut)
 - `dolibarr_list_invoices` — Liste les factures clients
@@ -91,6 +94,27 @@ instead of forwarding the status code: it names the cause (`tache_inexistante`,
 `utilisateur_non_affecte_ou_erreur_interne`), echoes the endpoint it used, and
 surfaces Dolibarr's own error body when there is one.
 
+## Task assignment
+
+Dolibarr stores task participants in `llx_element_contact` under the
+`project_task` element, with two internal roles:
+
+| Code | Standard label |
+|---|---|
+| `TASKCONTRIBUTOR` | Intervenant (contributor) |
+| `TASKEXECUTIVE` | Responsable (manager) |
+
+Always address a role by its **code**. The numeric `rowid` of a contact type is
+instance-local (on one 23.0.3 instance `TASKCONTRIBUTOR`/internal is `181`,
+nowhere near the value a fresh install assigns) and the label is translated and
+customisable. `dolibarr_assign_task_user` validates the code against the
+instance's own dictionary (`setup/dictionary/contact_types?type=project_task`)
+before calling, because Dolibarr answers an unknown code with a `500` whose
+message is empty.
+
+Assignment is **not** required to log time through the API (`Tasks::addTimeSpent()`
+never looks at it), only through the web UI.
+
 ## Extending the connector
 
 This connector is **extensible without forking**. At startup it discovers any
@@ -112,7 +136,7 @@ def register(mcp):
 ```
 
 A bad extension can never break the core: load failures are caught and logged
-to stderr, and the server keeps running with its 42 generic tools.
+to stderr, and the server keeps running with its 45 generic tools.
 
 ### inno³ extension package
 
@@ -120,8 +144,8 @@ Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`,
 `supportcredits` (carnets), `inno3pilot` (boards) and the signed
 `inno3dashboard` / `supportcredits` portal URLs — are published as a separate
 add-on, **`inno3-mcp-extensions`** (29 tools), *not* in this repository.
-Installing it next to `dolibarr-mcp` raises the tool count from 42 to 71;
-uninstalling it restores the generic 42. No environment flag needed.
+Installing it next to `dolibarr-mcp` raises the tool count from 45 to 74;
+uninstalling it restores the generic 45. No environment flag needed.
 
 To ship both in a single Claude Desktop bundle, vendor the extension at build
 time — pip installs it *with* its `.dist-info`, without which the entry point is

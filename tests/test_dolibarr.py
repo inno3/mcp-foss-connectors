@@ -12,6 +12,7 @@ os.environ.setdefault("DOLIBARR_API_KEY", "test-key-123")
 os.environ.setdefault("DOLIBARR_URL", "https://dolibarr.test.local")
 
 from dolibarr_mcp.server import (
+    TASK_CONTACTS_ENDPOINT,
     TIMESPENT_ENDPOINT,
     DolibarrAPIError,
     _api_get_list,
@@ -25,6 +26,7 @@ from dolibarr_mcp.server import (
     _seconds_int,
     _seconds_to_hours,
     _strip_html,
+    dolibarr_assign_task_user,
     dolibarr_close_task,
     dolibarr_create_project,
     dolibarr_dashboard,
@@ -35,9 +37,11 @@ from dolibarr_mcp.server import (
     dolibarr_list_projects,
     dolibarr_list_proposals,
     dolibarr_list_supplier_invoices,
+    dolibarr_list_task_contacts,
     dolibarr_list_tasks,
     dolibarr_list_thirdparties,
     dolibarr_log_time,
+    dolibarr_unassign_task_user,
     dolibarr_update_invoice,
 )
 
@@ -1174,6 +1178,165 @@ class TestLogTimeErrorDiagnosis:
     async def test_empty_error_body_does_not_invent_a_message(self) -> None:
         data = await self._fail_with(_http_error(500), task_reply=_task())
         assert data["dolibarr_error"] is None
+
+
+def _contact(user_id: int, code: str = "TASKCONTRIBUTOR", **over: object) -> dict:
+    """Intervenant tel que tasks/{id}/contacts le renvoie (tout en chaînes)."""
+    raw = {
+        "parentId": "42",
+        "source": "internal",
+        "socid": "-1",
+        "id": str(user_id),
+        "nom": "Martin",
+        "lastname": "Martin",
+        "firstname": "Camille",
+        "email": "camille.martin@example.org",
+        "login": "cmartin",
+        "statuscontact": "1",
+        "rowid": "900",
+        "code": code,
+        "libelle": "Intervenant" if code == "TASKCONTRIBUTOR" else "Responsable",
+        "status": 4,
+        # Le rowid du type de contact varie d'une instance à l'autre : il est
+        # exposé mais ne sert jamais de référence.
+        "fk_c_type_contact": "181",
+    }
+    raw.update(over)  # type: ignore[arg-type]
+    return raw
+
+
+@pytest.mark.asyncio
+class TestTaskContacts:
+    """Lire et modifier les intervenants d'une tâche, sans id de rôle en dur."""
+
+    async def test_both_forms_of_the_role_are_returned(self) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_contact(7), _contact(5, "TASKEXECUTIVE")]
+            data = json.loads(await dolibarr_list_task_contacts(task_id=42))
+
+        assert data["count"] == 2
+        first = data["contacts"][0]
+        assert first["user_id"] == 7
+        assert first["role_code"] == "TASKCONTRIBUTOR"   # stable entre instances
+        assert first["role_label"] == "Intervenant"      # traduit, personnalisable
+        assert first["name"] == "Camille Martin"
+        assert get.call_args[0][0] == TASK_CONTACTS_ENDPOINT.format(task_id=42)
+
+    async def test_an_external_contact_is_not_exposed_as_a_user(self) -> None:
+        """`id` est un user pour internal, un contact tiers pour external."""
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_contact(31, source="external")]
+            data = json.loads(await dolibarr_list_task_contacts(task_id=42))
+
+        contact = data["contacts"][0]
+        assert contact["user_id"] is None
+        assert contact["contact_id"] == 31
+        assert contact["source"] == "external"
+
+    async def test_assign_sends_the_role_code_never_a_numeric_id(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.startswith("setup/dictionary/contact_types"):
+                return [
+                    {"rowid": "181", "code": "TASKCONTRIBUTOR",
+                     "type": "project_task", "source": "internal"},
+                    {"rowid": "180", "code": "TASKEXECUTIVE",
+                     "type": "project_task", "source": "internal"},
+                ]
+            # Tâche sans intervenant : le cas qui déclenche vraiment le POST.
+            return [_contact(7)] if post.await_count else []
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            post.return_value = {}
+            await dolibarr_assign_task_user(task_id=42, user_id=7,
+                                            role="TASKCONTRIBUTOR")
+
+        payload = post.call_args[0][1]
+        assert payload["type_contact"] == "TASKCONTRIBUTOR"
+        assert payload["source"] == "internal"
+        assert payload["fk_socpeople"] == 7
+        # Le rowid local (181 ici) ne doit apparaître nulle part dans l'envoi.
+        assert "181" not in json.dumps(payload)
+        assert 181 not in payload.values()
+
+    async def test_the_role_is_validated_against_the_instance_dictionary(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.startswith("setup/dictionary/contact_types"):
+                return [{"rowid": "181", "code": "TASKCONTRIBUTOR",
+                         "type": "project_task", "source": "internal"}]
+            return []
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            data = json.loads(await dolibarr_assign_task_user(
+                task_id=42, user_id=7, role="INTERVENANT"))
+
+        # Un code inconnu fait répondre Dolibarr par un 500 au message vide :
+        # on l'arrête avant l'appel.
+        assert data["cause"] == "role_inconnu"
+        assert data["roles_valides"] == ["TASKCONTRIBUTOR"]
+        post.assert_not_called()
+
+    async def test_assigning_twice_is_reported_not_duplicated(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.startswith("setup/dictionary/contact_types"):
+                return [{"rowid": "181", "code": "TASKCONTRIBUTOR",
+                         "type": "project_task", "source": "internal"}]
+            return [_contact(7)]
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            data = json.loads(await dolibarr_assign_task_user(task_id=42, user_id=7))
+
+        assert data["already_assigned"] is True
+        post.assert_not_called()
+
+    async def test_assign_returns_the_state_after_the_operation(self) -> None:
+        async def _get(endpoint: str, *a: object, **k: object) -> object:
+            if endpoint.startswith("setup/dictionary/contact_types"):
+                return [{"rowid": "181", "code": "TASKCONTRIBUTOR",
+                         "type": "project_task", "source": "internal"}]
+            return [_contact(7)] if post.await_count else []
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock,
+                   side_effect=_get):
+            post.return_value = {}
+            data = json.loads(await dolibarr_assign_task_user(task_id=42, user_id=7))
+
+        # Pas un simple booléen : l'état constaté après coup.
+        assert data["success"] is True
+        assert [c["user_id"] for c in data["contacts"]] == [7]
+
+    async def test_unassign_resolves_a_single_role_on_its_own(self) -> None:
+        with patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock) as dele, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_contact(7, "TASKEXECUTIVE")]
+            data = json.loads(await dolibarr_unassign_task_user(task_id=42, user_id=7))
+
+        assert dele.call_args[0][0] == "tasks/42/contacts/7/TASKEXECUTIVE"
+        assert data["role"] == "TASKEXECUTIVE"
+
+    async def test_unassign_refuses_to_guess_between_two_roles(self) -> None:
+        with patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock) as dele, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_contact(7), _contact(7, "TASKEXECUTIVE")]
+            data = json.loads(await dolibarr_unassign_task_user(task_id=42, user_id=7))
+
+        assert data["cause"] == "role_ambigu"
+        dele.assert_not_called()
+
+    async def test_unassign_does_not_delete_when_the_user_is_absent(self) -> None:
+        with patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock) as dele, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_contact(5)]
+            data = json.loads(await dolibarr_unassign_task_user(task_id=42, user_id=7))
+
+        assert data["cause"] == "utilisateur_non_affecte"
+        dele.assert_not_called()
 
 
 @pytest.mark.asyncio

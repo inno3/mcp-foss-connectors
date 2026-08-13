@@ -297,6 +297,21 @@ def _seconds_int(value: Any) -> int | None:
         return None
 
 
+def _id_int(value: Any) -> int | None:
+    """Renvoie un identifiant Dolibarr en entier, ou None.
+
+    Dolibarr rend la plupart des identifiants sous forme de chaîne ("221").
+    Distinct de _seconds_int, qui porte la même mécanique mais une tout autre
+    sémantique : mélanger les deux rend le code illisible à la relecture.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _error_body(exc: httpx.HTTPStatusError) -> str:
     """Extrait le message d'erreur renvoyé par Dolibarr, ou '' si illisible.
 
@@ -516,6 +531,19 @@ async def dolibarr_list_tasks(
 #                                    à la racine, jamais sous /projects
 TIMESPENT_ENDPOINT = "tasks/{task_id}/addtimespent"
 
+# Intervenants d'une tâche : llx_element_contact, élément « project_task ».
+TASK_CONTACTS_ENDPOINT = "tasks/{task_id}/contacts"
+TASK_CONTACT_ITEM_ENDPOINT = "tasks/{task_id}/contacts/{contact_id}/{role}"
+CONTACT_TYPES_ENDPOINT = "setup/dictionary/contact_types"
+TASK_CONTACT_ELEMENT = "project_task"
+
+# Le code du rôle, jamais son identifiant : le rowid de llx_c_type_contact varie
+# d'une instance à l'autre (constaté à 181 là où l'installation de référence
+# amont pose une valeur bien plus basse). Dolibarr résout le code lui-même.
+TASK_ROLE_CONTRIBUTOR = "TASKCONTRIBUTOR"  # libellé standard : « Intervenant »
+TASK_ROLE_MANAGER = "TASKEXECUTIVE"        # libellé standard : « Responsable »
+
+
 
 async def _task_exists(task_id: int) -> bool | None:
     """True/False selon que la tâche existe, None si le diagnostic échoue lui-même.
@@ -529,6 +557,48 @@ async def _task_exists(task_id: int) -> bool | None:
         return False if exc.response.status_code == 404 else None
     except Exception:
         return None
+
+
+def _format_task_contact(raw: dict) -> dict:
+    """Normalise une ligne de tasks/{id}/contacts.
+
+    `id` est un identifiant d'utilisateur quand source vaut « internal », et un
+    identifiant de contact tiers quand elle vaut « external » : les deux ne se
+    mélangent pas, d'où deux clés distinctes plutôt qu'une seule ambiguë.
+    """
+    source = raw.get("source")
+    contact_id = _id_int(raw.get("id"))
+    name = " ".join(
+        p for p in (raw.get("firstname"), raw.get("lastname")) if p
+    ).strip() or raw.get("nom") or ""
+    return {
+        "contact_id": contact_id,
+        "user_id": contact_id if source == "internal" else None,
+        "source": source,
+        "name": name,
+        "login": raw.get("login"),
+        "email": raw.get("email"),
+        "role_code": raw.get("code"),
+        "role_label": raw.get("libelle"),
+        "role_id": raw.get("fk_c_type_contact"),
+        "link_id": raw.get("rowid"),
+    }
+
+
+async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
+    """Intervenants d'une tâche, ou None si la lecture échoue.
+
+    Utilisé aussi bien par le tool de lecture que par le diagnostic d'échec :
+    c'est ce qui permet de ne parler d'affectation que quand elle a vraiment
+    été vérifiée.
+    """
+    try:
+        raw = await api_get(TASK_CONTACTS_ENDPOINT.format(task_id=task_id))
+    except Exception:
+        return None
+    if not isinstance(raw, list):
+        return None
+    return [_format_task_contact(c) for c in raw if isinstance(c, dict)]
 
 
 async def _log_time_error(exc: Exception, task_id: int, endpoint: str) -> str:
@@ -669,6 +739,236 @@ async def dolibarr_log_time(
             "planned_seconds": _seconds_int(task.get("planned_workload")),
             "date": dt.strftime("%Y-%m-%d"),
             "note": note,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools : intervenants d'une tâche
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def dolibarr_list_task_contacts(task_id: int, role: str = "") -> str:
+    """Liste les intervenants affectés à une tâche Dolibarr.
+
+    Paramètres :
+    - task_id : ID de la tâche (obligatoire)
+    - role : filtrer sur un code de rôle (ex: TASKCONTRIBUTOR), vide = tous
+
+    Retourne, pour chaque intervenant : `user_id` (renseigné pour les
+    intervenants internes uniquement), `contact_id` brut, `source`
+    (internal = utilisateur Dolibarr, external = contact d'un tiers), nom,
+    login, email, et le rôle sous ses deux formes : `role_code`
+    (TASKCONTRIBUTOR / TASKEXECUTIVE, stable d'une instance à l'autre) et
+    `role_label` (« Intervenant » / « Responsable », traduit et
+    personnalisable). `role_id` est le rowid local du type de contact : il
+    change d'une instance à l'autre, ne jamais s'en servir comme référence.
+
+    Note : l'API d'imputation n'exige AUCUNE affectation pour enregistrer du
+    temps ; l'affectation ne conditionne que la saisie par l'interface web.
+    """
+    try:
+        if not task_id:
+            return "Le task_id est obligatoire."
+
+        endpoint = TASK_CONTACTS_ENDPOINT.format(task_id=task_id)
+        params = {"type": role.strip()} if role.strip() else None
+        raw = await api_get(endpoint, params)
+        contacts = [_format_task_contact(c) for c in raw if isinstance(c, dict)]
+
+        return _dumps({
+            "task_id": task_id,
+            "count": len(contacts),
+            "contacts": contacts,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+async def _task_role_codes() -> list[dict] | None:
+    """Codes de rôle valides pour une tâche sur CETTE instance, ou None.
+
+    Lus dans le dictionnaire llx_c_type_contact plutôt que codés en dur : les
+    libellés dépendent de la langue et les rowid de l'instance.
+    """
+    try:
+        raw = await api_get(
+            CONTACT_TYPES_ENDPOINT,
+            {"type": TASK_CONTACT_ELEMENT, "limit": MAX_LIMIT},
+        )
+    except Exception:
+        return None
+    if not isinstance(raw, list):
+        return None
+    return [t for t in raw if isinstance(t, dict) and t.get("type") == TASK_CONTACT_ELEMENT]
+
+
+@mcp.tool()
+async def dolibarr_assign_task_user(
+    task_id: int,
+    user_id: int,
+    role: str = TASK_ROLE_CONTRIBUTOR,
+) -> str:
+    """Affecte un utilisateur Dolibarr comme intervenant d'une tâche.
+
+    Confirmation utilisateur requise avant execution.
+
+    Paramètres :
+    - task_id : ID de la tâche (obligatoire)
+    - user_id : ID de l'utilisateur Dolibarr, llx_user (obligatoire)
+    - role : code du rôle, TASKCONTRIBUTOR (« Intervenant », défaut) ou
+      TASKEXECUTIVE (« Responsable »)
+
+    Le rôle est toujours désigné par son CODE, jamais par un identifiant
+    numérique : le rowid du type de contact varie d'une instance à l'autre.
+    Le code est validé contre le dictionnaire de l'instance avant l'appel,
+    parce qu'un code inconnu fait répondre Dolibarr par un 500 au message vide.
+
+    Retourne la liste des intervenants APRÈS l'opération, pas un simple booléen.
+    """
+    try:
+        if not task_id:
+            return "Le task_id est obligatoire."
+        if not user_id:
+            return "Le user_id est obligatoire (identifiant llx_user)."
+
+        code = (role or TASK_ROLE_CONTRIBUTOR).strip().upper()
+        known = await _task_role_codes()
+        if known is not None:
+            valid = sorted({
+                t["code"] for t in known
+                if t.get("source") == "internal" and t.get("code")
+            })
+            if valid and code not in valid:
+                return _dumps({
+                    "success": False,
+                    "cause": "role_inconnu",
+                    "role": code,
+                    "roles_valides": valid,
+                    "hint": (
+                        "Rôle inconnu sur cette instance. Utiliser un des codes "
+                        "ci-dessus (lus dans le dictionnaire des types de "
+                        "contact), jamais un identifiant numérique."
+                    ),
+                })
+
+        before = await _fetch_task_contacts(task_id) or []
+        if any(c["user_id"] == user_id and c["role_code"] == code for c in before):
+            return _dumps({
+                "success": True,
+                "already_assigned": True,
+                "task_id": task_id,
+                "user_id": user_id,
+                "role": code,
+                "message": f"L'utilisateur #{user_id} est déjà {code} sur la tâche.",
+                "contacts": before,
+            })
+
+        endpoint = TASK_CONTACTS_ENDPOINT.format(task_id=task_id)
+        await api_post(endpoint, {
+            "fk_socpeople": user_id,
+            "type_contact": code,
+            "source": "internal",
+        })
+
+        contacts = await _fetch_task_contacts(task_id)
+        return _dumps({
+            "success": True,
+            "already_assigned": False,
+            "task_id": task_id,
+            "user_id": user_id,
+            "role": code,
+            "count": len(contacts) if contacts is not None else None,
+            "contacts": contacts,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_unassign_task_user(
+    task_id: int,
+    user_id: int,
+    role: str = "",
+) -> str:
+    """Retire un utilisateur des intervenants d'une tâche Dolibarr.
+
+    Confirmation utilisateur requise avant execution.
+    IRRÉVERSIBLE : le lien est supprimé, pas désactivé. Le temps déjà imputé
+    par cet utilisateur n'est pas touché, mais il ne pourra plus saisir de
+    temps sur la tâche depuis l'interface web.
+
+    Paramètres :
+    - task_id : ID de la tâche (obligatoire)
+    - user_id : ID de l'utilisateur Dolibarr (obligatoire)
+    - role : code du rôle à retirer ; vide = le rôle unique de cet utilisateur
+      sur la tâche, refusé s'il en porte plusieurs
+
+    Retourne la liste des intervenants APRÈS l'opération.
+    """
+    try:
+        if not task_id:
+            return "Le task_id est obligatoire."
+        if not user_id:
+            return "Le user_id est obligatoire (identifiant llx_user)."
+
+        contacts = await _fetch_task_contacts(task_id)
+        if contacts is None:
+            return _dumps({
+                "success": False,
+                "cause": "affectations_illisibles",
+                "task_id": task_id,
+                "hint": (
+                    "Impossible de lire les intervenants de la tâche : on ne "
+                    "supprime pas à l'aveugle. Vérifier task_id et les droits."
+                ),
+            })
+
+        held = [c["role_code"] for c in contacts if c["user_id"] == user_id]
+        code = (role or "").strip().upper()
+        if not code:
+            if len(held) != 1:
+                return _dumps({
+                    "success": False,
+                    "cause": "role_ambigu" if held else "utilisateur_non_affecte",
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "roles_actuels": held,
+                    "hint": (
+                        "Préciser le rôle à retirer."
+                        if held
+                        else f"L'utilisateur #{user_id} n'est pas affecté à cette tâche."
+                    ),
+                })
+            code = held[0]
+        elif code not in held:
+            return _dumps({
+                "success": False,
+                "cause": "utilisateur_non_affecte",
+                "task_id": task_id,
+                "user_id": user_id,
+                "role": code,
+                "roles_actuels": held,
+                "hint": f"L'utilisateur #{user_id} ne porte pas le rôle {code}.",
+            })
+
+        await api_delete(TASK_CONTACT_ITEM_ENDPOINT.format(
+            task_id=task_id, contact_id=user_id, role=code,
+        ))
+
+        after = await _fetch_task_contacts(task_id)
+        return _dumps({
+            "success": True,
+            "task_id": task_id,
+            "user_id": user_id,
+            "role": code,
+            "count": len(after) if after is not None else None,
+            "contacts": after,
         })
 
     except Exception as exc:
