@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "dolibarr-mcp",
   "display_name": "Dolibarr ERP",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures, propositions, tickets, comptes-rendus. API REST Dolibarr 16+.",
   "author": {
     "name": "inno³",
@@ -87,6 +87,18 @@
     {
       "name": "dolibarr_unassign_task_user",
       "description": "Retire un intervenant d'une tâche"
+    },
+    {
+      "name": "dolibarr_list_time_entries",
+      "description": "Liste les écritures de temps (tâche ou projet)"
+    },
+    {
+      "name": "dolibarr_update_time_entry",
+      "description": "Corrige une écriture de temps"
+    },
+    {
+      "name": "dolibarr_delete_time_entry",
+      "description": "Supprime une écriture de temps"
     },
     {
       "name": "dolibarr_list_thirdparties",

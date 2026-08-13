@@ -21,7 +21,7 @@ Everything here runs **offline** — no live server, token, or network is requir
   errors that an already-installed source tree hides — e.g. a malformed
   `[project]` table).
 - [ ] `ruff check .` → "All checks passed!"
-- [ ] `pytest -q` → all green (currently 359 tests on py3.11 / py3.12).
+- [ ] `pytest -q` → all green (currently 393 tests on py3.11 / py3.12).
 
 The CI configs (`.github/workflows/ci.yml`, `.gitlab-ci.yml`) run exactly these
 three steps on Python 3.11 and 3.12.
@@ -61,17 +61,17 @@ entry-point group (the public repo declares none).
   and **no** `*_meetingnote*` / `*_portal_url` tools:
   ```sh
   DOLIBARR_URL=x DOLIBARR_API_KEY=x python -c \
-    "import dolibarr_mcp.server as s; print(len(s.mcp._tool_manager._tools))"   # 42
+    "import dolibarr_mcp.server as s; print(len(s.mcp._tool_manager._tools))"   # 48
   ```
 - [ ] Installing an extension package (e.g. `inno3-mcp-extensions`) makes its tools
   appear automatically, with no env flag and no change to the core:
   ```sh
   pip install inno3-mcp-extensions
   DOLIBARR_URL=x DOLIBARR_API_KEY=x python -c \
-    "import dolibarr_mcp.server as s; print(len(s.mcp._tool_manager._tools))"   # 71
+    "import dolibarr_mcp.server as s; print(len(s.mcp._tool_manager._tools))"   # 77
   ```
 - [ ] A broken extension is caught (logged to stderr) and never crashes the
-  core — the server still starts with its 42 tools.
+  core: the server still starts with its 48 tools.
 
 ## 6. Docs
 
