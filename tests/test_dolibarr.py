@@ -32,6 +32,7 @@ from dolibarr_mcp.server import (
     dolibarr_assign_task_user,
     dolibarr_close_task,
     dolibarr_create_project,
+    dolibarr_create_task,
     dolibarr_dashboard,
     dolibarr_delete_time_entry,
     dolibarr_get_invoice,
@@ -1525,6 +1526,71 @@ class TestTaskContacts:
 
         assert data["cause"] == "utilisateur_non_affecte"
         dele.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestCreateTaskMandatoryFields:
+    """POST tasks valide ref/label/fk_project avant tout : en omettre un rend
+    un 400 sec. Le tool n'envoyait ni `ref`, ni le bon nom de champ projet."""
+
+    async def _create(self, **kw: object) -> dict:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = 949
+            get.return_value = _task(id="949", ref="TK2608-0258")
+            raw = await dolibarr_create_task(project_id=300, label="Audit", **kw)
+        return {"payload": post.call_args[0][1], "out": json.loads(raw)}
+
+    async def test_the_three_mandatory_fields_are_always_sent(self) -> None:
+        payload = (await self._create())["payload"]
+        # Trio exigé par _validate(), inchangé de Dolibarr 16 à 23.
+        assert {"ref", "label", "fk_project"} <= set(payload)
+        assert payload["label"] == "Audit"
+        assert payload["fk_project"] == 300
+
+    async def test_the_project_field_is_not_the_sql_column_name(self) -> None:
+        """`fk_projet` est le nom de la COLONNE ; l'API attend `fk_project`."""
+        payload = (await self._create())["payload"]
+        assert "fk_projet" not in payload
+
+    async def test_ref_defaults_to_the_auto_sentinel(self) -> None:
+        """L'API sait numéroter, mais seulement si on le lui demande : le bloc
+        d'auto-génération ne part que sur la valeur "auto"."""
+        assert (await self._create())["payload"]["ref"] == "auto"
+
+    async def test_an_explicit_ref_is_honoured(self) -> None:
+        payload = (await self._create(ref="TK-MIGRATION-001"))["payload"]
+        assert payload["ref"] == "TK-MIGRATION-001"
+
+    async def test_a_blank_ref_falls_back_to_auto_rather_than_a_400(self) -> None:
+        assert (await self._create(ref="   "))["payload"]["ref"] == "auto"
+
+    async def test_the_generated_ref_is_read_back_and_reported(self) -> None:
+        """Le numéroteur choisit la référence : l'appelant ne peut la connaître
+        qu'en relisant la tâche."""
+        out = (await self._create())["out"]
+        assert out["success"] is True
+        assert out["task_id"] == 949
+        assert out["ref"] == "TK2608-0258"
+
+    async def test_creation_still_succeeds_if_the_read_back_fails(self) -> None:
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post, \
+             patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            post.return_value = 949
+            get.side_effect = _http_error(404)
+            out = json.loads(await dolibarr_create_task(project_id=300, label="Audit"))
+
+        # La tâche existe : ne pas la rapporter en échec pour une relecture ratée.
+        assert out["success"] is True
+        assert out["task_id"] == 949
+        assert out["ref"] is None
+
+    async def test_the_optional_fields_keep_their_shape(self) -> None:
+        payload = (await self._create(planned_hours=4.5, progress=140,
+                                      description="x"))["payload"]
+        assert payload["planned_workload"] == 16200   # heures converties en secondes
+        assert payload["progress"] == 100             # borné, pas transmis tel quel
+        assert payload["description"] == "x"
 
 
 @pytest.mark.asyncio

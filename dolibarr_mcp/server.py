@@ -564,6 +564,16 @@ TIMESPENT_ENDPOINT = "tasks/{task_id}/addtimespent"
 TIMESPENT_LIST_ENDPOINT = "tasks/{task_id}/timespent"
 TIMESPENT_ITEM_ENDPOINT = "tasks/{task_id}/timespent/{entry_id}"
 
+# Création d'une tâche : POST tasks valide `ref`, `label` et `fk_project` dans
+# _validate() AVANT d'exécuter quoi que ce soit d'autre, y compris son propre
+# bloc d'auto-numérotation. Omettre `ref` rend donc « 400 ref field missing »
+# alors même que l'API sait la générer : il faut la lui demander explicitement
+# avec la valeur sentinelle ci-dessous. Ce trio est inchangé de la 16 à la 23.
+# Piège jumeau : le champ attendu est `fk_project`, pas `fk_projet` (le nom de
+# la colonne SQL) ; un `fk_projet` passe la validation nulle part et, s'il la
+# passait, Task::create() ne le lirait pas.
+TASK_REF_AUTO = "auto"
+
 # Intervenants d'une tâche : llx_element_contact, élément « project_task ».
 TASK_CONTACTS_ENDPOINT = "tasks/{task_id}/contacts"
 TASK_CONTACT_ITEM_ENDPOINT = "tasks/{task_id}/contacts/{contact_id}/{role}"
@@ -1455,6 +1465,7 @@ async def dolibarr_create_task(
     date_end: str = "",
     description: str = "",
     progress: int = 0,
+    ref: str = TASK_REF_AUTO,
 ) -> str:
     """Crée une tâche dans un projet Dolibarr.
 
@@ -1466,6 +1477,9 @@ async def dolibarr_create_task(
     - date_end     : date de fin / échéance (format YYYY-MM-DD, optionnel)
     - description  : description longue (optionnel)
     - progress     : avancement en % 0-100 (défaut: 0)
+    - ref          : référence de la tâche ; "auto" (défaut) la fait générer
+      par le numéroteur de l'instance (PROJECT_TASK_ADDON), ce qui donne une
+      valeur du type TK2608-0258
 
     Retourne l'ID et la référence de la tâche créée.
     """
@@ -1477,8 +1491,13 @@ async def dolibarr_create_task(
 
         from datetime import datetime
 
+        # Trois champs sont obligatoires côté API et validés AVANT tout le
+        # reste : ref, label, fk_project (cf. TASK_REF_AUTO). En omettre un
+        # rend un 400 sec, et « fk_projet », le nom de la COLONNE SQL, n'est
+        # pas le nom du champ attendu par l'API.
         data: dict[str, Any] = {
-            "fk_projet": project_id,
+            "ref": ref.strip() or TASK_REF_AUTO,
+            "fk_project": project_id,
             "label": label,
             "progress": max(0, min(100, int(progress))),
         }
@@ -1493,9 +1512,18 @@ async def dolibarr_create_task(
 
         result = await api_post("tasks", data)
 
+        # L'API ne rend que l'id : relire la tâche pour rapporter la référence
+        # réellement attribuée par le numéroteur, qu'on ne connaît pas d'avance.
+        created: dict[str, Any] = {}
+        try:
+            created = await api_get(f"tasks/{result}") or {}
+        except Exception:
+            pass
+
         return _dumps({
             "success": True,
             "task_id": result,
+            "ref": created.get("ref"),
             "project_id": project_id,
             "label": label,
             "planned_hours": planned_hours or None,

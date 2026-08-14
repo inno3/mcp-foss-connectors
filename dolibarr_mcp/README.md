@@ -151,6 +151,27 @@ looked it up:
 
 `null` means "not verified", never "false".
 
+## Creating a task: three fields the API validates before anything else
+
+`POST tasks` runs `_validate()` first, and it demands **`ref`, `label` and
+`fk_project`**. Two traps follow from that, both of which made every creation
+fail with a bare `400`:
+
+- The API can number a task itself, but only if asked. The auto-generation
+  block runs *after* validation and only fires on the sentinel value, so
+  omitting `ref` returns `400 ref field missing` even though the instance has a
+  numbering module. `dolibarr_create_task` therefore sends `ref: "auto"` by
+  default, which yields a reference like `TK2608-0259` from
+  `PROJECT_TASK_ADDON`; pass `ref` explicitly to force your own.
+- The field is **`fk_project`**, not `fk_projet`. The latter is the SQL column
+  name, and `Task::create()` does not read it, so it would silently produce a
+  task attached to no project if validation ever let it through.
+
+This trio is unchanged from Dolibarr 16 to 23. Since the API returns only the
+new id, the tool re-reads the task to report the reference the numbering module
+actually assigned; a failed re-read leaves `ref` null rather than turning a
+successful creation into a reported failure.
+
 ## Task assignment
 
 Dolibarr stores task participants in `llx_element_contact` under the
