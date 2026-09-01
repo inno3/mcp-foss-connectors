@@ -4,10 +4,13 @@
 Serveur MCP générique pour Dolibarr ERP.
 
 Expose les données de l'ERP Dolibarr (projets, factures, tiers, tickets,
-comptes-rendus de réunion) via le protocole MCP, pour Claude Desktop et tout
-autre client MCP.
+comptes-rendus de réunion, banque et règlements) via le protocole MCP, pour
+Claude Desktop et tout autre client MCP.
 
 Configuration : DOLIBARR_URL (URL de base) + DOLIBARR_API_KEY (header DOLAPIKEY).
+Optionnel : DOLIBARR_WEB_LOGIN / DOLIBARR_WEB_PASSWORD, requis uniquement par
+les écritures que l'API REST n'expose pas — à ce jour le seul rapprochement
+bancaire (cf. dolibarr_set_bank_statement).
 Compatible Dolibarr 16+ (API REST).
 """
 
@@ -16,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 import httpx
@@ -366,7 +370,14 @@ def _format_error(exc: Exception) -> str:
         if status == 403:
             return "Erreur 403 : permissions insuffisantes pour cette ressource."
         if status == 404:
-            return "Erreur 404 : ressource non trouvée dans Dolibarr."
+            # Dolibarr explique souvent PRÉCISÉMENT ce qu'il n'a pas trouvé
+            # (« not found or not allowed for modulepart = supplier_invoice »).
+            # L'écraser par un message générique coûte des heures de diagnostic.
+            detail = _error_body(exc)
+            return (
+                f"Erreur 404 : {detail}" if detail
+                else "Erreur 404 : ressource non trouvée dans Dolibarr."
+            )
         if status == 500:
             return f"Erreur 500 : erreur interne Dolibarr. Détail : {exc.response.text[:500]}"
         return f"Erreur HTTP {status} : {exc.response.text[:500]}"
@@ -389,6 +400,166 @@ def _clamp_limit(limit: int) -> int:
 def _sf_escape(value: str) -> str:
     """Escape a string value for use in Dolibarr sqlfilters (escapes single quotes)."""
     return str(value).replace("'", "''")
+
+
+def _sf_like(value: str) -> str:
+    """Prépare une valeur pour un critère `like` de sqlfilters.
+
+    Distinct de _sf_escape, et pas interchangeable avec lui : le callback
+    Dolibarr n'accepte une valeur LIKE que sous la forme '…' SANS apostrophe
+    interne (`preg_match("/^'([^']*)'$/")`). Doubler les apostrophes, comme le
+    fait _sf_escape, ferait échouer ce motif et laisserait la valeur brute,
+    quotes comprises, partir dans le SQL. On les retire donc, avec les
+    parenthèses et l'antislash que la grammaire des critères interdit.
+    """
+    return "".join(c for c in str(value) if c not in "'()\\")
+
+
+def _sf_and(*clauses: str) -> str:
+    """Assemble des critères sqlfilters par un ET logique, en ignorant les vides."""
+    return " and ".join(c for c in clauses if c)
+
+
+def _sf_date_range(date_start: str, date_end: str, field: str) -> str:
+    """Critères sqlfilters bornant `field` à une plage de dates (bornes incluses)."""
+    return _sf_and(
+        f"({field}:>=:'{_sf_escape(date_start)}')" if date_start else "",
+        f"({field}:<=:'{_sf_escape(date_end)}')" if date_end else "",
+    )
+
+
+def _sf_ref_search(search: str, fields: "tuple[str, ...]") -> str:
+    """Critère de recherche partielle sur une ou plusieurs colonnes de référence."""
+    needle = _sf_like(search)
+    if not needle:
+        return ""
+    parts = [f"({f}:like:'%{needle}%')" for f in fields]
+    return parts[0] if len(parts) == 1 else "(" + " or ".join(parts) + ")"
+
+
+def _sort_order(sort: str) -> str:
+    """'asc' → 'ASC', tout le reste → 'DESC' (défaut : plus récent d'abord)."""
+    return "ASC" if str(sort).lower().startswith("a") else "DESC"
+
+
+def _valid_dates(**dates: str) -> str:
+    """Valide des dates YYYY-MM-DD. Retourne '' si tout va bien, sinon le message."""
+    for name, value in dates.items():
+        if not value:
+            continue
+        try:
+            _date_str_to_ts(value)
+        except ValueError:
+            return f"Format {name} invalide : '{value}'. Attendu : YYYY-MM-DD."
+    return ""
+
+
+async def _gather_limited(factories: list, concurrency: int = 8) -> list:
+    """Exécute des coroutines en parallèle borné, en rendant les exceptions.
+
+    Les enrichissements par ligne (liens bancaires, notamment) coûtent un appel
+    chacun : les enchaîner rend l'outil inutilisable, les lâcher tous d'un coup
+    sature l'instance. Les exceptions sont retournées plutôt que levées, pour
+    qu'une ligne en échec n'emporte pas le reste du lot.
+    """
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _run(factory):
+        async with sem:
+            return await factory()
+
+    return await asyncio.gather(*[_run(f) for f in factories], return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Repli formulaire web
+# ---------------------------------------------------------------------------
+#
+# Quelques écritures n'ont AUCUNE route REST dans Dolibarr 24 — le
+# rapprochement bancaire en est une (cf. dolibarr_set_bank_statement). Le
+# connecteur ne bascule sur le formulaire web que pour celles-là, et seulement
+# si un compte web est explicitement configuré. Sans DOLIBARR_WEB_LOGIN /
+# DOLIBARR_WEB_PASSWORD, les outils concernés refusent en le disant : jamais de
+# mode dégradé silencieux. Une instance derrière un SSO qui n'expose pas le
+# formulaire de login natif ne peut pas utiliser ce repli — l'échec est alors
+# constaté à la relecture, pas supposé.
+
+WEB_LOGIN = os.environ.get("DOLIBARR_WEB_LOGIN", "")
+WEB_PASSWORD = os.environ.get("DOLIBARR_WEB_PASSWORD", "")
+
+#: Marqueur du formulaire de login Dolibarr. Sa présence dans une réponse
+#: signifie que la session n'est pas (ou plus) authentifiée.
+_LOGIN_FORM_MARKER = 'name="actionlogin"'
+
+
+def _extract_csrf_token(html: str) -> str:
+    """Extrait le jeton anti-CSRF d'une page Dolibarr (<input name="token">).
+
+    L'ordre des attributs n'est pas garanti d'une page à l'autre : on isole
+    d'abord la balise portant name="token", puis sa valeur.
+    """
+    import re
+
+    for tag in re.findall(r"<input\b[^>]*>", html or "", re.IGNORECASE):
+        if re.search(r'name\s*=\s*"token"', tag, re.IGNORECASE):
+            match = re.search(r'value\s*=\s*"([^"]*)"', tag, re.IGNORECASE)
+            if match and match.group(1):
+                return match.group(1)
+    return ""
+
+
+async def _web_login(client: "httpx.AsyncClient") -> None:
+    """Authentifie une session sur l'interface web Dolibarr."""
+    page = await client.get(f"{DOLIBARR_URL}/index.php")
+    resp = await client.post(f"{DOLIBARR_URL}/index.php", data={
+        "token": _extract_csrf_token(page.text),
+        "actionlogin": "login",
+        "loginfunction": "loginfunction",
+        "username": WEB_LOGIN,
+        "password": WEB_PASSWORD,
+    })
+    if _LOGIN_FORM_MARKER in (resp.text or ""):
+        raise DolibarrAPIError(
+            resp.status_code,
+            "Connexion web Dolibarr refusée pour DOLIBARR_WEB_LOGIN : identifiants "
+            "invalides, compte désactivé, ou instance derrière un SSO qui n'expose "
+            "pas le formulaire de login natif.",
+        )
+
+
+async def _web_post(path: str, data: "list[tuple[str, str]]", query: str = "") -> str:
+    """Poste un formulaire Dolibarr avec une session authentifiée et son jeton CSRF.
+
+    Réservé aux écritures que l'API REST n'expose pas. Le jeton est relu sur la
+    page cible juste avant l'envoi : Dolibarr le renouvelle à chaque affichage
+    quand MAIN_SECURITY_CSRF_WITH_TOKEN est actif.
+    """
+    if not DOLIBARR_URL:
+        raise DolibarrAPIError(0, "DOLIBARR_URL n'est pas configurée.")
+    if not WEB_LOGIN or not WEB_PASSWORD:
+        raise DolibarrAPIError(
+            0,
+            "DOLIBARR_WEB_LOGIN / DOLIBARR_WEB_PASSWORD ne sont pas configurés : "
+            "le repli formulaire est désactivé.",
+        )
+
+    url = f"{DOLIBARR_URL}/{path.lstrip('/')}" + (f"?{query}" if query else "")
+    async with httpx.AsyncClient(verify=True, timeout=30, follow_redirects=True) as client:
+        await _web_login(client)
+
+        page = await client.get(url)
+        token = _extract_csrf_token(page.text)
+        if not token:
+            raise DolibarrAPIError(
+                page.status_code,
+                f"Jeton CSRF introuvable sur {path} (HTTP {page.status_code}) : page "
+                "inaccessible pour ce compte, ou formulaire modifié par une mise à jour.",
+            )
+
+        logger.info("POST web %s (%d champs)", url, len(data) + 1)
+        resp = await client.post(url, data=[("token", token), *data])
+        resp.raise_for_status()
+        return resp.text or ""
 
 
 # ---------------------------------------------------------------------------
@@ -1577,39 +1748,69 @@ async def dolibarr_close_task(
 # ---------------------------------------------------------------------------
 
 
+#: Correspondance statut demandé → llx_facture.fk_statut. 'all' (ou toute autre
+#: valeur) ne filtre pas.
+INVOICE_STATUS_FILTER = {"draft": "0", "validated": "1", "paid": "2", "unpaid": "1"}
+
+
 @mcp.tool()
 async def dolibarr_list_invoices(
     status: str = "unpaid",
     thirdparty_id: int = 0,
     min_amount: float = 0,
     limit: int = DEFAULT_LIMIT,
+    date_start: str = "",
+    date_end: str = "",
+    sort: str = "desc",
+    search_ref: str = "",
 ) -> str:
     """Liste les factures clients.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
     - thirdparty_id : filtrer par tiers
-    - min_amount : montant TTC minimum
+    - min_amount : montant TTC minimum. Laissé à 0, il ne filtre RIEN — surtout
+      pas les avoirs, dont le total est négatif par construction.
     - limit : nombre max de résultats
+    - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
+    - sort : 'desc' (défaut, plus récentes d'abord) ou 'asc'
+    - search_ref : fragment de référence, recherche partielle (ex. '2608-0939'
+      ou 'FA2608'). Sert à retrouver une facture depuis le libellé d'un virement
+      lu sur un relevé bancaire.
+
+    Le tri porte sur la date de facture, celle-là même que bornent date_start et
+    date_end. Jusqu'à la v1.4 le tri était croissant et sans filtre de période :
+    `status='all'` avec limit=40 rendait les factures de 2021 et jamais les
+    récentes. Le retard de paiement reste exposé par `days_late`, qui permet de
+    reclasser côté appelant sans revenir à ce tri.
+
+    Les AVOIRS (références AV…) figurent dans la liste avec un montant négatif :
+    les omettre ferait surestimer le chiffre d'affaires de qui additionne cette
+    liste. `credit_notes_count` les dénombre dans la réponse.
 
     Retourne : ref, tiers, montant TTC, date échéance, statut, jours de retard.
     """
     try:
+        invalid = _valid_dates(date_start=date_start, date_end=date_end)
+        if invalid:
+            return invalid
+
         clamp = _clamp_limit(limit)
+        sqlfilters = _sf_and(
+            f"(t.fk_statut:=:{INVOICE_STATUS_FILTER[status]})" if status in INVOICE_STATUS_FILTER else "",
+            _sf_date_range(date_start, date_end, "t.datef"),
+            _sf_ref_search(search_ref, ("t.ref",)),
+        )
+
         params: dict[str, Any] = {
-            "sortfield": "t.date_lim_reglement",
-            "sortorder": "ASC",
+            "sortfield": "t.datef",
+            "sortorder": _sort_order(sort),
             # min_amount est filtré côté client : élargir la limite serveur, sinon
             # elle tronque avant le filtrage et des factures manquent.
             "limit": CLIENT_FILTER_SCAN_LIMIT if min_amount else clamp,
         }
-
-        # Mapping statut
-        status_map = {"draft": "0", "validated": "1", "paid": "2", "unpaid": "1"}
-        if status in status_map:
-            params["sqlfilters"] = f"(t.fk_statut:=:{status_map[status]})"
-            if status == "unpaid":
-                params["sqlfilters"] = "(t.fk_statut:=:1)"  # validée non payée
+        if sqlfilters:
+            params["sqlfilters"] = sqlfilters
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
@@ -1621,7 +1822,12 @@ async def dolibarr_list_invoices(
         results = []
         for inv in invoices:
             total_ttc = float(inv.get("total_ttc") or 0)
-            if total_ttc < min_amount:
+            # `min_amount` ne filtre QUE s'il est fourni. Comparer à 0 par défaut
+            # écartait silencieusement tout total négatif, c'est-à-dire chaque
+            # AVOIR : 13 des 100 dernières factures de l'instance inno³
+            # disparaissaient de la liste sans le moindre signal, et le CA
+            # reconstitué depuis cette liste s'en trouvait faussé à la hausse.
+            if min_amount and total_ttc < min_amount:
                 continue
 
             date_lim = _ts_to_date(inv.get("date_lim_reglement"))
@@ -1651,7 +1857,14 @@ async def dolibarr_list_invoices(
             if len(results) >= clamp:
                 break
 
-        return _dumps({"count": len(results), "invoices": results})
+        return _dumps({
+            "count": len(results),
+            "sort": _sort_order(sort).lower(),
+            "date_start": date_start or None,
+            "date_end": date_end or None,
+            "credit_notes_count": sum(1 for r in results if r["total_ttc"] < 0),
+            "invoices": results,
+        })
 
     except Exception as exc:
         return _format_error(exc)
@@ -1662,6 +1875,10 @@ async def dolibarr_list_supplier_invoices(
     status: str = "unpaid",
     thirdparty_id: int = 0,
     limit: int = DEFAULT_LIMIT,
+    date_start: str = "",
+    date_end: str = "",
+    sort: str = "desc",
+    search_ref: str = "",
 ) -> str:
     """Liste les factures fournisseur.
 
@@ -1669,19 +1886,36 @@ async def dolibarr_list_supplier_invoices(
     - status : 'unpaid', 'paid', 'draft', 'all'
     - thirdparty_id : filtrer par fournisseur
     - limit : nombre max de résultats
+    - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
+    - sort : 'desc' (défaut, plus récentes d'abord) ou 'asc'
+    - search_ref : fragment de référence, cherché À LA FOIS dans la référence
+      interne Dolibarr (SI2602-0084) et dans la référence du fournisseur —
+      c'est cette dernière qu'on lit sur un relevé ou une relance.
 
-    Retourne : ref, fournisseur, montant TTC, date échéance, statut.
+    Mêmes corrections que pour les factures clients : tri décroissant par défaut
+    et filtre de période, faute de quoi une limite basse ne rend que les plus
+    anciennes factures.
+
+    Retourne : ref, ref fournisseur, tiers, montant TTC, échéance, statut.
     """
     try:
+        invalid = _valid_dates(date_start=date_start, date_end=date_end)
+        if invalid:
+            return invalid
+
+        sqlfilters = _sf_and(
+            f"(t.fk_statut:=:{INVOICE_STATUS_FILTER[status]})" if status in INVOICE_STATUS_FILTER else "",
+            _sf_date_range(date_start, date_end, "t.datef"),
+            _sf_ref_search(search_ref, ("t.ref", "t.ref_supplier")),
+        )
+
         params: dict[str, Any] = {
-            "sortfield": "t.date_lim_reglement",
-            "sortorder": "ASC",
+            "sortfield": "t.datef",
+            "sortorder": _sort_order(sort),
             "limit": _clamp_limit(limit),
         }
-
-        status_map = {"draft": "0", "validated": "1", "paid": "2", "unpaid": "1"}
-        if status in status_map:
-            params["sqlfilters"] = f"(t.fk_statut:=:{status_map[status]})"
+        if sqlfilters:
+            params["sqlfilters"] = sqlfilters
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
@@ -1716,7 +1950,13 @@ async def dolibarr_list_supplier_invoices(
                 "days_late": days_late,
             })
 
-        return _dumps({"count": len(results), "invoices": results})
+        return _dumps({
+            "count": len(results),
+            "sort": _sort_order(sort).lower(),
+            "date_start": date_start or None,
+            "date_end": date_end or None,
+            "invoices": results,
+        })
 
     except Exception as exc:
         return _format_error(exc)
@@ -2379,6 +2619,54 @@ async def dolibarr_delete_contact(contact_id: int) -> str:
 # Tools — Tickets
 # ---------------------------------------------------------------------------
 
+#: Libellés FR des statuts de ticket (colonne llx_ticket.fk_statut), d'après les
+#: constantes Ticket::STATUS_* de Dolibarr — les codes 4 et 6 n'existent pas.
+#: L'API REST renvoie status_label=null (libellé calculé par l'UI, jamais
+#: sérialisé) : on le reconstitue côté connecteur.
+TICKET_STATUS_LABELS = {
+    "0": "Non lu",
+    "1": "Lu",
+    "2": "Assigné",
+    "3": "En cours",
+    "5": "En attente (retour demandeur)",
+    "7": "Suspendu",
+    "8": "Fermé",
+    "9": "Annulé",
+}
+
+
+def _ticket_status_label(ticket: dict) -> str:
+    """Libellé de statut d'un ticket : status_label si l'API le fournit un jour,
+    sinon reconstitué depuis fk_statut (ou status) via TICKET_STATUS_LABELS."""
+    label = ticket.get("status_label")
+    if label:
+        return str(label)
+    code = ticket.get("fk_statut")
+    if code in (None, ""):
+        code = ticket.get("status")
+    return TICKET_STATUS_LABELS.get(str(code), "")
+
+
+async def _fetch_ticket(ticket_id: int, ref: str) -> "dict[str, Any] | str":
+    """Résout un ticket par ID ou par référence.
+
+    Retourne le dict du ticket, ou un message d'erreur (str) à renvoyer tel
+    quel à l'appelant. La résolution par ref passe par la liste filtrée :
+    l'objet rendu est allégé (pas d'historique de messages) mais porte bien
+    id, ref, track_id et fk_statut.
+    """
+    if ticket_id:
+        return await api_get(f"tickets/{ticket_id}")
+    if ref:
+        tickets = await _api_get_list(
+            "tickets",
+            {"sqlfilters": f"(t.ref:=:'{_sf_escape(ref)}')", "limit": 1},
+        )
+        if not tickets:
+            return f"Ticket '{ref}' introuvable."
+        return tickets[0]
+    return "Veuillez fournir ticket_id ou ref."
+
 
 @mcp.tool()
 async def dolibarr_list_tickets(
@@ -2390,7 +2678,9 @@ async def dolibarr_list_tickets(
     """Liste les tickets de support.
 
     Paramètres :
-    - status : 'not_read', 'read', 'assigned', 'in_progress', 'waiting', 'closed', vide=ouverts
+    - status : 'not_read', 'read', 'assigned', 'in_progress', 'waiting' (=en
+      attente d'infos du demandeur), 'suspended', 'closed', 'canceled',
+      vide=ouverts (tout sauf fermés/annulés)
     - thirdparty_id : filtrer par tiers
     - severity : 'low', 'medium', 'high', 'critical'
     - limit : nombre max de résultats
@@ -2412,8 +2702,11 @@ async def dolibarr_list_tickets(
                 "read": "1",
                 "assigned": "2",
                 "in_progress": "3",
-                "waiting": "5",
+                "waiting": "5",      # STATUS_NEED_MORE_INFO (alias historique)
+                "need_info": "5",
+                "suspended": "7",    # STATUS_WAITING
                 "closed": "8",
+                "canceled": "9",
             }
             if status in status_code_map:
                 filters.append(f"(t.fk_statut:=:{status_code_map[status]})")
@@ -2439,7 +2732,7 @@ async def dolibarr_list_tickets(
                 "message": (t.get("message") or "")[:200],
                 "thirdparty": t.get("thirdparty_name") or t.get("fk_soc"),
                 "status": t.get("fk_statut"),
-                "status_label": t.get("status_label"),
+                "status_label": _ticket_status_label(t),
                 "severity": t.get("severity_code"),
                 "category": t.get("category_code") or t.get("type_code"),
                 "date_creation": _ts_to_date(t.get("datec")),
@@ -2464,15 +2757,27 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
     Retourne : sujet, message complet, statut, tiers, historique des messages.
     """
     try:
-        if ticket_id:
-            ticket = await api_get(f"tickets/{ticket_id}")
-        elif ref:
-            tickets = await api_get("tickets", {"sqlfilters": f"(t.ref:=:'{_sf_escape(ref)}')", "limit": 1})
-            if not tickets:
-                return f"Ticket '{ref}' introuvable."
-            ticket = tickets[0]
-        else:
-            return "Veuillez fournir ticket_id ou ref."
+        ticket = await _fetch_ticket(ticket_id, ref)
+        if isinstance(ticket, str):
+            return ticket
+        if not ticket_id:
+            # La résolution par ref rend un objet de liste sans l'historique :
+            # relire par ID pour obtenir les messages du fil.
+            ticket = await api_get(f"tickets/{int(ticket.get('id'))}")
+
+        # GET /tickets/{id} sérialise le fil sous `messages` (l'API le remplit
+        # depuis cache_msgs_ticket) ; absent sur les vieux Dolibarr → [].
+        messages = []
+        for msg in ticket.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            messages.append({
+                "id": msg.get("id"),
+                "author_user_id": msg.get("fk_user_author") or msg.get("fk_user_action"),
+                "date": _ts_to_datetime(msg.get("datec")),
+                "private": msg.get("private"),
+                "message": _strip_html(msg.get("message"))[:500],
+            })
 
         return _dumps({
             "id": ticket.get("id"),
@@ -2481,7 +2786,7 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
             "subject": ticket.get("subject"),
             "message": ticket.get("message"),
             "status": ticket.get("fk_statut"),
-            "status_label": ticket.get("status_label"),
+            "status_label": _ticket_status_label(ticket),
             "severity": ticket.get("severity_code"),
             "type": ticket.get("type_code"),
             "category": ticket.get("category_code"),
@@ -2490,8 +2795,10 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
             "project_id": ticket.get("fk_project"),
             "assigned_to": ticket.get("fk_user_assign"),
             "date_creation": _ts_to_date(ticket.get("datec")),
+            "date_close": _ts_to_date(ticket.get("date_close")),
             "date_last_msg": ticket.get("date_last_msg_sent"),
             "nb_messages": ticket.get("nb_public_messages"),
+            "messages": messages,
         })
 
     except Exception as exc:
@@ -2559,6 +2866,260 @@ async def dolibarr_create_ticket(
         return _format_error(exc)
 
 
+@mcp.tool()
+async def dolibarr_close_ticket(
+    ticket_id: int = 0,
+    ref: str = "",
+    status: int = 8,
+    message: str = "",
+) -> str:
+    """Ferme un ticket de support (statut 8 = fermé par défaut).
+
+    Confirmation utilisateur requise avant exécution.
+
+    L'API REST Dolibarr n'a pas d'endpoint de clôture : l'outil passe par
+    PUT /tickets/{id}. Piège couvert : Ticket::update() écrit la colonne
+    fk_statut depuis $this->status (Dolibarr récents), si bien qu'un PUT ne
+    portant que fk_statut répond 200 sans rien écrire — on envoie les deux
+    clés puis on RELIT le ticket pour vérifier que le statut a changé.
+    Pour un statut 8 ou 9, on reproduit Ticket::close() : date_close = now
+    et progress = 100.
+
+    Paramètres :
+    - ticket_id : ID numérique du ticket (ou ref)
+    - ref       : référence du ticket (ex: 'TS2608-0042')
+    - status    : statut cible (défaut 8=fermé ; 9=annulé ; les autres codes
+                  Dolibarr sont acceptés pour rouvrir : 1=lu, 3=en cours…)
+    - message   : message de clôture optionnel, ajouté au fil du ticket AVANT
+                  le changement de statut (POST /tickets/newmessage)
+
+    Retourne l'ancien et le nouveau statut du ticket.
+    """
+    try:
+        status_key = str(status)
+        if status_key not in TICKET_STATUS_LABELS:
+            valid = ", ".join(
+                f"{k}={v}"
+                for k, v in sorted(TICKET_STATUS_LABELS.items(), key=lambda kv: int(kv[0]))
+            )
+            return f"Statut {status} invalide. Statuts Dolibarr : {valid}."
+
+        ticket = await _fetch_ticket(ticket_id, ref)
+        if isinstance(ticket, str):
+            return ticket
+        tid = int(ticket.get("id"))
+        old_status = str(ticket.get("fk_statut"))
+
+        message_posted = False
+        if message:
+            track_id = ticket.get("track_id")
+            if not track_id:
+                return (
+                    f"Ticket {tid} sans track_id : impossible d'ajouter le message "
+                    "(requis par POST /tickets/newmessage). Fermer sans message."
+                )
+            await api_post("tickets/newmessage", {"track_id": track_id, "message": message})
+            message_posted = True
+
+        if old_status == status_key:
+            return _dumps({
+                "success": True,
+                "ticket_id": tid,
+                "ref": ticket.get("ref"),
+                "status": status,
+                "status_label": TICKET_STATUS_LABELS[status_key],
+                "message_posted": message_posted,
+                "message": f"Ticket déjà au statut « {TICKET_STATUS_LABELS[status_key]} » : statut inchangé.",
+            })
+
+        payload: dict[str, Any] = {"status": status, "fk_statut": status}
+        if status_key in ("8", "9"):
+            payload["date_close"] = int(time.time())
+            payload["progress"] = 100
+        await api_put(f"tickets/{tid}", payload)
+
+        # Relecture de contrôle : sans elle, l'échec silencieux décrit plus
+        # haut passerait pour un succès.
+        updated = await api_get(f"tickets/{tid}")
+        new_status = str(updated.get("fk_statut"))
+        if new_status != status_key:
+            return (
+                f"Échec silencieux : le PUT a répondu sans erreur mais le ticket {tid} "
+                f"est resté au statut {new_status} ({_ticket_status_label(updated)}). "
+                "Vérifier la version de Dolibarr et les droits du compte API."
+            )
+
+        return _dumps({
+            "success": True,
+            "ticket_id": tid,
+            "ref": updated.get("ref"),
+            "previous_status": int(old_status) if old_status.isdigit() else old_status,
+            "previous_status_label": TICKET_STATUS_LABELS.get(old_status, ""),
+            "status": status,
+            "status_label": _ticket_status_label(updated),
+            "date_close": _ts_to_date(updated.get("date_close")),
+            "message_posted": message_posted,
+            "message": f"Ticket {updated.get('ref')} basculé au statut « {TICKET_STATUS_LABELS[status_key]} ».",
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_add_ticket_message(
+    ticket_id: int = 0,
+    ref: str = "",
+    message: str = "",
+) -> str:
+    """Ajoute un message au fil d'un ticket de support.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Le message est posté via POST /tickets/newmessage (identifié par le
+    track_id du ticket) et apparaît dans l'historique du ticket.
+
+    Paramètres :
+    - ticket_id : ID numérique du ticket (ou ref)
+    - ref       : référence du ticket (ex: 'TS2608-0042')
+    - message   : contenu du message (obligatoire)
+    """
+    try:
+        if not message:
+            return "Le message est obligatoire."
+
+        ticket = await _fetch_ticket(ticket_id, ref)
+        if isinstance(ticket, str):
+            return ticket
+        track_id = ticket.get("track_id")
+        if not track_id:
+            return f"Ticket {ticket.get('id')} sans track_id : POST /tickets/newmessage impossible."
+
+        await api_post("tickets/newmessage", {"track_id": track_id, "message": message})
+
+        return _dumps({
+            "success": True,
+            "ticket_id": ticket.get("id"),
+            "ref": ticket.get("ref"),
+            "message": f"Message ajouté au ticket {ticket.get('ref')}.",
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_update_ticket(
+    ticket_id: int = 0,
+    ref: str = "",
+    subject: str = "",
+    severity: str = "",
+    type_code: str = "",
+    project_id: int = 0,
+    thirdparty_id: int = 0,
+    assigned_user_id: int = 0,
+) -> str:
+    """Met à jour un ticket de support : sujet, sévérité, type, rattachements.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Seuls les paramètres fournis sont modifiés. Pour changer le STATUT,
+    utiliser dolibarr_close_ticket (qui gère aussi la réouverture).
+
+    Paramètres :
+    - ticket_id        : ID numérique du ticket (ou ref)
+    - ref              : référence du ticket (ex: 'TS2608-0042')
+    - subject          : nouveau sujet
+    - severity         : 'low', 'normal', 'high', 'critical'
+    - type_code        : 'QUESTION', 'INCIDENT', 'REQUEST', 'SUPPORT'
+    - project_id       : rattacher au projet (fk_project)
+    - thirdparty_id    : rattacher au tiers (fk_soc)
+    - assigned_user_id : assigner à l'utilisateur (fk_user_assign brut : ne
+                         crée pas le contact et ne passe pas le statut à
+                         « Assigné », contrairement à l'assignation via l'UI)
+    """
+    try:
+        ticket = await _fetch_ticket(ticket_id, ref)
+        if isinstance(ticket, str):
+            return ticket
+        tid = int(ticket.get("id"))
+
+        payload: dict[str, Any] = {}
+        if subject:
+            payload["subject"] = subject
+        if severity:
+            severity_map = {
+                "low": "LOW", "normal": "NORMAL",
+                "high": "HIGH", "critical": "CRITICAL",
+            }
+            code = severity_map.get(severity.lower())
+            if not code:
+                return f"Sévérité '{severity}' invalide (low, normal, high, critical)."
+            payload["severity_code"] = code
+        if type_code:
+            payload["type_code"] = type_code.upper()
+        if project_id:
+            payload["fk_project"] = project_id
+        if thirdparty_id:
+            payload["fk_soc"] = thirdparty_id
+        if assigned_user_id:
+            payload["fk_user_assign"] = assigned_user_id
+        if not payload:
+            return "Aucun champ à modifier : fournir au moins un paramètre."
+
+        await api_put(f"tickets/{tid}", payload)
+        updated = await api_get(f"tickets/{tid}")
+
+        return _dumps({
+            "success": True,
+            "ticket_id": tid,
+            "ref": updated.get("ref"),
+            "subject": updated.get("subject"),
+            "severity": updated.get("severity_code"),
+            "type": updated.get("type_code"),
+            "project_id": updated.get("fk_project"),
+            "thirdparty_id": updated.get("fk_soc"),
+            "assigned_to": updated.get("fk_user_assign"),
+            "status_label": _ticket_status_label(updated),
+            "updated_fields": sorted(payload),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_ticket(ticket_id: int = 0, ref: str = "") -> str:
+    """Supprime définitivement un ticket de support (DELETE /tickets/{id}).
+
+    Confirmation utilisateur requise avant exécution — suppression
+    IRRÉVERSIBLE, fil de messages compris. Pour clore proprement un ticket,
+    préférer dolibarr_close_ticket.
+
+    Paramètres :
+    - ticket_id : ID numérique du ticket (ou ref)
+    - ref       : référence du ticket (ex: 'TS2608-0042')
+    """
+    try:
+        ticket = await _fetch_ticket(ticket_id, ref)
+        if isinstance(ticket, str):
+            return ticket
+        tid = int(ticket.get("id"))
+        tref = ticket.get("ref")
+
+        await api_delete(f"tickets/{tid}")
+
+        return _dumps({
+            "success": True,
+            "ticket_id": tid,
+            "ref": tref,
+            "message": f"Ticket {tref} (ID {tid}) supprimé définitivement.",
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
 # ---------------------------------------------------------------------------
 # Tools — Résolution et synthèse
 # ---------------------------------------------------------------------------
@@ -2566,7 +3127,7 @@ async def dolibarr_create_ticket(
 
 @mcp.tool()
 async def dolibarr_resolve_email(email_address: str) -> str:
-    """Résout une adresse email vers un tiers et/ou contact Dolibarr.
+    """Résout une adresse email vers un utilisateur, un contact ou un tiers Dolibarr.
 
     C'est LE tool de corrélation : il permet de faire le lien entre
     un participant CalDAV, un expéditeur IMAP, et un tiers Dolibarr.
@@ -2574,14 +3135,47 @@ async def dolibarr_resolve_email(email_address: str) -> str:
     Paramètres :
     - email_address : adresse email à résoudre
 
-    Retourne le tiers et le contact correspondants s'ils existent,
-    ou une suggestion si seul le domaine matche.
+    Trois pistes sont suivies, et elles ne s'excluent pas :
+    - `user` : un UTILISATEUR interne de l'instance. Une adresse interne n'est
+      ni un tiers ni un contact ; la chercher uniquement dans ces deux tables
+      la déclarait introuvable et interdisait de désigner un responsable
+      d'action autrement qu'en nom libre ;
+    - `contact` : un contact, avec le tiers auquel il est rattaché ;
+    - `thirdparty` : un tiers, par son adresse ou à défaut par son domaine.
+
+    `found` vaut True dès qu'une des trois pistes aboutit ; `matched_as` dit
+    laquelle, pour que l'appelant sache à quoi il a affaire.
     """
     try:
         email_lower = email_address.strip().lower()
         domain = email_lower.split("@")[1] if "@" in email_lower else ""
 
         result: dict[str, Any] = {"email": email_lower, "found": False}
+        matched: list[str] = []
+
+        # 0. Utilisateurs internes. `GET /users/email/{email}` est la route
+        # dédiée ; elle répond 404 quand l'adresse n'appartient à personne, ce
+        # qui n'est pas une erreur mais une réponse.
+        try:
+            # L'adresse voyage dans le CHEMIN : une adresse à sous-adressage
+            # (« nom+tag@domaine ») y verrait son « + » lu comme une espace.
+            from urllib.parse import quote
+
+            user = await api_get(f"{USERS_ENDPOINT}/email/{quote(email_lower, safe='@.')}")
+            if isinstance(user, dict) and (user.get("id") or user.get("login")):
+                result["found"] = True
+                matched.append("user")
+                result["user"] = {k: v for k, v in {
+                    "id": _id_int(user.get("id") or user.get("rowid")),
+                    "login": user.get("login"),
+                    "firstname": user.get("firstname"),
+                    "lastname": user.get("lastname"),
+                    "email": user.get("email"),
+                    "job": user.get("job") or None,
+                    "enabled": str(user.get("statut") or user.get("status") or "1") == "1",
+                }.items() if v not in (None, "")}
+        except Exception:
+            pass  # 404 = adresse non interne, cas nominal
 
         # 1. Chercher dans les contacts par email exact
         try:
@@ -2620,6 +3214,8 @@ async def dolibarr_resolve_email(email_address: str) -> str:
                          "thirdparty_id": c2.get("socid")}
                         for c2 in contacts[1:]
                     ]
+                matched.append("contact")
+                result["matched_as"] = matched
                 return _dumps(result)
         except Exception:
             pass
@@ -2640,6 +3236,8 @@ async def dolibarr_resolve_email(email_address: str) -> str:
                     "is_customer": tp.get("client"),
                     "is_supplier": tp.get("fournisseur"),
                 }
+                matched.append("thirdparty")
+                result["matched_as"] = matched
                 return _dumps(result)
         except Exception:
             pass
@@ -2660,116 +3258,269 @@ async def dolibarr_resolve_email(email_address: str) -> str:
                         f"Aucun contact exact pour '{email_lower}', mais {len(thirdparties)} "
                         f"tiers avec le domaine @{domain}."
                     )
+                    matched.append("domain")
+                    result["matched_as"] = matched
                     return _dumps(result)
             except Exception:
                 pass
 
-        result["suggestion"] = f"Aucun tiers ni contact trouvé pour '{email_lower}'."
+        result["matched_as"] = matched
+        if not result["found"]:
+            result["suggestion"] = (
+                f"Aucun utilisateur, tiers ni contact trouvé pour '{email_lower}'."
+            )
         return _dumps(result)
 
     except Exception as exc:
         return _format_error(exc)
+
+
+#: Taille de page des balayages de factures pour le CA. La version précédente
+#: demandait 500 factures d'un coup, sans filtre de date et triées par rowid
+#: croissant : passé 500 factures validées, l'instance ne rendait plus que les
+#: plus ANCIENNES et le CA du mois courant tombait à zéro sans le dire.
+REVENUE_SCAN_PAGE = 100
+#: Garde-fou de boucle : 50 pages = 5 000 factures sur la période demandée.
+REVENUE_SCAN_MAX_PAGES = 50
+#: Plafond d'écritures bancaires inspectées pour le CA encaissé. Au-delà, la
+#: réponse porte `truncated: true` — jamais de troncature muette.
+REVENUE_CASH_SCAN_MAX = 400
+
+
+async def _invoices_in_range(date_start: str, date_end: str) -> list:
+    """Factures clients validées ou payées d'une période, toutes pages lues.
+
+    Le filtre de statut est écrit `>= 1 and <= 2` plutôt qu'avec l'opérateur
+    `in` : la grammaire des sqlfilters interdit les parenthèses dans une valeur,
+    donc `(t.fk_statut:in:(1,2))` est refusé à l'analyse.
+    """
+    sqlfilters = _sf_and(
+        "(t.fk_statut:>=:1)",
+        "(t.fk_statut:<=:2)",
+        _sf_date_range(date_start, date_end, "t.datef"),
+    )
+    rows: list = []
+    for page in range(REVENUE_SCAN_MAX_PAGES):
+        chunk = await _api_get_list("invoices", {
+            "sortfield": "t.datef",
+            "sortorder": "DESC",
+            "limit": REVENUE_SCAN_PAGE,
+            "page": page,
+            "sqlfilters": sqlfilters,
+            "properties": "id,ref,total_ht,total_ttc,date,fk_statut,paye",
+        })
+        chunk = chunk if isinstance(chunk, list) else []
+        rows.extend(chunk)
+        if len(chunk) < REVENUE_SCAN_PAGE:
+            return rows
+    logger.warning(
+        "CA : %d pages de factures lues sur %s→%s, balayage arrêté au garde-fou.",
+        REVENUE_SCAN_MAX_PAGES, date_start, date_end,
+    )
+    return rows
+
+
+async def _customer_cash_in(date_start: str, date_end: str) -> dict:
+    """Encaissements clients d'une période, reconstitués depuis les comptes bancaires.
+
+    Il n'existe pas de route REST listant les règlements : la seule vue
+    transversale des encaissements est le journal bancaire. On y retient les
+    écritures créditrices portant un lien `payment`, celui que Dolibarr pose
+    entre un règlement de facture client et sa ligne de banque.
+    """
+    accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+    scanned: list[tuple[int, dict]] = []
+    used_accounts = []
+    for raw in accounts if isinstance(accounts, list) else []:
+        acc = _format_bank_account(raw)
+        if not acc.get("id") or acc.get("closed") or acc.get("type") == BANK_ACCOUNT_TYPE_CASH:
+            continue
+        used_accounts.append(acc["id"])
+        lines = await _bank_lines(
+            acc["id"], _bank_date_filter(after=date_start, before=date_end)
+        )
+        scanned.extend(
+            (acc["id"], line)
+            for line in lines
+            if float(_num(line.get("amount")) or 0) > 0
+            and _id_int(line.get("id") or line.get("rowid")) is not None
+        )
+
+    truncated = len(scanned) > REVENUE_CASH_SCAN_MAX
+    kept = scanned[:REVENUE_CASH_SCAN_MAX]
+
+    links = await _gather_limited([
+        (lambda a=acc_id, ln=line: _bank_line_links(a, _id_int(ln.get("id") or ln.get("rowid"))))
+        for acc_id, line in kept
+    ])
+
+    payments = []
+    for (acc_id, line), resolved in zip(kept, links):
+        if isinstance(resolved, Exception):
+            logger.warning("Liens illisibles sur l'écriture %s : %s", line.get("id"), resolved)
+            continue
+        sources = resolved.get("sources") or []
+        if not any(src.get("type") == "payment" for src in sources):
+            continue
+        payments.append({
+            "account_id": acc_id,
+            "entry_id": _id_int(line.get("id") or line.get("rowid")),
+            "date": _ts_to_date(line.get("dateo")),
+            "amount_ttc": float(_num(line.get("amount")) or 0),
+            "thirdparty": (resolved.get("thirdparty") or {}).get("name"),
+        })
+
+    return {
+        "payments": payments,
+        "accounts_scanned": used_accounts,
+        "entries_scanned": len(kept),
+        "entries_matched": len(scanned),
+        "truncated": truncated,
+    }
 
 
 @mcp.tool()
 async def dolibarr_get_revenue_summary(
     year: int = 0,
     month: int = 0,
+    basis: str = "emises",
 ) -> str:
-    """Synthèse du chiffre d'affaires depuis les factures Dolibarr.
-
-    Calcule le CA à partir des factures validées et payées.
-    Utile pour le tableau de bord mensuel direction.
+    """Synthèse du chiffre d'affaires depuis les données Dolibarr.
 
     Paramètres :
-    - year : année (défaut : année en cours)
-    - month : mois (1-12, défaut : mois en cours). Si 0, retourne le cumul annuel.
+    - year  : année (défaut : année en cours)
+    - month : mois 1-12 (défaut : mois en cours)
+    - basis : assiette du calcul, et c'est le paramètre déterminant —
+        * 'emises' (défaut) : toutes les factures VALIDÉES, payées ou non
+          (fk_statut 1 et 2), comptées à leur date de facture. C'est le CA
+          commercial : une facture émise dans le mois y figure le jour de son
+          émission, sans attendre son encaissement. Le total est NET des
+          avoirs — dont le montant est négatif — et le détail est rendu à part
+          (`month_gross_ht`, `month_credit_notes_ht`, `month_nb_credit_notes`)
+          pour qu'une facture annulée par un avoir de même montant se lise, au
+          lieu de sembler avoir disparu.
+        * 'encaissees' : les encaissements clients réellement constatés en
+          banque sur la période, à leur date d'opération. Montants TTC — ce
+          sont des mouvements de compte, pas des bases HT.
+      L'assiette retenue est toujours rappelée dans la réponse (`basis`,
+      `basis_label`) : les deux chiffres sont légitimes et ne se comparent pas.
 
-    Retourne : CA HT/TTC du mois, CA cumulé depuis début d'année,
-    nombre de factures émises, comparaison N-1 si disponible.
+    Retourne, selon l'assiette : CA du mois et cumul annuel, nombre de factures
+    ou d'encaissements, et pour 'emises' la comparaison au même mois de N-1.
+
+    'encaissees' reconstruit les encaissements depuis le journal bancaire, faute
+    de route REST listant les règlements : les comptes clos et les caisses sont
+    exclus, et le balayage est plafonné à REVENUE_CASH_SCAN_MAX écritures — la
+    réponse porte alors `truncated: true`.
     """
     from datetime import datetime
 
     now = datetime.now()
-    if not year:
-        year = now.year
-    if not month:
-        month = now.month
+    year = year or now.year
+    month = month or now.month
+    if not 1 <= month <= 12:
+        return f"Mois invalide : {month}. Attendu : 1 à 12."
+
+    assiette = str(basis or "emises").strip().lower()
+    if assiette not in ("emises", "encaissees"):
+        return f"basis invalide : '{basis}'. Valeurs acceptées : 'emises', 'encaissees'."
+
+    year_start = f"{year}-01-01"
+    year_end = f"{year}-12-31"
+    month_prefix = f"{year}-{month:02d}"
 
     try:
-        result: dict[str, Any] = {"year": year, "month": month}
+        if assiette == "encaissees":
+            cash = await _customer_cash_in(year_start, year_end)
+            in_month = [p for p in cash["payments"] if p["date"].startswith(month_prefix)]
+            result: dict[str, Any] = {
+                "year": year,
+                "month": month,
+                "basis": "encaissees",
+                "basis_label": (
+                    "encaissements clients constatés en banque, à la date d'opération (TTC)"
+                ),
+                "month_ca_ttc": round(sum(p["amount_ttc"] for p in in_month), 2),
+                "month_nb_payments": len(in_month),
+                "ytd_ca_ttc": round(sum(p["amount_ttc"] for p in cash["payments"]), 2),
+                "ytd_nb_payments": len(cash["payments"]),
+                "accounts_scanned": cash["accounts_scanned"],
+                "entries_scanned": cash["entries_scanned"],
+            }
+            if cash["truncated"]:
+                result["truncated"] = True
+                result["truncation_note"] = (
+                    f"{cash['entries_matched']} écritures créditrices sur la période, "
+                    f"{cash['entries_scanned']} inspectées (plafond REVENUE_CASH_SCAN_MAX). "
+                    "Les montants ci-dessus sont donc minorés : restreindre la période."
+                )
+            return _dumps(result)
 
-        # Factures validées + payées de l'année en cours
-        # Statut 1 = validée, 2 = payée
-        all_invoices = []
-        for status_code in ("1", "2"):
-            try:
-                invs = await api_get("invoices", {
-                    "sqlfilters": f"(t.fk_statut:=:{status_code})",
-                    "limit": 500,
-                    "properties": "id,total_ht,total_ttc,date,fk_statut",
-                })
-                if isinstance(invs, list):
-                    all_invoices.extend(invs)
-            except Exception:
-                pass
+        invoices = await _invoices_in_range(year_start, year_end)
+        month_invoices = [
+            inv for inv in invoices if _ts_to_date(inv.get("date")).startswith(month_prefix)
+        ]
 
-        # Filtrer par année et calculer
-        year_invoices = []
-        month_invoices = []
-        for inv in all_invoices:
-            date_str = _ts_to_date(inv.get("date"))
-            if not date_str or len(date_str) < 7:
-                continue
-            inv_year = int(date_str[:4])
-            inv_month = int(date_str[5:7])
-            if inv_year == year:
-                year_invoices.append(inv)
-                if inv_month == month:
-                    month_invoices.append(inv)
+        def _split(rows: list) -> tuple:
+            """Sépare factures et avoirs. Un avoir a un total NÉGATIF."""
+            credits = [r for r in rows if float(r.get("total_ht") or 0) < 0]
+            return [r for r in rows if r not in credits], credits
 
-        # CA du mois
-        result["month_ca_ht"] = round(sum(float(i.get("total_ht") or 0) for i in month_invoices), 2)
-        result["month_ca_ttc"] = round(sum(float(i.get("total_ttc") or 0) for i in month_invoices), 2)
-        result["month_nb_invoices"] = len(month_invoices)
+        month_gross, month_credits = _split(month_invoices)
+        year_gross, year_credits = _split(invoices)
 
-        # CA cumulé année
-        result["ytd_ca_ht"] = round(sum(float(i.get("total_ht") or 0) for i in year_invoices), 2)
-        result["ytd_ca_ttc"] = round(sum(float(i.get("total_ttc") or 0) for i in year_invoices), 2)
-        result["ytd_nb_invoices"] = len(year_invoices)
+        result = {
+            "year": year,
+            "month": month,
+            "basis": "emises",
+            "basis_label": (
+                "factures validées ou payées (fk_statut 1 et 2), à la date de facture, "
+                "NET des avoirs de la période"
+            ),
+            "month_ca_ht": round(sum(float(i.get("total_ht") or 0) for i in month_invoices), 2),
+            "month_ca_ttc": round(sum(float(i.get("total_ttc") or 0) for i in month_invoices), 2),
+            "month_nb_invoices": len(month_invoices),
+            "ytd_ca_ht": round(sum(float(i.get("total_ht") or 0) for i in invoices), 2),
+            "ytd_ca_ttc": round(sum(float(i.get("total_ttc") or 0) for i in invoices), 2),
+            "ytd_nb_invoices": len(invoices),
+            # Le CA ci-dessus est NET d'avoirs. Sans ce détail, une facture
+            # annulée le jour même par un avoir de même montant fait disparaître
+            # les deux d'un coup d'œil, et le chiffre paraît faux alors qu'il est
+            # juste. Vérifié en production le 31/08/2026 : FA2608-0940 (46 050 €)
+            # émise et créditée le 19/08 par AV2608-0651 et AV2608-0652.
+            "month_gross_ht": round(sum(float(i.get("total_ht") or 0) for i in month_gross), 2),
+            "month_credit_notes_ht": round(
+                sum(float(i.get("total_ht") or 0) for i in month_credits), 2
+            ),
+            "month_nb_credit_notes": len(month_credits),
+            "ytd_gross_ht": round(sum(float(i.get("total_ht") or 0) for i in year_gross), 2),
+            "ytd_credit_notes_ht": round(
+                sum(float(i.get("total_ht") or 0) for i in year_credits), 2
+            ),
+            "ytd_nb_credit_notes": len(year_credits),
+        }
 
-        # Comparaison N-1 (même mois, année précédente)
-        try:
-            prev_year = year - 1
-            prev_invoices = []
-            for status_code in ("1", "2"):
-                try:
-                    invs = await api_get("invoices", {
-                        "sqlfilters": f"(t.fk_statut:=:{status_code})",
-                        "limit": 500,
-                        "properties": "id,total_ht,date,fk_statut",
-                    })
-                    if isinstance(invs, list):
-                        for inv in invs:
-                            ds = _ts_to_date(inv.get("date"))
-                            if ds and len(ds) >= 7:
-                                if int(ds[:4]) == prev_year and int(ds[5:7]) == month:
-                                    prev_invoices.append(inv)
-                except Exception:
-                    pass
-
-            prev_ca = round(sum(float(i.get("total_ht") or 0) for i in prev_invoices), 2)
-            result["n_minus_1_month_ca_ht"] = prev_ca
-            if prev_ca > 0:
-                variation = round(((result["month_ca_ht"] - prev_ca) / prev_ca) * 100, 1)
-                result["variation_vs_n1_pct"] = variation
-        except Exception:
-            pass
+        prev = await _invoices_in_range(
+            f"{year - 1}-{month:02d}-01", _month_last_day(year - 1, month)
+        )
+        prev_ca = round(sum(float(i.get("total_ht") or 0) for i in prev), 2)
+        result["n_minus_1_month_ca_ht"] = prev_ca
+        if prev_ca > 0:
+            result["variation_vs_n1_pct"] = round(
+                ((result["month_ca_ht"] - prev_ca) / prev_ca) * 100, 1
+            )
 
         return _dumps(result)
 
     except Exception as exc:
         return _format_error(exc)
+
+
+def _month_last_day(year: int, month: int) -> str:
+    """Dernier jour d'un mois, au format YYYY-MM-DD."""
+    import calendar
+
+    return f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -4401,6 +5152,2901 @@ async def dolibarr_get_invoice_pdf_url(invoice_id: int) -> str:
             "ui_download_url": ui_url,
             "api_download_url": api_url,
             "note": "ui_download_url nécessite une session Dolibarr (cookie navigateur). api_download_url nécessite un header DOLAPIKEY.",
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Banque : comptes, écritures, rapprochement
+# ---------------------------------------------------------------------------
+
+#: Routes REST du module Banque (vérifiées sur api_bankaccounts.class.php 24.0.0).
+#: Attention : `BANK_LINE_ENDPOINT` n'est PAS imbriquée sous le compte — la route
+#: déclarée est `GET /bankaccounts/lines/{line_id}`, sans identifiant de compte.
+BANK_ACCOUNTS_ENDPOINT = "bankaccounts"
+BANK_ACCOUNT_ENDPOINT = "bankaccounts/{account_id}"
+BANK_LINES_ENDPOINT = "bankaccounts/{account_id}/lines"
+BANK_LINE_ENDPOINT = "bankaccounts/lines/{line_id}"
+BANK_ACCOUNT_LINE_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}"
+BANK_LINE_LINKS_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}/links"
+BANK_BALANCE_ENDPOINT = "bankaccounts/{account_id}/balance"
+PAYMENT_TYPES_ENDPOINT = "setup/dictionary/payment_types"
+
+#: llx_bank_account.courant — Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
+BANK_ACCOUNT_TYPES = {"0": "épargne", "1": "compte courant", "2": "caisse"}
+BANK_ACCOUNT_TYPE_CASH = "2"
+#: llx_bank_account.clos — Account::STATUS_OPEN / STATUS_CLOSED.
+BANK_ACCOUNT_STATUS = {"0": "ouvert", "1": "clos"}
+BANK_ACCOUNT_STATUS_OPEN = "0"
+
+#: Fenêtre appliquée à dolibarr_list_bank_entries quand aucune date de début
+#: n'est fournie. `GET /bankaccounts/{id}/lines` n'accepte NI limit NI page :
+#: Dolibarr instancie un AccountLine par ligne retournée, donc une requête sans
+#: borne basse relit tout l'historique du compte et finit en timeout. La fenêtre
+#: est renvoyée dans la réponse (`date_start`) — jamais appliquée en silence.
+BANK_ENTRIES_DEFAULT_WINDOW_DAYS = 90
+
+#: Types de lien `llx_bank_url` qui désignent l'objet à l'origine de l'écriture.
+#: 'company' est traité à part : c'est le tiers, pas l'objet source.
+BANK_LINK_SOURCE_LABELS = {
+    "payment": "règlement facture client",
+    "payment_supplier": "règlement facture fournisseur",
+    "payment_various": "paiement divers",
+    "payment_sc": "règlement charge sociale",
+    "payment_vat": "règlement TVA",
+    "payment_salary": "règlement salaire",
+    "payment_loan": "règlement emprunt",
+    "payment_donation": "règlement don",
+    "payment_expensereport": "règlement note de frais",
+    "banktransfert": "virement interne",
+    "withdraw": "prélèvement",
+    "project": "projet",
+}
+
+#: Modes de règlement, indexés par code et par id. Rempli au premier appel :
+#: le dictionnaire c_paiement ne bouge pas en cours de session. Les tests le
+#: remettent à None pour repartir d'un cache vide.
+_PAYMENT_TYPES_CACHE: "dict[str, dict] | None" = None
+
+
+async def _payment_types() -> dict:
+    """Charge (et mémorise) les modes de règlement actifs de Dolibarr.
+
+    Retourne {"by_code": {"VIR": {...}}, "by_id": {"4": {...}}}.
+    """
+    global _PAYMENT_TYPES_CACHE
+    if _PAYMENT_TYPES_CACHE is not None:
+        return _PAYMENT_TYPES_CACHE
+
+    rows = await api_get(PAYMENT_TYPES_ENDPOINT, {"limit": 100, "active": 1})
+    by_code: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        entry = {
+            "id": _id_int(row.get("id")),
+            "code": str(row.get("code") or ""),
+            "label": row.get("label") or row.get("libelle") or "",
+        }
+        if entry["code"]:
+            by_code[entry["code"].upper()] = entry
+        if entry["id"] is not None:
+            by_id[str(entry["id"])] = entry
+    _PAYMENT_TYPES_CACHE = {"by_code": by_code, "by_id": by_id}
+    return _PAYMENT_TYPES_CACHE
+
+
+async def _resolve_payment_type(value: Any) -> dict:
+    """Résout un mode de règlement donné par code ('VIR') ou par id ('4').
+
+    Les deux formes circulent : l'API des règlements attend l'ID numérique
+    (`paymentid`) alors que l'API des écritures bancaires attend le CODE
+    (`type`). On résout une fois, et chaque appelant prend ce dont il a besoin.
+
+    Lève ValueError avec la liste des codes valides si la valeur est inconnue :
+    Dolibarr, lui, accepte un id inexistant et écrit une ligne sans mode.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Mode de règlement manquant (ex. 'VIR', 'CHQ', 'LIQ', 'CB', 'PRE').")
+
+    types = await _payment_types()
+    found = types["by_id"].get(raw) if raw.isdigit() else types["by_code"].get(raw.upper())
+    if found:
+        return found
+
+    known = ", ".join(sorted(types["by_code"])) or "(dictionnaire vide)"
+    raise ValueError(
+        f"Mode de règlement inconnu : {raw!r}. Codes actifs sur cette instance : {known}."
+    )
+
+
+def _document_module(module: str) -> str:
+    """Traduit un nom de module REST vers le nom d'élément attendu par Dolibarr."""
+    key = str(module or "").strip().lower()
+    return DOCUMENT_MODULE_ALIASES.get(key, key)
+
+
+def _document_ref(ref: str) -> str:
+    """Normalise une référence pour le stockage des pièces jointes.
+
+    Une référence provisoire est rendue par Dolibarr sous la forme `(PROV92)`,
+    parenthèses comprises, mais `dol_sanitizeFileName()` les retire pour bâtir
+    le dossier : le répertoire réel est `PROV92`. Passer la forme parenthésée
+    telle quelle fait répondre au serveur une page non-JSON, remontée comme une
+    banale erreur de parsage sans indiquer le champ fautif.
+    """
+    cleaned = str(ref or "").strip()
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = cleaned[1:-1]
+    return cleaned.replace("(", "").replace(")", "")
+
+
+def _format_bank_account(raw: dict) -> dict:
+    """Formate un compte bancaire Dolibarr en dict lisible.
+
+    `reconcilable` reproduit le test que Dolibarr applique lui-même pour
+    décider qu'un compte est rapprochable (Account::load_board) :
+    `rappro = 1 AND courant != TYPE_CASH`, complété par « compte non clos ».
+    Le champ brut `rappro` est conservé à côté : c'est lui que bascule
+    dolibarr_toggle_bank_reconciliation.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    acc_type = str(raw.get("type") if raw.get("type") is not None else raw.get("courant") or "")
+    status = str(raw.get("status") if raw.get("status") is not None else raw.get("clos") or "0")
+    rappro = _id_int(raw.get("rappro"))
+    out = {
+        "id": _id_int(raw.get("id") or raw.get("rowid")),
+        "ref": raw.get("ref"),
+        "label": raw.get("label"),
+        "bank": raw.get("bank"),
+        "number": raw.get("number"),
+        "iban": raw.get("iban") or raw.get("iban_prefix"),
+        "bic": raw.get("bic"),
+        "currency_code": raw.get("currency_code"),
+        "type": acc_type,
+        "type_label": BANK_ACCOUNT_TYPES.get(acc_type, acc_type),
+        "status": status,
+        "status_label": BANK_ACCOUNT_STATUS.get(status, status),
+        "closed": status != BANK_ACCOUNT_STATUS_OPEN,
+        "rappro": rappro,
+        "reconcilable": bool(
+            rappro == 1
+            and acc_type != BANK_ACCOUNT_TYPE_CASH
+            and status == BANK_ACCOUNT_STATUS_OPEN
+        ),
+        "balance": _num(raw.get("balance")),
+        "accountancy_code": raw.get("account_number") or None,
+    }
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
+def _format_bank_line(raw: dict) -> dict:
+    """Formate une écriture bancaire (AccountLine) en dict lisible.
+
+    `amount` est SIGNÉ dans llx_bank : positif = entrée d'argent (crédit),
+    négatif = sortie (débit). On expose les deux lectures — `amount` signé et
+    le couple `debit`/`credit` — parce qu'une erreur de signe sur une écriture
+    bancaire est silencieuse et coûteuse.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    amount = float(_num(raw.get("amount")) or 0)
+    out = {
+        "id": _id_int(raw.get("id") or raw.get("rowid") or raw.get("ref")),
+        "account_id": _id_int(raw.get("fk_account")),
+        "date_operation": _ts_to_date(raw.get("dateo")),
+        "date_value": _ts_to_date(raw.get("datev")),
+        "label": _strip_html(raw.get("label")),
+        "payment_type": raw.get("fk_type") or None,
+        "num_payment": raw.get("num_chq") or None,
+        "amount": amount,
+        "debit": round(-amount, 2) if amount < 0 else 0,
+        "credit": round(amount, 2) if amount > 0 else 0,
+        "num_releve": raw.get("num_releve") or None,
+        "reconciled": bool(_id_int(raw.get("rappro"))),
+    }
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
+def _format_bank_links(links: Any) -> dict:
+    """Extrait d'une liste de liens `llx_bank_url` le tiers et l'objet source.
+
+    Une écriture bancaire ne porte NI socid NI référence d'objet : le
+    rattachement passe uniquement par llx_bank_url, d'où un appel par ligne.
+    """
+    thirdparty: dict | None = None
+    sources: list[dict] = []
+    for link in links if isinstance(links, list) else []:
+        if not isinstance(link, dict):
+            continue
+        ltype = str(link.get("type") or "")
+        entry = {
+            "type": ltype,
+            "type_label": BANK_LINK_SOURCE_LABELS.get(ltype, ltype),
+            "id": _id_int(link.get("url_id")),
+            "label": _strip_html(link.get("label")) or None,
+        }
+        if ltype == "company":
+            thirdparty = {"id": entry["id"], "name": entry["label"]}
+        else:
+            sources.append({k: v for k, v in entry.items() if v not in (None, "")})
+    out: dict[str, Any] = {}
+    if thirdparty and thirdparty.get("id"):
+        out["thirdparty"] = thirdparty
+    if sources:
+        out["sources"] = sources
+    return out
+
+
+def _today_iso() -> str:
+    """Date du jour au format YYYY-MM-DD (fuseau serveur)."""
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _shift_days(date_str: str, days: int) -> str:
+    """Décale une date YYYY-MM-DD de `days` jours. Lève ValueError si invalide."""
+    from datetime import datetime, timedelta
+
+    d = datetime.strptime(date_str.strip(), "%Y-%m-%d") + timedelta(days=days)
+    return d.strftime("%Y-%m-%d")
+
+
+def _bank_date_filter(after: str = "", before: str = "", strict_after: bool = False) -> str:
+    """Construit le sqlfilters d'une plage de dates sur llx_bank.
+
+    Piège : `GET /bankaccounts/{id}/lines` construit son SQL sur
+    `FROM llx_bank` SANS alias. Un critère préfixé `t.` — la forme employée
+    partout ailleurs dans ce serveur — produit un « unknown table t » et un
+    HTTP 503. Les critères doivent donc porter le nom de colonne nu.
+    """
+    clauses = []
+    if after:
+        clauses.append(f"(dateo:{'>' if strict_after else '>='}:'{_sf_escape(after)}')")
+    if before:
+        clauses.append(f"(dateo:<=:'{_sf_escape(before)}')")
+    return " and ".join(clauses)
+
+
+async def _bank_lines(account_id: int, sqlfilters: str = "") -> list:
+    """Lignes brutes d'un compte, filtrées côté serveur (tri client ensuite).
+
+    L'endpoint trie par rowid et n'accepte ni limit ni page : la pagination et
+    le tri par date sont nécessairement faits ici.
+    """
+    params: dict[str, Any] = {}
+    if sqlfilters:
+        params["sqlfilters"] = sqlfilters
+    lines = await api_get(BANK_LINES_ENDPOINT.format(account_id=account_id), params)
+    return [line for line in (lines or []) if isinstance(line, dict)]
+
+
+def _sum_amounts(lines: list) -> float:
+    """Somme signée des montants d'un lot de lignes bancaires."""
+    return round(sum(float(_num(line.get("amount")) or 0) for line in lines), 2)
+
+
+def _sort_bank_lines(lines: list, descending: bool) -> list:
+    """Trie des lignes bancaires par date d'opération puis par rowid.
+
+    Le rowid départage les écritures du même jour : sans lui l'ordre dépend de
+    l'ordre de retour SQL et le solde cumulé devient non reproductible.
+    """
+    return sorted(
+        lines,
+        key=lambda ln: (_ts_to_date(ln.get("dateo")), _id_int(ln.get("id") or ln.get("rowid")) or 0),
+        reverse=descending,
+    )
+
+
+@mcp.tool()
+async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
+    """Liste les comptes bancaires avec leur solde courant.
+
+    C'est la donnée qui alimente un suivi de trésorerie : libellé, type, numéro,
+    solde, statut ouvert/clos et indicateur de rapprochement.
+
+    Paramètres :
+    - include_closed : inclure les comptes clos (défaut : non)
+
+    Retourne pour chaque compte : id, ref, label, banque, numéro, IBAN/BIC,
+    devise, type (`épargne` / `compte courant` / `caisse`), statut, `balance`,
+    `rappro` (drapeau brut) et `reconcilable` (compte réellement rapprochable :
+    rappro actif, type ≠ caisse, compte non clos).
+
+    Le solde renvoyé est celui que Dolibarr calcule lui-même (`Account::solde(1)`)
+    : il EXCLUT les écritures postdatées, pour coller au solde réel du compte.
+    """
+    try:
+        accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+        results = []
+        total = 0.0
+        for raw in accounts if isinstance(accounts, list) else []:
+            acc = _format_bank_account(raw)
+            if not acc:
+                continue
+            if acc.get("closed") and not include_closed:
+                continue
+            results.append(acc)
+            total += float(acc.get("balance") or 0)
+
+        return _dumps({
+            "count": len(results),
+            "total_balance": round(total, 2),
+            "include_closed": include_closed,
+            "accounts": results,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_list_bank_entries(
+    account_id: int,
+    date_start: str = "",
+    date_end: str = "",
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    sort: str = "desc",
+    with_links: bool = True,
+    reconciled: str = "",
+) -> str:
+    """Écritures d'un compte bancaire sur une période, solde cumulé compris.
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire, cf. dolibarr_list_bank_accounts)
+    - date_start : début de période (YYYY-MM-DD, incluse). Par défaut, 90 jours
+      avant date_end : l'API ne sait pas paginer les lignes et une requête sans
+      borne basse relit tout l'historique. La fenêtre effectivement appliquée
+      est toujours renvoyée dans `date_start`.
+    - date_end   : fin de période (YYYY-MM-DD, incluse). Défaut : aucune borne.
+    - limit / offset : pagination, appliquée après tri
+    - sort : 'desc' (défaut, plus récentes d'abord) ou 'asc'
+    - with_links : résoudre le tiers et l'objet source de chaque écriture
+      (facture, règlement, paiement divers…). Coûte un appel par écriture
+      renvoyée : passer False pour un simple relevé.
+    - reconciled : 'no' pour ne garder que les écritures NON rapprochées (celles
+      qui restent à traiter), 'yes' pour l'inverse, vide pour toutes.
+
+    Retourne par écriture : `id` (rowid, celui qu'attend
+    dolibarr_set_bank_statement), date d'opération, date de valeur, libellé,
+    mode de règlement, `debit`/`credit`, `amount` signé, `balance_after`
+    (solde cumulé), numéro de relevé, état de rapprochement, tiers et sources.
+
+    Le solde cumulé est ancré sur le solde renvoyé par Dolibarr, en remontant
+    les écritures postérieures à la fenêtre. Il est omis (avec
+    `running_balance_note`) si la fenêtre contient des écritures postdatées :
+    le solde de référence les exclut, un cumul serait alors faux sans le dire.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id (cf. dolibarr_list_bank_accounts)."
+
+        for name, value in (("date_start", date_start), ("date_end", date_end)):
+            if value:
+                try:
+                    _date_str_to_ts(value)
+                except ValueError:
+                    return f"Format {name} invalide : '{value}'. Attendu : YYYY-MM-DD."
+
+        flags = {"": "", "yes": "(rappro:=:1)", "no": "(rappro:=:0)"}
+        wanted = str(reconciled or "").strip().lower()
+        if wanted not in flags:
+            return f"reconciled invalide : '{reconciled}'. Valeurs acceptées : 'yes', 'no', ou vide."
+
+        today = _today_iso()
+        window_start = date_start
+        window_defaulted = False
+        if not window_start:
+            window_start = _shift_days(date_end or today, -BANK_ENTRIES_DEFAULT_WINDOW_DAYS)
+            window_defaulted = True
+
+        window = await _bank_lines(
+            account_id,
+            _sf_and(_bank_date_filter(after=window_start, before=date_end), flags[wanted]),
+        )
+
+        response: dict[str, Any] = {
+            "account_id": account_id,
+            "date_start": window_start,
+            "date_end": date_end or None,
+            "sort": "asc" if str(sort).lower().startswith("a") else "desc",
+            "matched": len(window),
+        }
+        if window_defaulted:
+            response["date_start_note"] = (
+                f"Aucune date de début fournie : fenêtre par défaut de "
+                f"{BANK_ENTRIES_DEFAULT_WINDOW_DAYS} jours appliquée."
+            )
+        if not window:
+            response.update({"count": 0, "entries": []})
+            return _dumps(response)
+
+        ascending = _sort_bank_lines(window, descending=False)
+        last_date = _ts_to_date(ascending[-1].get("dateo"))
+
+        # Ancrage du solde cumulé : Dolibarr ne sait donner que le solde courant
+        # (somme des écritures dont dateo <= maintenant). On remonte donc de ce
+        # solde en retirant les écritures postérieures à la fenêtre. Impossible
+        # si la fenêtre déborde dans le futur : ces écritures-là sont déjà hors
+        # du solde de référence.
+        balances: dict[int, float] = {}
+        running_note: str | None = None
+        if wanted:
+            running_note = (
+                "Solde cumulé non calculé : le filtre `reconciled` retire des écritures de "
+                "la fenêtre, un cumul portant sur un sous-ensemble serait faux."
+            )
+        elif last_date > today:
+            running_note = (
+                "Solde cumulé non calculé : la fenêtre contient des écritures postdatées, "
+                "que le solde de référence Dolibarr exclut."
+            )
+        else:
+            try:
+                balance_now = float(
+                    _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))) or 0
+                )
+                after = await _bank_lines(
+                    account_id, _bank_date_filter(after=last_date, before=today, strict_after=True)
+                )
+                cumulative = round(balance_now - _sum_amounts(after), 2)
+                for line in reversed(ascending):
+                    line_id = _id_int(line.get("id") or line.get("rowid"))
+                    if line_id is not None:
+                        balances[line_id] = cumulative
+                    cumulative = round(cumulative - float(_num(line.get("amount")) or 0), 2)
+            except Exception as exc:  # solde indisponible : on rend les lignes sans cumul
+                logger.warning("Solde cumulé indisponible pour le compte %s : %s", account_id, exc)
+                running_note = f"Solde cumulé non calculé : {_format_error(exc)}"
+
+        ordered = _sort_bank_lines(window, descending=not str(sort).lower().startswith("a"))
+        start = max(0, offset)
+        page = ordered[start:start + _clamp_limit(limit)]
+
+        entries = []
+        for raw in page:
+            entry = _format_bank_line(raw)
+            if entry.get("id") in balances:
+                entry["balance_after"] = balances[entry["id"]]
+            entries.append(entry)
+
+        identified = [e for e in entries if e.get("id")]
+        if with_links and identified:
+            resolved = await _gather_limited([
+                (lambda e=entry: _bank_line_links(account_id, e["id"])) for entry in identified
+            ])
+            for entry, links in zip(identified, resolved):
+                if isinstance(links, Exception):
+                    entry["links_error"] = _format_error(links)
+                else:
+                    entry.update(links)
+
+        response.update({"count": len(entries), "offset": start, "entries": entries})
+        if running_note:
+            response["running_balance_note"] = running_note
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+async def _bank_account_detail(account_id: int) -> dict:
+    """Lit un compte ET son solde réel.
+
+    `GET /bankaccounts/{id}` ne renseigne PAS `balance` : seule la route de
+    liste appelle `Account::solde(1)`. L'objet rendu porte donc la valeur par
+    défaut de la classe, soit 0 — trompeur au possible dans une réponse dont
+    l'objet affiché est justement le compte relu. On complète explicitement.
+    """
+    account = _format_bank_account(await api_get(BANK_ACCOUNT_ENDPOINT.format(account_id=account_id)))
+    try:
+        account["balance"] = _num(
+            await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))
+        )
+    except Exception as exc:
+        logger.warning("Solde indisponible pour le compte %s : %s", account_id, exc)
+        account.pop("balance", None)
+    return account
+
+
+async def _bank_line_links(account_id: int, line_id: int) -> dict:
+    """Tiers et objets sources d'une écriture bancaire (llx_bank_url)."""
+    links = await api_get(
+        BANK_LINE_LINKS_ENDPOINT.format(account_id=account_id, line_id=line_id)
+    )
+    return _format_bank_links(links)
+
+
+@mcp.tool()
+async def dolibarr_get_bank_balance(account_id: int, date: str = "") -> str:
+    """Solde d'un compte bancaire, à aujourd'hui ou à une date donnée.
+
+    Sert à confronter un relevé papier au solde Dolibarr sans sommer les lignes
+    à la main.
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire)
+    - date : date d'arrêté (YYYY-MM-DD). Vide = solde courant.
+
+    Dolibarr n'expose que le solde courant (`GET /bankaccounts/{id}/balance`,
+    somme des écritures dont la date d'opération est passée). Pour une autre
+    date, ce solde est reporté en ajoutant ou retranchant les seules écritures
+    situées entre cette date et aujourd'hui — jamais en resommant tout
+    l'historique, que l'API ne sait pas agréger.
+
+    Retourne : solde, date d'arrêté, nombre d'écritures prises dans le report
+    et la méthode employée.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id."
+        if date:
+            try:
+                _date_str_to_ts(date)
+            except ValueError:
+                return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+
+        account = await api_get(BANK_ACCOUNT_ENDPOINT.format(account_id=account_id))
+        balance_now = float(
+            _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))) or 0
+        )
+
+        today = _today_iso()
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "account_label": (account or {}).get("label") if isinstance(account, dict) else None,
+            "currency_code": (account or {}).get("currency_code") if isinstance(account, dict) else None,
+            "date": date or today,
+        }
+
+        if not date or date == today:
+            result.update({
+                "balance": round(balance_now, 2),
+                "method": "solde courant Dolibarr (écritures postdatées exclues)",
+                "entries_applied": 0,
+            })
+            return _dumps(result)
+
+        if date > today:
+            ahead = await _bank_lines(
+                account_id, _bank_date_filter(after=today, before=date, strict_after=True)
+            )
+            balance = round(balance_now + _sum_amounts(ahead), 2)
+            method = "solde courant + écritures postdatées jusqu'à la date demandée"
+            applied = len(ahead)
+        else:
+            since = await _bank_lines(
+                account_id, _bank_date_filter(after=date, before=today, strict_after=True)
+            )
+            balance = round(balance_now - _sum_amounts(since), 2)
+            method = "solde courant − écritures postérieures à la date demandée"
+            applied = len(since)
+
+        result.update({"balance": balance, "method": method, "entries_applied": applied})
+        return _dumps(result)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_create_bank_entry(
+    account_id: int,
+    date: str,
+    label: str,
+    amount: float,
+    direction: str,
+    payment_type: str = "VIR",
+    num_payment: str = "",
+    project_id: int = 0,
+) -> str:
+    """Crée une opération diverse sur un compte bancaire.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - account_id   : ID du compte (obligatoire)
+    - date         : date d'opération (YYYY-MM-DD, obligatoire)
+    - label        : libellé de l'écriture (obligatoire)
+    - amount       : montant, TOUJOURS positif — le sens vient de `direction`
+    - direction    : 'credit' = entrée d'argent, 'debit' = sortie
+    - payment_type : mode de règlement, code ou id (VIR, CHQ, LIQ, CB, PRE…)
+    - num_payment  : numéro de chèque / référence de règlement (optionnel)
+    - project_id   : projet à rattacher (optionnel)
+
+    Sens du montant — le piège à ne pas rejouer. Dans llx_bank le montant est
+    SIGNÉ : positif = crédit (entrée), négatif = débit (sortie). Le formulaire
+    `compta/bank/various_payment/card.php` expose ce signe via un champ `sens`
+    dont la valeur 1 vaut Crédit et 0 Débit (vérifié en production le
+    31/08/2026, et confirmé par PaymentVarious::create, qui applique
+    `sign = ($sens == '0' ? -1 : 1)`). Cet outil ne prend donc jamais un montant
+    négatif : il refuse, plutôt que de risquer une double négation muette.
+
+    Écriture posée via `POST /bankaccounts/{id}/lines` — l'API REST expose la
+    route, aucun formulaire web n'est sollicité. Nuance à connaître : cette
+    route appelle `Account::addline()` et crée une ligne de journal bancaire,
+    pas un objet « paiement divers » (llx_payment_various). L'écriture apparaît
+    donc au relevé et dans le solde, mais pas dans la liste des paiements
+    divers, et elle ne porte pas de ventilation comptable. Le rattachement au
+    projet est posé comme lien `llx_bank_url` — le seul emplacement dont
+    dispose une ligne de journal, qui n'a pas de champ projet.
+
+    Retourne l'écriture RELUE depuis Dolibarr, avec le solde du compte avant et
+    après : c'est la vérification qui rend une erreur de signe visible.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id."
+        if not label:
+            return "Le libellé (label) est obligatoire."
+        try:
+            date_ts = _date_str_to_ts(date)
+        except ValueError:
+            return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+
+        way = str(direction or "").strip().lower()
+        if way not in ("credit", "debit"):
+            return "direction doit valoir 'credit' (entrée d'argent) ou 'debit' (sortie)."
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return f"Montant invalide : {amount!r}."
+        if value <= 0:
+            return (
+                f"Le montant doit être strictement positif (reçu : {value}). "
+                "Le sens de l'écriture se donne par `direction`, jamais par le signe."
+            )
+
+        try:
+            mode = await _resolve_payment_type(payment_type)
+        except ValueError as exc:
+            return str(exc)
+
+        signed = value if way == "credit" else -value
+
+        balance_before = _num(
+            await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))
+        )
+
+        # `date` et `datev` sont déclarés {@type timestamp} et castés en (int)
+        # côté Dolibarr : une date ISO y deviendrait l'année seule, donc 1970.
+        payload = {
+            "date": date_ts,
+            "datev": date_ts,
+            "type": mode["code"],
+            "label": label,
+            "amount": signed,
+            "cheque_number": num_payment or "",
+        }
+        line_id = _id_int(
+            await api_post(BANK_LINES_ENDPOINT.format(account_id=account_id), payload)
+        )
+        if not line_id:
+            return _dumps({
+                "success": False,
+                "message": "Dolibarr n'a pas renvoyé d'identifiant d'écriture — rien de fiable à relire.",
+            })
+
+        project_warning: str | None = None
+        if project_id:
+            try:
+                project = await api_get(f"projects/{project_id}")
+                caption = (project or {}).get("ref") or (project or {}).get("title") \
+                    if isinstance(project, dict) else None
+            except Exception:
+                caption = None
+            try:
+                # Dolibarr concatène `url` et `url_id` pour bâtir le href, et
+                # stocke ses propres liens préfixés de DOL_URL_ROOT. La forme
+                # ci-dessous vise donc une instance servie à la racine du
+                # domaine ; sur une installation en sous-répertoire le lien
+                # cliquable sera faux, mais `url_id` reste exploitable.
+                await api_post(
+                    BANK_LINE_LINKS_ENDPOINT.format(account_id=account_id, line_id=line_id),
+                    {
+                        "url_id": project_id,
+                        "url": "/projet/card.php?id=",
+                        "label": caption or f"Projet {project_id}",
+                        "type": "project",
+                    },
+                )
+            except Exception as exc:
+                project_warning = (
+                    f"Écriture créée (id={line_id}) mais rattachement au projet {project_id} "
+                    f"échoué : {_format_error(exc)}"
+                )
+                logger.warning("dolibarr_create_bank_entry project link failed: %s", exc)
+
+        created = await api_get(BANK_LINE_ENDPOINT.format(line_id=line_id))
+        balance_after = _num(
+            await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))
+        )
+
+        entry = _format_bank_line(created if isinstance(created, dict) else {})
+        try:
+            entry.update(await _bank_line_links(account_id, line_id))
+        except Exception:
+            pass
+
+        response: dict[str, Any] = {
+            "success": True,
+            "entry_id": line_id,
+            "direction": way,
+            "amount_signed": signed,
+            "payment_type": mode["code"],
+            "balance_before": balance_before,
+            "balance_after": balance_after,
+            "balance_delta": (
+                round(float(balance_after) - float(balance_before), 2)
+                if balance_before is not None and balance_after is not None
+                else None
+            ),
+            "entry": entry,
+            "message": (
+                f"Écriture {line_id} créée sur le compte {account_id} : "
+                f"{'+' if signed > 0 else ''}{signed} ({way})."
+            ),
+        }
+        if project_warning:
+            response["project_warning"] = project_warning
+        return _dumps({k: v for k, v in response.items() if v is not None})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_bank_entry(account_id: int, entry_id: int) -> str:
+    """Supprime une écriture bancaire isolée (opération diverse).
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire)
+    - entry_id   : rowid de l'écriture (champ `id` de dolibarr_list_bank_entries)
+
+    Deux refus systématiques, parce que la ligne bancaire n'est pas toujours
+    l'objet d'origine :
+    1. une écriture RAPPROCHÉE n'est pas supprimée — elle est adossée à un
+       relevé, et la retirer désaccorde le rapprochement sans prévenir ;
+    2. une écriture PORTANT UN LIEN de règlement (facture client ou
+       fournisseur, paiement divers, virement interne, prélèvement…) n'est pas
+       supprimée non plus : le règlement, lui, survivrait, orphelin de sa ligne
+       de banque. C'est le règlement qu'il faut annuler, depuis Dolibarr.
+
+    Restent donc supprimables les écritures saisies directement, typiquement
+    celles créées par dolibarr_create_bank_entry — dont les écritures de test.
+
+    Retourne le solde du compte avant et après : la variation doit être
+    exactement l'opposé du montant supprimé.
+    """
+    try:
+        if not account_id or not entry_id:
+            return "Veuillez fournir un account_id et un entry_id."
+
+        raw = await api_get(BANK_LINE_ENDPOINT.format(line_id=entry_id))
+        line = _format_bank_line(raw if isinstance(raw, dict) else {})
+        if not line.get("id"):
+            return f"Écriture {entry_id} introuvable."
+        if line.get("account_id") != account_id:
+            return _dumps({
+                "success": False,
+                "message": (
+                    f"L'écriture {entry_id} appartient au compte {line.get('account_id')}, "
+                    f"pas au compte {account_id}. Rien n'a été supprimé."
+                ),
+            })
+        if line.get("reconciled"):
+            return _dumps({
+                "success": False,
+                "entry_id": entry_id,
+                "num_releve": line.get("num_releve"),
+                "message": (
+                    f"L'écriture {entry_id} est rapprochée sur le relevé "
+                    f"{line.get('num_releve')} : la supprimer désaccorderait ce relevé. "
+                    "La déconsolider d'abord depuis Dolibarr."
+                ),
+            })
+
+        links = await _bank_line_links(account_id, entry_id)
+        sources = links.get("sources") or []
+        if sources:
+            return _dumps({
+                "success": False,
+                "entry_id": entry_id,
+                "sources": sources,
+                "message": (
+                    f"L'écriture {entry_id} est rattachée à "
+                    + ", ".join(s.get("type_label") or s.get("type") for s in sources)
+                    + " : supprimer la ligne laisserait le règlement orphelin. "
+                    "Annuler le règlement depuis Dolibarr, ce qui retirera la ligne."
+                ),
+            })
+
+        balance_before = _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id)))
+        await api_delete(
+            BANK_ACCOUNT_LINE_ENDPOINT.format(account_id=account_id, line_id=entry_id)
+        )
+        balance_after = _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id)))
+
+        delta = (
+            round(float(balance_after) - float(balance_before), 2)
+            if balance_before is not None and balance_after is not None else None
+        )
+        expected = round(-float(line.get("amount") or 0), 2)
+        report: dict[str, Any] = {
+            "success": True,
+            "entry_id": entry_id,
+            "account_id": account_id,
+            "deleted_amount": line.get("amount"),
+            "balance_before": balance_before,
+            "balance_after": balance_after,
+            "balance_delta": delta,
+            "expected_delta": expected,
+            "message": f"Écriture {entry_id} supprimée du compte {account_id}.",
+        }
+        if delta is not None and abs(delta - expected) > 0.01:
+            report["success"] = False
+            report["balance_warning"] = (
+                f"Le solde a varié de {delta}, alors que la suppression de "
+                f"{line.get('amount')} attendait {expected}."
+            )
+        return _dumps(report)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_set_bank_statement(
+    account_id: int,
+    entry_ids: list[int],
+    num_releve: str,
+) -> str:
+    """Affecte un numéro de relevé à un lot d'écritures et les marque rapprochées.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire)
+    - entry_ids  : rowid des écritures (champ `id` de dolibarr_list_bank_entries)
+    - num_releve : numéro de relevé à poser (ex. '2026-08')
+
+    Pourquoi cet outil ne passe pas par l'API REST. Dolibarr 24 n'expose
+    AUCUNE route de rapprochement : `PUT /bankaccounts/{id}/lines/{line_id}`
+    n'écrit que le libellé (`AccountLine::updateLabel()`), et `num_releve` /
+    `rappro` ne sont accessibles que par `AccountLine::update_conciliation()`,
+    joignable seulement depuis `compta/bank/bankentries_list.php`. Le repli sur
+    le formulaire est donc contraint, et il est explicite : il exige
+    DOLIBARR_WEB_LOGIN et DOLIBARR_WEB_PASSWORD dans la configuration du
+    connecteur (compte disposant du droit « banque : rapprocher »). Sans eux,
+    l'outil refuse — il ne prétend jamais avoir rapproché.
+
+    Garde-fous, dans l'ordre :
+    1. le compte doit être rapprochable (`rappro` actif, hors caisse, non clos)
+       — sinon échec explicite, sans aucune écriture tentée ;
+    2. chaque écriture doit appartenir à ce compte ;
+    3. après le POST, chaque écriture est RELUE par l'API REST et son
+       `num_releve` comparé à la valeur demandée. Un formulaire qui change de
+       forme d'une version à l'autre produit alors un échec constaté, jamais un
+       succès silencieux.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id."
+        ids = [i for i in (_id_int(e) for e in (entry_ids or [])) if i]
+        if not ids:
+            return "Veuillez fournir au moins un entry_id (champ `id` des écritures)."
+        if not str(num_releve or "").strip():
+            return "Le numéro de relevé (num_releve) est obligatoire."
+        num_releve = str(num_releve).strip()
+
+        account = await _bank_account_detail(account_id)
+        if not account.get("reconcilable"):
+            return _dumps({
+                "success": False,
+                "account_id": account_id,
+                "rappro": account.get("rappro"),
+                "type_label": account.get("type_label"),
+                "status_label": account.get("status_label"),
+                "message": (
+                    f"Le compte {account_id} n'est pas rapprochable "
+                    f"(rappro={account.get('rappro')}, type={account.get('type_label')}, "
+                    f"statut={account.get('status_label')}). Aucune écriture n'a été touchée. "
+                    "Activez la fonction avec dolibarr_toggle_bank_reconciliation."
+                ),
+            })
+
+        before: dict[int, dict] = {}
+        for line_id in ids:
+            raw = await api_get(BANK_LINE_ENDPOINT.format(line_id=line_id))
+            line = _format_bank_line(raw if isinstance(raw, dict) else {})
+            if line.get("account_id") != account_id:
+                return _dumps({
+                    "success": False,
+                    "message": (
+                        f"L'écriture {line_id} appartient au compte "
+                        f"{line.get('account_id')}, pas au compte {account_id}. "
+                        "Aucune écriture n'a été touchée."
+                    ),
+                })
+            before[line_id] = line
+
+        if not WEB_LOGIN or not WEB_PASSWORD:
+            return _dumps({
+                "success": False,
+                "account_id": account_id,
+                "entry_ids": ids,
+                "num_releve": num_releve,
+                "message": (
+                    "Rapprochement impossible : Dolibarr 24 n'expose pas de route REST pour "
+                    "écrire num_releve / rappro, et les identifiants web ne sont pas configurés. "
+                    "Renseignez DOLIBARR_WEB_LOGIN et DOLIBARR_WEB_PASSWORD (compte avec le "
+                    "droit « banque : rapprocher ») pour activer ce repli, ou posez le numéro de "
+                    "relevé depuis compta/bank/bankentries_list.php?action=reconcile&id="
+                    f"{account_id}. Aucune écriture n'a été touchée."
+                ),
+            })
+
+        await _web_post(
+            "compta/bank/bankentries_list.php",
+            data=[
+                ("action", "reconcile"),
+                ("contextpage", "banktransactionlist"),
+                ("id", str(account_id)),
+                ("search_account", str(account_id)),
+                ("num_releve", num_releve),
+                ("confirm_reconcile", "1"),
+                *[("rowid[]", str(i)) for i in ids],
+            ],
+            query=f"action=reconcile&contextpage=banktransactionlist&id={account_id}"
+                  f"&search_account={account_id}",
+        )
+
+        # Vérification : c'est elle qui distingue un rapprochement effectif d'un
+        # formulaire qui a répondu 200 sans rien écrire.
+        applied, missed = [], []
+        for line_id in ids:
+            raw = await api_get(BANK_LINE_ENDPOINT.format(line_id=line_id))
+            line = _format_bank_line(raw if isinstance(raw, dict) else {})
+            record = {
+                "entry_id": line_id,
+                "num_releve": line.get("num_releve"),
+                "reconciled": line.get("reconciled", False),
+                "num_releve_before": before[line_id].get("num_releve"),
+            }
+            if line.get("num_releve") == num_releve and line.get("reconciled"):
+                applied.append(record)
+            else:
+                missed.append(record)
+
+        return _dumps({
+            "success": not missed,
+            "account_id": account_id,
+            "num_releve": num_releve,
+            "applied_count": len(applied),
+            "applied": applied,
+            "not_applied": missed,
+            "message": (
+                f"{len(applied)}/{len(ids)} écriture(s) rapprochée(s) sur le relevé {num_releve}."
+                + (
+                    " Les écritures listées dans not_applied ont été relues sans le numéro "
+                    "attendu : le formulaire n'a pas abouti (droit « banque : rapprocher » "
+                    "manquant, session refusée, ou formulaire modifié par une mise à jour)."
+                    if missed else ""
+                )
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) -> str:
+    """Active ou désactive la fonction rapprochement d'un compte bancaire.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire)
+    - enabled    : True pour activer le rapprochement, False pour le désactiver
+
+    Le champ visible dans `compta/bank/card.php` s'appelle `norappro` et est
+    inversé par rapport à son nom ; la colonne réellement stockée est `rappro`
+    (1 = rapprochement actif). Cet outil écrit `rappro` via
+    `PUT /bankaccounts/{id}` : `enabled=True` pose bien rappro=1.
+
+    Retourne le compte RELU après écriture, `reconcilable` compris — un compte
+    de type caisse ou clos reste non rapprochable même avec rappro=1, et c'est
+    visible dans la réponse plutôt que découvert au rapprochement suivant.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id."
+
+        before = await _bank_account_detail(account_id)
+        target = 1 if enabled else 0
+        await api_put(
+            BANK_ACCOUNT_ENDPOINT.format(account_id=account_id), {"rappro": target}
+        )
+        after = await _bank_account_detail(account_id)
+
+        persisted = after.get("rappro") == target
+        return _dumps({
+            "success": persisted,
+            "account_id": account_id,
+            "rappro_before": before.get("rappro"),
+            "rappro_after": after.get("rappro"),
+            "account": after,
+            "message": (
+                f"Rapprochement {'activé' if enabled else 'désactivé'} sur le compte "
+                f"{account_id} ({after.get('label')})."
+                if persisted else
+                f"Le PUT a répondu sans erreur mais rappro vaut toujours "
+                f"{after.get('rappro')} après relecture — écriture non prise en compte "
+                "(droit « banque : configurer » manquant ?)."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Règlements et lettrage
+# ---------------------------------------------------------------------------
+
+INVOICE_PAYMENTS_ENDPOINT = "invoices/{invoice_id}/payments"
+INVOICE_PAYMENTS_DISTRIBUTED_ENDPOINT = "invoices/paymentsdistributed"
+SUPPLIER_INVOICE_PAYMENTS_ENDPOINT = "supplierinvoices/{invoice_id}/payments"
+SUPPLIER_INVOICES_ENDPOINT = "supplierinvoices"
+SUPPLIER_INVOICE_LINES_ENDPOINT = "supplierinvoices/{invoice_id}/lines"
+
+#: `SupplierInvoices::postLine()` lit ses arguments en propriétés d'objet sans
+#: aucun `isset()`. Une clé absente déclenche un warning PHP et arrive en null
+#: dans `addline()` — la ligne est créée, mais amputée. On envoie donc toujours
+#: le jeu complet, avec des valeurs neutres explicites.
+SUPPLIER_LINE_DEFAULTS: dict[str, Any] = {
+    "description": "",
+    "pu_ht": 0,
+    "tva_tx": 0,
+    "localtax1_tx": 0,
+    "localtax2_tx": 0,
+    "qty": 1,
+    "fk_product": 0,
+    "remise_percent": 0,
+    "date_start": "",
+    "date_end": "",
+    "fk_code_ventilation": 0,
+    "info_bits": 0,
+    "price_base_type": "HT",
+    "product_type": 1,
+    "rang": -1,
+    "array_options": [],
+    "fk_unit": None,
+    "origin_id": 0,
+    "multicurrency_subprice": 0,
+    "ref_supplier": "",
+    "special_code": 0,
+}
+
+
+def _format_payment(raw: dict) -> dict:
+    """Formate un règlement rendu par `GET /invoices/{id}/payments`.
+
+    `fk_bank_line` est le rowid de l'écriture bancaire : c'est la clé du
+    lettrage, celle qui relie une facture à une ligne de relevé.
+    Le même tableau porte aussi les avoirs et acomptes imputés, qui n'ont pas
+    d'écriture bancaire — d'où `has_bank_line`, pour ne pas les confondre.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    bank_line = _id_int(raw.get("fk_bank_line")) or None
+    out = {
+        "ref": raw.get("ref"),
+        "date": _ts_to_date(raw.get("date")),
+        "amount": _num(raw.get("amount")),
+        "payment_type": raw.get("type"),
+        "num_payment": raw.get("num") or None,
+        "kind": raw.get("typeline") or "imputation",
+        "bank_line_id": bank_line,
+        "has_bank_line": bank_line is not None,
+    }
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
+async def _payable_invoice(invoice_id: int, supplier: bool) -> dict:
+    """Relit une facture avant règlement et vérifie qu'elle peut en recevoir un.
+
+    Dolibarr n'interdit pas, côté API, d'imputer un règlement sur un BROUILLON :
+    l'interface web, elle, ne le propose jamais. Un règlement posé là reste
+    invisible du suivi et fausse le rapprochement, sans qu'aucune erreur ne
+    remonte. On refuse donc en amont.
+
+    Retourne {"error": "…"} si la facture n'est pas réglable, sinon son contexte.
+    """
+    endpoint = f"supplierinvoices/{invoice_id}" if supplier else f"invoices/{invoice_id}"
+    raw = await api_get(endpoint)
+    if not isinstance(raw, dict):
+        return {"error": f"Facture {invoice_id} introuvable ou réponse inattendue."}
+
+    status = str(raw.get("fk_statut") or raw.get("status") or "")
+    label = _format_invoice_status(status, raw.get("paye"))
+    if status == "0":
+        return {"error": (
+            f"La facture {raw.get('ref') or invoice_id} est en brouillon : un règlement "
+            "n'y a aucun sens et resterait invisible du suivi. La valider d'abord."
+        )}
+    return {
+        "ref": raw.get("ref"),
+        "status_label": label,
+        "total_ttc": _num(raw.get("total_ttc")),
+        "remaining_before": _num(raw.get("remaintopay")),
+    }
+
+
+def _payment_key(payment: dict) -> tuple:
+    """Identité d'un règlement, pour repérer celui qu'un appel vient de créer.
+
+    L'API rend un identifiant de paiement, jamais l'écriture bancaire associée :
+    le règlement créé se retrouve par différence avec la liste lue juste avant.
+    L'identité ne peut pas se réduire à `bank_line_id`, absent des avoirs et
+    acomptes imputés — deux d'entre eux se confondraient.
+    """
+    return (
+        payment.get("ref"),
+        payment.get("date"),
+        payment.get("amount"),
+        payment.get("bank_line_id"),
+        payment.get("kind"),
+    )
+
+
+async def _invoice_payments(invoice_id: int, supplier: bool) -> list:
+    """Règlements d'une facture, client ou fournisseur, déjà formatés."""
+    endpoint = (
+        SUPPLIER_INVOICE_PAYMENTS_ENDPOINT if supplier else INVOICE_PAYMENTS_ENDPOINT
+    ).format(invoice_id=invoice_id)
+    rows = await api_get(endpoint)
+    formatted = (_format_payment(r) for r in (rows or []) if isinstance(r, dict))
+    return [p for p in formatted if p]
+
+
+@mcp.tool()
+async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False) -> str:
+    """Règlements rattachés à une facture, et écriture bancaire de chacun.
+
+    Paramètres :
+    - invoice_id : ID de la facture (obligatoire)
+    - supplier   : False (défaut) = facture client, True = facture fournisseur
+
+    Retourne pour chaque règlement : date, montant, mode, numéro, rowid de
+    l'écriture bancaire (`bank_line_id`) et, quand cette écriture existe, le
+    compte bancaire mouvementé — savoir qu'une facture est payée ne dit pas sur
+    quelle ligne de relevé elle a été lettrée.
+
+    Le tableau inclut aussi les avoirs et acomptes imputés sur la facture :
+    ils portent `has_bank_line: false`, n'ayant mouvementé aucun compte.
+    """
+    try:
+        if not invoice_id:
+            return "Veuillez fournir un invoice_id."
+
+        payments = await _invoice_payments(invoice_id, supplier)
+
+        # Le compte bancaire n'est pas dans la réponse : on le lit sur la ligne.
+        for payment in payments:
+            line_id = payment.get("bank_line_id")
+            if not line_id:
+                continue
+            try:
+                line = await api_get(BANK_LINE_ENDPOINT.format(line_id=line_id))
+                if isinstance(line, dict):
+                    payment["bank_account_id"] = _id_int(line.get("fk_account"))
+                    payment["bank_num_releve"] = line.get("num_releve") or None
+                    payment["bank_reconciled"] = bool(_id_int(line.get("rappro")))
+            except Exception as exc:
+                payment["bank_line_error"] = _format_error(exc)
+
+        total = round(sum(float(p.get("amount") or 0) for p in payments), 2)
+        return _dumps({
+            "invoice_id": invoice_id,
+            "supplier": supplier,
+            "count": len(payments),
+            "total_paid": total,
+            "payments": payments,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_add_invoice_payment(
+    invoice_id: int,
+    date: str,
+    amount: float,
+    payment_type: str,
+    account_id: int,
+    num_payment: str = "",
+    close_if_paid: bool = True,
+    comment: str = "",
+) -> str:
+    """Enregistre un règlement sur une facture client et crée l'écriture bancaire.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - invoice_id   : ID de la facture client (obligatoire, facture validée)
+    - date         : date de règlement (YYYY-MM-DD, obligatoire)
+    - amount       : montant encaissé, positif (obligatoire)
+    - payment_type : mode de règlement, code ou id (VIR, CHQ, LIQ, CB, PRE…)
+    - account_id   : compte bancaire crédité (obligatoire, module Banque actif)
+    - num_payment  : numéro de chèque / référence de virement (optionnel)
+    - close_if_paid: solder la facture si le règlement l'apure (défaut : oui)
+    - comment      : note privée portée sur le règlement (optionnel)
+
+    Route employée : `POST /invoices/paymentsdistributed`, et non
+    `POST /invoices/{id}/payments`. Cette seconde route ignore tout montant :
+    elle règle systématiquement la totalité du reste à payer, ce qui rend tout
+    encaissement partiel impossible. La route distribuée est la seule à prendre
+    un montant, et elle refuse d'elle-même un montant supérieur au reste dû.
+
+    Retourne le règlement RELU depuis la facture (montant, écriture bancaire
+    créée, compte mouvementé) avec le solde bancaire avant et après.
+    """
+    try:
+        if not invoice_id:
+            return "Veuillez fournir un invoice_id."
+        if not account_id:
+            return "Veuillez fournir un account_id (compte bancaire à créditer)."
+        try:
+            _date_str_to_ts(date)
+        except ValueError:
+            return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return f"Montant invalide : {amount!r}."
+        if value <= 0:
+            return f"Le montant doit être strictement positif (reçu : {value})."
+
+        try:
+            mode = await _resolve_payment_type(payment_type)
+        except ValueError as exc:
+            return str(exc)
+
+        context = await _payable_invoice(invoice_id, supplier=False)
+        if context.get("error"):
+            return _dumps({"success": False, "invoice_id": invoice_id, "message": context["error"]})
+
+        balance_before = _num(
+            await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))
+        )
+        known_before = {_payment_key(p) for p in await _invoice_payments(invoice_id, False)}
+
+        payment_id = _id_int(await api_post(INVOICE_PAYMENTS_DISTRIBUTED_ENDPOINT, {
+            "arrayofamounts": {
+                str(invoice_id): {"amount": f"{value:.2f}", "multicurrency_amount": ""}
+            },
+            "datepaye": date,
+            "paymentid": mode["id"],
+            "closepaidinvoices": "yes" if close_if_paid else "no",
+            "accountid": account_id,
+            "num_payment": num_payment or "",
+            "comment": comment or "",
+        }))
+
+        return _dumps(await _payment_write_report(
+            invoice_id=invoice_id,
+            supplier=False,
+            payment_id=payment_id,
+            account_id=account_id,
+            balance_before=balance_before,
+            known_before=known_before,
+            amount=value,
+            context=context,
+        ))
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_add_supplier_invoice_payment(
+    supplier_invoice_id: int,
+    date: str,
+    amount: float,
+    payment_type: str,
+    account_id: int,
+    num_payment: str = "",
+    close_if_paid: bool = True,
+    comment: str = "",
+) -> str:
+    """Enregistre un règlement sur une facture fournisseur et l'écriture bancaire.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres : identiques au pendant client, `supplier_invoice_id` remplaçant
+    `invoice_id`. Le compte bancaire est DÉBITÉ : l'écriture créée par Dolibarr
+    porte un montant négatif, et c'est le comportement attendu.
+
+    Ici la route nominale `POST /supplierinvoices/{id}/payments` accepte bien un
+    `amount` — contrairement à son équivalent client. Elle est donc employée
+    telle quelle, sans passer par une route distribuée.
+
+    Retourne le règlement RELU depuis la facture, avec le solde bancaire avant
+    et après.
+    """
+    try:
+        if not supplier_invoice_id:
+            return "Veuillez fournir un supplier_invoice_id."
+        if not account_id:
+            return "Veuillez fournir un account_id (compte bancaire à débiter)."
+        try:
+            date_ts = _date_str_to_ts(date)
+        except ValueError:
+            return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return f"Montant invalide : {amount!r}."
+        if value <= 0:
+            return f"Le montant doit être strictement positif (reçu : {value})."
+
+        try:
+            mode = await _resolve_payment_type(payment_type)
+        except ValueError as exc:
+            return str(exc)
+
+        context = await _payable_invoice(supplier_invoice_id, supplier=True)
+        if context.get("error"):
+            return _dumps({
+                "success": False,
+                "supplier_invoice_id": supplier_invoice_id,
+                "message": context["error"],
+            })
+
+        balance_before = _num(
+            await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))
+        )
+        endpoint = SUPPLIER_INVOICE_PAYMENTS_ENDPOINT.format(invoice_id=supplier_invoice_id)
+        known_before = {
+            _payment_key(p) for p in await _invoice_payments(supplier_invoice_id, True)
+        }
+
+        # `datepaye` est déclaré {@type timestamp} sur la route fournisseur et
+        # affecté tel quel à PaiementFourn::datepaye : une date ISO donnerait
+        # un règlement daté de 1970.
+        payment_id = _id_int(await api_post(endpoint, {
+            "datepaye": date_ts,
+            "payment_mode_id": mode["id"],
+            "closepaidinvoices": "yes" if close_if_paid else "no",
+            "accountid": account_id,
+            "num_payment": num_payment or "",
+            "comment": comment or "",
+            "amount": value,
+        }))
+
+        return _dumps(await _payment_write_report(
+            invoice_id=supplier_invoice_id,
+            supplier=True,
+            payment_id=payment_id,
+            account_id=account_id,
+            balance_before=balance_before,
+            known_before=known_before,
+            amount=value,
+            context=context,
+        ))
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+async def _payment_write_report(
+    invoice_id: int,
+    supplier: bool,
+    payment_id: int | None,
+    account_id: int,
+    balance_before: Any,
+    known_before: set,
+    amount: float,
+    context: dict | None = None,
+) -> dict:
+    """Relit la facture après règlement et compose le compte rendu d'écriture.
+
+    Le règlement créé est identifié par différence avec les règlements connus
+    avant l'appel : l'API rend un id de paiement, pas l'écriture bancaire, et
+    c'est cette dernière qui porte le lettrage.
+    """
+    payments = await _invoice_payments(invoice_id, supplier)
+    created = [p for p in payments if _payment_key(p) not in known_before]
+
+    balance_after = _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id)))
+    delta = (
+        round(float(balance_after) - float(balance_before), 2)
+        if balance_before is not None and balance_after is not None
+        else None
+    )
+    expected = round(-amount if supplier else amount, 2)
+
+    bank_entry = None
+    if created and created[0].get("bank_line_id"):
+        try:
+            raw = await api_get(BANK_LINE_ENDPOINT.format(line_id=created[0]["bank_line_id"]))
+            bank_entry = _format_bank_line(raw if isinstance(raw, dict) else {})
+        except Exception as exc:
+            logger.warning("Relecture de l'écriture bancaire impossible : %s", exc)
+
+    report: dict[str, Any] = {
+        "success": bool(payment_id),
+        "invoice_id": invoice_id,
+        "invoice_ref": (context or {}).get("ref"),
+        "supplier": supplier,
+        "payment_id": payment_id,
+        "account_id": account_id,
+        "amount_requested": round(amount, 2),
+        "balance_before": balance_before,
+        "balance_after": balance_after,
+        "balance_delta": delta,
+        "expected_delta": expected,
+        "created_payments": created,
+        "bank_entry": bank_entry,
+        "total_paid": round(sum(float(p.get("amount") or 0) for p in payments), 2),
+    }
+    if delta is not None and abs(delta - expected) > 0.01:
+        report["balance_warning"] = (
+            f"Le solde du compte {account_id} a varié de {delta}, alors que le règlement "
+            f"attendait {expected}. À vérifier avant de considérer le lettrage acquis."
+        )
+    report["message"] = (
+        f"Règlement {payment_id} enregistré sur la facture {invoice_id} "
+        f"({'fournisseur' if supplier else 'client'}) : {amount} sur le compte {account_id}."
+        if payment_id else
+        "Dolibarr n'a pas renvoyé d'identifiant de règlement."
+    )
+    return {k: v for k, v in report.items() if v is not None}
+
+
+@mcp.tool()
+async def dolibarr_create_supplier_invoice(
+    thirdparty_id: int,
+    ref_supplier: str,
+    date: str = "",
+    due_date: str = "",
+    lines: list[dict] | None = None,
+    project_id: int = 0,
+    label: str = "",
+    note_private: str = "",
+) -> str:
+    """Crée une facture fournisseur (brouillon) dans Dolibarr.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - thirdparty_id : ID du fournisseur (obligatoire)
+    - ref_supplier  : référence de la facture chez le fournisseur (obligatoire)
+    - date          : date de facture (YYYY-MM-DD, défaut : aujourd'hui)
+    - due_date      : date d'échéance (YYYY-MM-DD, optionnel)
+    - lines         : lignes, chacune un dict avec
+        - description : libellé (obligatoire)
+        - qty         : quantité (défaut 1)
+        - pu_ht       : prix unitaire HT (obligatoire ; `subprice` accepté)
+        - tva_tx      : taux de TVA en % (défaut 0)
+        - product_type: 0 produit, 1 service (défaut 1)
+        - fk_product  : ID produit/service Dolibarr (optionnel)
+    - project_id    : projet à rattacher (optionnel)
+    - label         : libellé de la facture (optionnel)
+    - note_private  : note privée (optionnel)
+
+    La facture est créée en BROUILLON : elle reste modifiable et ne prend sa
+    référence définitive qu'à la validation, faite depuis Dolibarr.
+
+    Piège encodé ici : `POST /supplierinvoices/{id}/lines` lit ses paramètres en
+    propriétés d'objet sans `isset()`. Toute clé omise arrive en null dans
+    `addline()` et la ligne est créée amputée, sans erreur. Le connecteur envoie
+    donc systématiquement le jeu complet de champs attendus.
+
+    Retourne la facture RELUE (ref provisoire, montants, lignes).
+    """
+    try:
+        if not thirdparty_id:
+            return "Le thirdparty_id est obligatoire."
+        if not str(ref_supplier or "").strip():
+            return "La ref_supplier (référence chez le fournisseur) est obligatoire."
+        for name, value in (("date", date), ("due_date", due_date)):
+            if value:
+                try:
+                    _date_str_to_ts(value)
+                except ValueError:
+                    return f"Format {name} invalide : '{value}'. Attendu : YYYY-MM-DD."
+
+        payload: dict[str, Any] = {
+            "socid": thirdparty_id,
+            "ref_supplier": str(ref_supplier).strip(),
+            "date": date or _today_iso(),
+        }
+        if due_date:
+            payload["date_echeance"] = due_date
+        if project_id:
+            payload["fk_project"] = project_id
+        if label:
+            payload["label"] = label
+        if note_private:
+            payload["note_private"] = note_private
+
+        invoice_id = _id_int(await api_post(SUPPLIER_INVOICES_ENDPOINT, payload))
+        if not invoice_id:
+            return _dumps({
+                "success": False,
+                "message": "Dolibarr n'a pas renvoyé d'identifiant de facture fournisseur.",
+            })
+
+        lines_added, line_warnings = 0, []
+        for i, line in enumerate(lines or []):
+            desc = line.get("description") or line.get("desc") or ""
+            if not desc:
+                line_warnings.append(f"Ligne {i + 1} ignorée : description manquante.")
+                continue
+            body = dict(SUPPLIER_LINE_DEFAULTS)
+            body.update({
+                "description": desc,
+                "qty": _line_number(line, ("qty",), 1),
+                "pu_ht": _line_number(line, ("pu_ht", "subprice", "price"), 0),
+                "tva_tx": _line_number(line, ("tva_tx",), 0),
+                "remise_percent": _line_number(line, ("remise_percent",), 0),
+                "product_type": int(_line_number(line, ("product_type",), 1)),
+                "ref_supplier": str(ref_supplier).strip(),
+            })
+            if line.get("fk_product"):
+                body["fk_product"] = line["fk_product"]
+            try:
+                await api_post(
+                    SUPPLIER_INVOICE_LINES_ENDPOINT.format(invoice_id=invoice_id), body
+                )
+                lines_added += 1
+            except Exception as exc:
+                line_warnings.append(f"Ligne {i + 1} ({desc[:40]}) refusée : {_format_error(exc)}")
+
+        reread = await api_get(f"{SUPPLIER_INVOICES_ENDPOINT}/{invoice_id}")
+        inv = reread if isinstance(reread, dict) else {}
+        response: dict[str, Any] = {
+            "success": True,
+            "supplier_invoice_id": invoice_id,
+            "ref": inv.get("ref"),
+            "ref_supplier": inv.get("ref_supplier"),
+            "thirdparty_id": _id_int(inv.get("socid")),
+            "status_label": _format_invoice_status(
+                inv.get("fk_statut") or inv.get("status"), inv.get("paye")
+            ),
+            "total_ht": _num(inv.get("total_ht")),
+            "total_ttc": _num(inv.get("total_ttc")),
+            "date_invoice": _ts_to_date(inv.get("date") or inv.get("datef")),
+            "date_due": _ts_to_date(inv.get("date_echeance") or inv.get("date_lim_reglement")),
+            "lines_requested": len(lines or []),
+            "lines_added": lines_added,
+            "lines": [_format_doc_line(ln) for ln in (inv.get("lines") or [])],
+            "message": (
+                f"Facture fournisseur {inv.get('ref') or invoice_id} créée en brouillon "
+                f"({lines_added} ligne(s)). À valider depuis Dolibarr."
+            ),
+        }
+        if line_warnings:
+            response["line_warnings"] = line_warnings
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Facturation client : création, lignes, reprise d'une propale
+# ---------------------------------------------------------------------------
+
+INVOICES_ENDPOINT = "invoices"
+INVOICE_LINES_ENDPOINT = "invoices/{invoice_id}/lines"
+INVOICE_LINE_ENDPOINT = "invoices/{invoice_id}/lines/{line_id}"
+
+#: `Invoices::postLine()` déréférence chacun de ses champs en propriété d'objet
+#: sans `isset()` — même piège que côté fournisseur. Une clé absente arrive en
+#: null dans `Facture::addline()` : la ligne est créée, mais amputée, et sans
+#: erreur. Le jeu ci-dessous reprend l'exemple de charge utile documenté en
+#: amont, avec des valeurs neutres explicites.
+INVOICE_LINE_DEFAULTS: dict[str, Any] = {
+    "desc": "",
+    "subprice": 0,
+    "qty": 1,
+    "tva_tx": 0,
+    "localtax1_tx": 0,
+    "localtax2_tx": 0,
+    "fk_product": 0,
+    "remise_percent": 0,
+    "date_start": "",
+    "date_end": "",
+    "fk_code_ventilation": 0,
+    "info_bits": 0,
+    "fk_remise_except": None,
+    "price_base_type": "HT",
+    "product_type": 1,
+    "rang": -1,
+    "special_code": 0,
+    "origin": "",
+    "origin_id": 0,
+    "fk_parent_line": None,
+    "fk_fournprice": None,
+    "pa_ht": 0,
+    "label": "",
+    "array_options": [],
+    "situation_percent": 100,
+    "fk_prev_id": None,
+    "fk_unit": None,
+}
+
+
+def _line_number(line: dict, keys: "tuple[str, ...]", default: float) -> float:
+    """Lit un champ numérique de ligne parmi plusieurs alias, sinon le défaut.
+
+    Une clé PRÉSENTE mais nulle vaut « absente » : les lignes recopiées d'un
+    autre document portent volontiers `tva_tx: None`, et un `float(None)` y
+    ferait échouer toute la ligne — donc une facture vide, assortie d'un
+    avertissement, là où l'appelant attend une reprise fidèle.
+    """
+    for key in keys:
+        value = line.get(key)
+        if value not in (None, ""):
+            return float(value)
+    return default
+
+
+def _invoice_line_payload(line: dict) -> "dict[str, Any] | str":
+    """Convertit une ligne appelant en charge utile complète, ou rend l'erreur."""
+    desc = line.get("description") or line.get("desc") or line.get("label") or ""
+    if not desc:
+        return "description manquante"
+    try:
+        qty = _line_number(line, ("qty",), 1)
+        subprice = _line_number(line, ("subprice", "pu_ht", "price"), 0)
+        tva_tx = _line_number(line, ("tva_tx",), 0)
+        remise = _line_number(line, ("remise_percent",), 0)
+        product_type = int(_line_number(line, ("product_type",), 1))
+    except (TypeError, ValueError) as exc:
+        return f"valeur numérique invalide ({exc})"
+
+    payload = dict(INVOICE_LINE_DEFAULTS)
+    payload.update({
+        "desc": desc,
+        "qty": qty,
+        "subprice": subprice,
+        "tva_tx": tva_tx,
+        "remise_percent": remise,
+        "product_type": product_type,
+    })
+    if line.get("fk_product"):
+        payload["fk_product"] = line["fk_product"]
+    for key in ("date_start", "date_end"):
+        if line.get(key):
+            payload[key] = line[key]
+    return payload
+
+
+async def _invoice_is_draft(invoice_id: int) -> "tuple[bool, str]":
+    """Retourne (is_draft, status_label) pour une facture client.
+
+    Garde-fou des éditions de ligne, comme _proposal_is_draft pour les propales :
+    `Facture::addline()` refuse toute ligne hors brouillon, mais l'API répond
+    alors par une erreur générique où l'on cherche longtemps la cause.
+    """
+    try:
+        inv = await api_get(f"{INVOICES_ENDPOINT}/{invoice_id}")
+        status = (inv.get("fk_statut") or inv.get("status")) if isinstance(inv, dict) else "0"
+    except Exception:
+        return True, "?"
+    return str(status) == "0", _format_invoice_status(status, (inv or {}).get("paye"))
+
+
+@mcp.tool()
+async def dolibarr_create_invoice(
+    thirdparty_id: int,
+    date: str = "",
+    due_date: str = "",
+    project_id: int = 0,
+    ref_customer: str = "",
+    note_public: str = "",
+    note_private: str = "",
+    lines: list[dict] | None = None,
+    invoice_type: int = 0,
+) -> str:
+    """Crée une facture client (brouillon), avec ses lignes.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - thirdparty_id : ID du client (obligatoire)
+    - date          : date de facture (YYYY-MM-DD, défaut : aujourd'hui)
+    - due_date      : échéance (YYYY-MM-DD). Sans elle, Dolibarr la calcule
+                      depuis les conditions de règlement du tiers.
+    - project_id    : projet à rattacher (optionnel)
+    - ref_customer  : référence côté client, bon de commande… (optionnel)
+    - note_public / note_private : notes (optionnel)
+    - lines         : lignes, chacune un dict avec
+        - description : libellé (obligatoire)
+        - qty         : quantité (défaut 1)
+        - subprice    : prix unitaire HT (`pu_ht` accepté)
+        - tva_tx      : taux de TVA en % (défaut 0)
+        - remise_percent : remise en % (défaut 0)
+        - product_type : 0 produit, 1 service (défaut 1)
+        - fk_product : ID produit/service Dolibarr (optionnel)
+        - date_start / date_end : période de prestation (optionnel)
+    - invoice_type  : 0 standard, 1 remplacement, 2 avoir, 3 acompte (défaut 0)
+
+    La facture est créée en BROUILLON, avec une ref provisoire `(PROVxxx)` :
+    elle reste modifiable, et ne prend sa référence définitive qu'à la
+    validation (dolibarr_validate_invoice).
+
+    Retourne la facture RELUE : ref, montants, statut, lignes.
+    """
+    try:
+        if not thirdparty_id:
+            return "Le thirdparty_id est obligatoire."
+        invalid = _valid_dates(date=date, due_date=due_date)
+        if invalid:
+            return invalid
+
+        payload: dict[str, Any] = {
+            "socid": thirdparty_id,
+            "type": invoice_type,
+            "date": date or _today_iso(),
+        }
+        # `date_lim_reglement` est repris par Invoices::post() comme argument
+        # $forceduedate de Facture::create() : c'est le seul moyen d'imposer une
+        # échéance, sans quoi elle est recalculée depuis les conditions du tiers.
+        if due_date:
+            payload["date_lim_reglement"] = due_date
+        if project_id:
+            payload["fk_project"] = project_id
+        if ref_customer:
+            payload["ref_client"] = ref_customer
+        if note_public:
+            payload["note_public"] = note_public
+        if note_private:
+            payload["note_private"] = note_private
+
+        invoice_id = _id_int(await api_post(INVOICES_ENDPOINT, payload))
+        if not invoice_id:
+            return _dumps({
+                "success": False,
+                "message": "Dolibarr n'a pas renvoyé d'identifiant de facture.",
+            })
+
+        added, warnings = await _push_invoice_lines(invoice_id, lines or [])
+        return _dumps(await _invoice_write_report(
+            invoice_id, requested=len(lines or []), added=added, warnings=warnings,
+            created=True,
+        ))
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_add_invoice_lines(invoice_id: int, lines: list[dict]) -> str:
+    """Ajoute des lignes à une facture client BROUILLON.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - invoice_id : ID de la facture (obligatoire, doit être en brouillon)
+    - lines      : mêmes champs que dolibarr_create_invoice
+
+    `Facture::addline()` refuse toute ligne sur une facture validée : l'outil
+    vérifie donc le statut AVANT d'écrire, plutôt que de laisser remonter une
+    erreur générique ligne par ligne.
+
+    Retourne la facture relue avec ses lignes et ses totaux recalculés.
+    """
+    try:
+        if not invoice_id:
+            return "Veuillez fournir un invoice_id."
+        if not lines:
+            return "La liste lines est vide — aucune ligne à ajouter."
+
+        is_draft, status_label = await _invoice_is_draft(invoice_id)
+        if not is_draft:
+            return _dumps({
+                "success": False,
+                "invoice_id": invoice_id,
+                "status_label": status_label,
+                "message": (
+                    f"La facture {invoice_id} est « {status_label} » : Dolibarr verrouille "
+                    "ses lignes hors brouillon. La repasser en brouillon depuis l'interface, "
+                    "ou créer un avoir."
+                ),
+            })
+
+        added, warnings = await _push_invoice_lines(invoice_id, lines)
+        return _dumps(await _invoice_write_report(
+            invoice_id, requested=len(lines), added=added, warnings=warnings, created=False,
+        ))
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+async def _push_invoice_lines(invoice_id: int, lines: list) -> "tuple[int, list[str]]":
+    """Pousse un lot de lignes sur une facture. Retourne (posées, avertissements)."""
+    added, warnings = 0, []
+    for i, line in enumerate(lines):
+        payload = _invoice_line_payload(line if isinstance(line, dict) else {})
+        if isinstance(payload, str):
+            warnings.append(f"Ligne {i + 1} ignorée : {payload}.")
+            continue
+        try:
+            await api_post(INVOICE_LINES_ENDPOINT.format(invoice_id=invoice_id), payload)
+            added += 1
+        except Exception as exc:
+            warnings.append(
+                f"Ligne {i + 1} ({str(payload['desc'])[:40]}) refusée : {_format_error(exc)}"
+            )
+    return added, warnings
+
+
+async def _invoice_write_report(
+    invoice_id: int, requested: int, added: int, warnings: list, created: bool
+) -> dict:
+    """Relit une facture après écriture et compose le compte rendu."""
+    raw = await api_get(f"{INVOICES_ENDPOINT}/{invoice_id}")
+    inv = raw if isinstance(raw, dict) else {}
+    report: dict[str, Any] = {
+        "success": True,
+        "invoice_id": invoice_id,
+        "ref": inv.get("ref"),
+        "thirdparty_id": _id_int(inv.get("socid")),
+        "status_label": _format_invoice_status(
+            inv.get("fk_statut") or inv.get("status"), inv.get("paye")
+        ),
+        "total_ht": _num(inv.get("total_ht")),
+        "total_tva": _num(inv.get("total_tva")),
+        "total_ttc": _num(inv.get("total_ttc")),
+        "date_invoice": _ts_to_date(inv.get("date")),
+        "date_due": _ts_to_date(inv.get("date_lim_reglement")),
+        "fk_project": _id_int(inv.get("fk_project")),
+        "lines_requested": requested,
+        "lines_added": added,
+        "lines": [_format_doc_line(ln) for ln in (inv.get("lines") or [])],
+        "message": (
+            f"Facture {inv.get('ref') or invoice_id} "
+            f"{'créée en brouillon' if created else 'complétée'} ({added} ligne(s))."
+            + (" À valider avec dolibarr_validate_invoice." if created else "")
+        ),
+    }
+    if warnings:
+        report["line_warnings"] = warnings
+    return report
+
+
+@mcp.tool()
+async def dolibarr_delete_invoice_line(invoice_id: int, line_id: int) -> str:
+    """Supprime une ligne d'une facture client BROUILLON.
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+
+    Paramètres :
+    - invoice_id : ID de la facture (obligatoire, doit être en brouillon)
+    - line_id    : ID de la ligne (champ `line_id` de dolibarr_get_invoice)
+
+    Pendant facture de dolibarr_delete_proposal_line, avec la même précaution :
+    hors brouillon, Dolibarr verrouille les lignes et l'appel n'a aucun effet.
+
+    Retourne la facture relue, avec ses totaux recalculés.
+    """
+    try:
+        if not invoice_id or not line_id:
+            return "Veuillez fournir un invoice_id et un line_id."
+
+        is_draft, status_label = await _invoice_is_draft(invoice_id)
+        if not is_draft:
+            return _dumps({
+                "success": False,
+                "invoice_id": invoice_id,
+                "status_label": status_label,
+                "message": (
+                    f"La facture {invoice_id} est « {status_label} » : ses lignes sont "
+                    "verrouillées. Aucune suppression tentée."
+                ),
+            })
+
+        before = await api_get(f"{INVOICES_ENDPOINT}/{invoice_id}")
+        count_before = len((before or {}).get("lines") or []) if isinstance(before, dict) else None
+
+        await api_delete(INVOICE_LINE_ENDPOINT.format(invoice_id=invoice_id, line_id=line_id))
+
+        report = await _invoice_write_report(
+            invoice_id, requested=0, added=0, warnings=[], created=False
+        )
+        count_after = len(report.get("lines") or [])
+        report["lines_before"] = count_before
+        report["lines_after"] = count_after
+        report["success"] = count_before is None or count_after < count_before
+        report["message"] = (
+            f"Ligne {line_id} supprimée de la facture {report.get('ref') or invoice_id}."
+            if report["success"] else
+            f"L'appel a répondu sans erreur mais la facture compte toujours "
+            f"{count_after} ligne(s) : la suppression n'a pas pris."
+        )
+        return _dumps(report)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_delete_invoice(invoice_id: int, supplier: bool = False) -> str:
+    """Supprime une facture BROUILLON, client ou fournisseur.
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+
+    Paramètres :
+    - invoice_id : ID de la facture (obligatoire)
+    - supplier   : False (défaut) = facture client, True = facture fournisseur
+
+    Seuls les BROUILLONS sont supprimables, et c'est délibéré : une facture
+    validée a consommé un numéro de la séquence comptable, que sa suppression
+    laisserait manquant. Une facture validée se neutralise par un avoir, ou par
+    une mise en abandon depuis Dolibarr.
+
+    Retourne la confirmation, et vérifie par relecture que l'objet a bien
+    disparu — un DELETE accepté sans effet est signalé comme un échec.
+    """
+    try:
+        if not invoice_id:
+            return "Veuillez fournir un invoice_id."
+
+        base = SUPPLIER_INVOICES_ENDPOINT if supplier else INVOICES_ENDPOINT
+        raw = await api_get(f"{base}/{invoice_id}")
+        if not isinstance(raw, dict) or not raw.get("id"):
+            return f"Facture {invoice_id} introuvable."
+
+        status = str(raw.get("fk_statut") or raw.get("status") or "")
+        label = _format_invoice_status(status, raw.get("paye"))
+        ref = raw.get("ref")
+        if status != "0":
+            return _dumps({
+                "success": False,
+                "invoice_id": invoice_id,
+                "ref": ref,
+                "status_label": label,
+                "message": (
+                    f"La facture {ref or invoice_id} est « {label} » : elle a consommé un "
+                    "numéro de séquence, que sa suppression laisserait manquant. "
+                    "La neutraliser par un avoir, ou l'abandonner depuis Dolibarr."
+                ),
+            })
+
+        await api_delete(f"{base}/{invoice_id}")
+
+        gone = True
+        try:
+            again = await api_get(f"{base}/{invoice_id}")
+            gone = not (isinstance(again, dict) and again.get("id"))
+        except httpx.HTTPStatusError as exc:
+            gone = exc.response.status_code == 404
+
+        return _dumps({
+            "success": gone,
+            "invoice_id": invoice_id,
+            "ref": ref,
+            "supplier": supplier,
+            "message": (
+                f"Facture {ref or invoice_id} supprimée." if gone else
+                f"Le DELETE a répondu sans erreur mais la facture {ref or invoice_id} "
+                "est toujours lisible : suppression non effective."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_validate_supplier_invoice(supplier_invoice_id: int) -> str:
+    """Valide une facture fournisseur brouillon (statut 0 → 1).
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - supplier_invoice_id : ID de la facture fournisseur (obligatoire)
+
+    Pendant fournisseur de dolibarr_validate_invoice, qui manquait : le cycle
+    fournisseur s'arrêtait au brouillon et imposait un passage par l'interface.
+    La validation remplace la référence provisoire `(PROVxxx)` par la référence
+    définitive et rend la facture réglable.
+
+    Retourne la facture RELUE : nouvelle ref, statut, montants.
+    """
+    try:
+        if not supplier_invoice_id:
+            return "Veuillez fournir un supplier_invoice_id."
+
+        await api_post(f"{SUPPLIER_INVOICES_ENDPOINT}/{supplier_invoice_id}/validate", {})
+
+        raw = await api_get(f"{SUPPLIER_INVOICES_ENDPOINT}/{supplier_invoice_id}")
+        inv = raw if isinstance(raw, dict) else {}
+        status = str(inv.get("fk_statut") or inv.get("status") or "")
+        return _dumps({
+            "success": status != "0",
+            "supplier_invoice_id": supplier_invoice_id,
+            "ref": inv.get("ref"),
+            "ref_supplier": inv.get("ref_supplier"),
+            "status_label": _format_invoice_status(status, inv.get("paye")),
+            "total_ht": _num(inv.get("total_ht")),
+            "total_ttc": _num(inv.get("total_ttc")),
+            "message": (
+                f"Facture fournisseur validée : {inv.get('ref')}." if status != "0" else
+                "L'appel a répondu sans erreur mais la facture est toujours en brouillon."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_create_invoice_from_proposal(
+    proposal_id: int,
+    date: str = "",
+    due_date: str = "",
+    mark_proposal_invoiced: bool = False,
+) -> str:
+    """Crée une facture client en reprenant une proposition commerciale.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - proposal_id : ID de la proposition à facturer (obligatoire)
+    - date        : date de facture (YYYY-MM-DD, défaut : aujourd'hui)
+    - due_date    : échéance (YYYY-MM-DD, optionnel)
+    - mark_proposal_invoiced : passer la propale au statut « facturée »
+      (défaut : non). L'interface Dolibarr le fait à la facturation ; l'outil
+      ne touche pas au statut sans demande explicite.
+
+    Dolibarr n'expose de reprise que depuis une COMMANDE ou un CONTRAT
+    (`POST /invoices/createfromorder`, `/createfromcontract`) : rien pour une
+    proposition. Le connecteur relit donc la propale et recopie tiers, projet,
+    référence client et lignes une à une. Conséquence à connaître : les lignes
+    sont recréées, pas déplacées, et la facture est liée à la propale via
+    `linked_objects` — le lien remonte dans l'onglet « Éléments liés ».
+
+    Retourne la facture créée (brouillon), relue avec ses lignes.
+    """
+    try:
+        if not proposal_id:
+            return "Veuillez fournir un proposal_id."
+        invalid = _valid_dates(date=date, due_date=due_date)
+        if invalid:
+            return invalid
+
+        raw = await api_get(f"proposals/{proposal_id}")
+        if not isinstance(raw, dict) or not raw.get("id"):
+            return f"Proposition {proposal_id} introuvable."
+
+        source_lines = raw.get("lines") or []
+        if not source_lines:
+            return _dumps({
+                "success": False,
+                "proposal_id": proposal_id,
+                "message": (
+                    f"La proposition {raw.get('ref') or proposal_id} n'a aucune ligne : "
+                    "il n'y a rien à facturer."
+                ),
+            })
+
+        payload: dict[str, Any] = {
+            "socid": _id_int(raw.get("socid")),
+            "type": 0,
+            "date": date or _today_iso(),
+            # Lien 'propal' → Facture::create() appelle add_object_linked() et
+            # la facture apparaît dans les éléments liés de la proposition.
+            "linked_objects": {"propal": proposal_id},
+        }
+        if due_date:
+            payload["date_lim_reglement"] = due_date
+        if raw.get("fk_project"):
+            payload["fk_project"] = _id_int(raw.get("fk_project"))
+        if raw.get("ref_client"):
+            payload["ref_client"] = raw.get("ref_client")
+
+        invoice_id = _id_int(await api_post(INVOICES_ENDPOINT, payload))
+        if not invoice_id:
+            return _dumps({
+                "success": False,
+                "message": "Dolibarr n'a pas renvoyé d'identifiant de facture.",
+            })
+
+        lines = [
+            {
+                "description": ln.get("desc") or ln.get("description") or ln.get("label") or "",
+                "qty": ln.get("qty"),
+                "subprice": ln.get("subprice"),
+                "tva_tx": ln.get("tva_tx"),
+                "remise_percent": ln.get("remise_percent"),
+                "product_type": ln.get("product_type", 1),
+                "fk_product": ln.get("fk_product"),
+                "date_start": _ts_to_date(ln.get("date_start")),
+                "date_end": _ts_to_date(ln.get("date_end")),
+            }
+            for ln in source_lines
+            if isinstance(ln, dict)
+        ]
+        added, warnings = await _push_invoice_lines(invoice_id, lines)
+
+        report = await _invoice_write_report(
+            invoice_id, requested=len(lines), added=added, warnings=warnings, created=True,
+        )
+        report["proposal_id"] = proposal_id
+        report["proposal_ref"] = raw.get("ref")
+        report["proposal_total_ht"] = _num(raw.get("total_ht"))
+
+        if added != len(lines):
+            report["success"] = False
+            report["message"] = (
+                f"Facture {report.get('ref') or invoice_id} créée mais INCOMPLÈTE : "
+                f"{added}/{len(lines)} ligne(s) reprises de {raw.get('ref')}. "
+                "Compléter ou supprimer le brouillon avant de valider."
+            )
+        elif report.get("total_ht") != report.get("proposal_total_ht"):
+            report["total_warning"] = (
+                f"Total HT facture ({report.get('total_ht')}) différent du total de la "
+                f"proposition ({report.get('proposal_total_ht')}) — remises ou arrondis à vérifier."
+            )
+
+        if mark_proposal_invoiced:
+            try:
+                await api_post(f"proposals/{proposal_id}/setinvoiced", {})
+                report["proposal_status"] = "facturée"
+            except Exception as exc:
+                report["proposal_status_warning"] = (
+                    f"Facture créée, mais le passage de la proposition en « facturée » "
+                    f"a échoué : {_format_error(exc)}"
+                )
+
+        return _dumps(report)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Pièces jointes et génération de PDF
+# ---------------------------------------------------------------------------
+
+#: `fetchObjectByElement()`, qui résout l'objet destinataire côté Dolibarr,
+#: raisonne en NOMS D'ÉLÉMENT internes, pas en noms de module REST. Les alias
+#: lisibles annoncés dans la documentation de l'API ('supplier_invoice') n'y
+#: sont pas reconnus et produisent un 404 — vérifié en production le
+#: 31/08/2026 sur SI2603-0085, facture fournisseur pourtant validée.
+DOCUMENT_MODULE_ALIASES = {
+    "supplier_invoice": "facture_fournisseur",
+    "supplier_order": "commande_fournisseur",
+    "invoice": "facture",
+    "proposal": "propal",
+    "order": "commande",
+    "thirdparty": "societe",
+    "member": "adherent",
+    "project_task": "task",
+}
+
+DOCUMENTS_ENDPOINT = "documents"
+DOCUMENTS_UPLOAD_ENDPOINT = "documents/upload"
+DOCUMENTS_BUILDDOC_ENDPOINT = "documents/builddoc"
+
+#: Taille maximale d'une pièce jointe envoyée par le connecteur. Le contenu
+#: transite en base64 dans un corps JSON : au-delà, c'est la mémoire de PHP et
+#: la limite `post_max_size` du serveur qui décident, avec un message opaque.
+DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
+
+
+@mcp.tool()
+async def dolibarr_list_documents(
+    module: str,
+    object_id: int = 0,
+    ref: str = "",
+    limit: int = DEFAULT_LIMIT,
+) -> str:
+    """Liste les pièces jointes d'un objet Dolibarr.
+
+    Paramètres :
+    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+                  'order', 'project', 'project_task', 'thirdparty', 'member'…
+    - object_id : ID de l'objet (fournir object_id OU ref)
+    - ref       : référence de l'objet (ex. 'FA2608-0939')
+    - limit     : nombre max de fichiers
+
+    Retourne nom, chemin relatif, taille, type et date de chaque fichier. Le
+    chemin relatif est celui qu'attend dolibarr_build_document.
+    """
+    try:
+        if not module:
+            return "Le paramètre module est obligatoire (ex. 'invoice', 'supplier_invoice')."
+        if not object_id and not ref:
+            return "Veuillez fournir object_id ou ref."
+
+        params: dict[str, Any] = {
+            "modulepart": _document_module(module),
+            "limit": _clamp_limit(limit),
+        }
+        # `id` est plus sûr que `ref` : il évite la résolution par référence, qui
+        # échoue sur les brouillons dont la ref porte des parenthèses.
+        if object_id:
+            params["id"] = object_id
+        elif ref:
+            params["ref"] = _document_ref(ref)
+
+        try:
+            rows = await api_get(DOCUMENTS_ENDPOINT, params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # 404 ici veut dire « objet introuvable », pas « aucun fichier ».
+                # Les confondre ferait passer une erreur d'adressage pour un
+                # dossier vide.
+                return _dumps({
+                    "success": False,
+                    "module": module,
+                    "modulepart_sent": params["modulepart"],
+                    "object_id": object_id or None,
+                    "ref": ref or None,
+                    "message": (
+                        f"Objet introuvable pour modulepart={params['modulepart']!r}. "
+                        f"Détail Dolibarr : {_error_body(exc)}"
+                    ),
+                })
+            raise
+        documents = [
+            {
+                "name": row.get("name"),
+                "relative_path": row.get("relativename") or row.get("name"),
+                "size": _num(row.get("size")),
+                "type": row.get("type"),
+                "date": _ts_to_date(row.get("date")),
+            }
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        ]
+        return _dumps({
+            "success": True,
+            "module": module,
+            "modulepart_sent": params["modulepart"],
+            "object_id": object_id or None,
+            "ref": ref or None,
+            "count": len(documents),
+            "documents": documents,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_upload_document(
+    file_path: str,
+    module: str,
+    ref: str = "",
+    subdir: str = "",
+    overwrite: bool = False,
+) -> str:
+    """Attache un fichier local à un objet Dolibarr.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - file_path : chemin du fichier SUR LA MACHINE qui exécute le connecteur
+    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+                  'order', 'project', 'project_task', 'expensereport'…
+    - ref       : référence de l'objet destinataire (ex. 'SI2608-0012'). C'est
+                  elle qui détermine le sous-dossier de stockage.
+    - subdir    : sous-dossier explicite, à la place de ref (rarement utile)
+    - overwrite : écraser un fichier de même nom (défaut : non)
+
+    Usage principal : joindre le PDF reçu du fournisseur à la facture
+    fournisseur saisie par dolibarr_create_supplier_invoice.
+
+    Le fichier est lu localement et transmis en base64. Taille plafonnée à
+    12 Mo : au-delà, c'est `post_max_size` côté serveur qui refuse, avec un
+    message que rien ne rattache au fichier envoyé.
+
+    Retourne le nom stocké et le contenu de la liste des pièces jointes après
+    envoi — la vérification que le fichier est bien arrivé.
+    """
+    try:
+        import base64
+        import os.path
+
+        if not module:
+            return "Le paramètre module est obligatoire."
+        if not ref and not subdir:
+            return "Veuillez fournir ref (référence de l'objet) ou subdir."
+        if not os.path.isfile(file_path):
+            return f"Fichier introuvable : {file_path}"
+
+        size = os.path.getsize(file_path)
+        if size > DOCUMENT_UPLOAD_MAX_BYTES:
+            return (
+                f"Fichier trop volumineux ({round(size / 1048576, 1)} Mo) : la limite du "
+                f"connecteur est {DOCUMENT_UPLOAD_MAX_BYTES // 1048576} Mo. Déposer le "
+                "fichier directement depuis l'interface Dolibarr."
+            )
+
+        with open(file_path, "rb") as handle:
+            content = base64.b64encode(handle.read()).decode("ascii")
+
+        filename = os.path.basename(file_path)
+        stored_ref = _document_ref(ref)
+        await api_post(DOCUMENTS_UPLOAD_ENDPOINT, {
+            "filename": filename,
+            "modulepart": _document_module(module),
+            "ref": stored_ref,
+            "subdir": subdir,
+            "filecontent": content,
+            "fileencoding": "base64",
+            "overwriteifexists": 1 if overwrite else 0,
+        })
+
+        # Relecture : c'est elle qui distingue un dépôt réel d'un POST accepté
+        # sans effet. Elle peut échouer sans que le dépôt ait échoué — on le dit
+        # alors, plutôt que de rendre un `documents_after` nul et muet.
+        listed, check_note = None, None
+        if stored_ref:
+            try:
+                after = json.loads(
+                    await dolibarr_list_documents(module=module, ref=stored_ref)
+                )
+                listed = after.get("documents")
+                if listed is None:
+                    check_note = after.get("message")
+                elif not any(d.get("name") == filename for d in listed):
+                    check_note = (
+                        f"{filename} n'apparaît pas dans les pièces jointes relues : "
+                        "dépôt à vérifier depuis Dolibarr."
+                    )
+            except Exception as exc:
+                check_note = f"Relecture des pièces jointes impossible : {_format_error(exc)}"
+
+        response = {
+            "success": True,
+            "filename": filename,
+            "size": size,
+            "module": module,
+            "ref": stored_ref or None,
+            "ref_requested": ref or None,
+            "documents_after": listed,
+            "message": f"{filename} ({round(size / 1024)} Ko) attaché à {stored_ref or subdir}.",
+        }
+        if check_note:
+            response["verification_warning"] = check_note
+        return _dumps({k: v for k, v in response.items() if v is not None})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_build_document(
+    module: str,
+    ref: str,
+    original_file: str = "",
+    template: str = "",
+    langcode: str = "",
+) -> str:
+    """(Re)génère le PDF d'un document commercial Dolibarr.
+
+    Confirmation utilisateur requise avant exécution (écrase le PDF existant).
+
+    Paramètres :
+    - module        : 'invoice', 'supplier_invoice', 'proposal', 'order', 'contract'…
+    - ref           : référence du document (ex. 'FA2608-0939')
+    - original_file : chemin relatif du fichier, si différent de `<ref>/<ref>.pdf`
+    - template      : modèle de document (ex. 'crabe'). Vide = modèle par défaut.
+    - langcode      : langue du document (ex. 'fr_FR'). Vide = langue par défaut.
+
+    Utile après dolibarr_validate_invoice : la validation renomme la facture
+    mais le PDF n'est régénéré que par l'interface. Sans cette régénération, le
+    PDF servi reste celui du brouillon, sous l'ancienne référence.
+
+    Le contenu binaire renvoyé par Dolibarr est VOLONTAIREMENT écarté de la
+    réponse : un PDF encodé en base64 saturerait la fenêtre de contexte pour
+    rien. Seuls le nom, le type et la taille sont rendus ; le fichier se
+    récupère par dolibarr_get_invoice_pdf_url.
+    """
+    try:
+        if not module or not ref:
+            return "Les paramètres module et ref sont obligatoires."
+
+        stored_ref = _document_ref(ref)
+        path = original_file or f"{stored_ref}/{stored_ref}.pdf"
+        payload: dict[str, Any] = {
+            "modulepart": _document_module(module),
+            "original_file": path,
+        }
+        if template:
+            payload["doctemplate"] = template
+        if langcode:
+            payload["langcode"] = langcode
+
+        result = await api_put(DOCUMENTS_BUILDDOC_ENDPOINT, payload)
+        built = result if isinstance(result, dict) else {}
+        return _dumps({
+            "success": True,
+            "module": module,
+            "ref": ref,
+            "filename": built.get("filename"),
+            "content_type": built.get("content-type"),
+            "filesize": _num(built.get("filesize")),
+            "template": built.get("template") or template or "(défaut)",
+            "langcode": built.get("langcode") or langcode or "(défaut)",
+            "message": f"PDF régénéré pour {ref} ({built.get('filename') or path}).",
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Référentiels (utilisateurs, produits, modes de règlement)
+# ---------------------------------------------------------------------------
+
+USERS_ENDPOINT = "users"
+PRODUCTS_ENDPOINT = "products"
+
+
+@mcp.tool()
+async def dolibarr_list_users(
+    search: str = "",
+    include_disabled: bool = False,
+    limit: int = DEFAULT_LIMIT,
+) -> str:
+    """Liste les utilisateurs Dolibarr (identifiants internes).
+
+    Paramètres :
+    - search : filtre sur login, nom ou prénom (recherche partielle)
+    - include_disabled : inclure les comptes désactivés (défaut : non)
+    - limit : nombre max de résultats
+
+    Sert à récupérer le `user_id` qu'attendent dolibarr_log_time,
+    dolibarr_assign_task_user et dolibarr_list_time_entries : ces outils
+    demandent un identifiant numérique que rien n'exposait jusqu'ici.
+
+    Retourne : id, login, nom, prénom, email, statut, et si le compte est
+    employé.
+    """
+    try:
+        params: dict[str, Any] = {
+            "sortfield": "t.lastname",
+            "sortorder": "ASC",
+            "limit": CLIENT_FILTER_SCAN_LIMIT if search else _clamp_limit(limit),
+        }
+        if not include_disabled:
+            params["sqlfilters"] = "(t.statut:=:1)"
+
+        rows = await api_get(USERS_ENDPOINT, params)
+        needle = search.strip().lower()
+        results = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            user = {
+                "id": _id_int(row.get("id") or row.get("rowid")),
+                "login": row.get("login"),
+                "lastname": row.get("lastname"),
+                "firstname": row.get("firstname"),
+                "email": row.get("email"),
+                "job": row.get("job") or None,
+                "enabled": str(row.get("statut") or row.get("status") or "1") == "1",
+                "employee": str(row.get("employee") or "0") == "1",
+            }
+            if needle:
+                haystack = " ".join(
+                    str(user.get(k) or "") for k in ("login", "lastname", "firstname", "email")
+                ).lower()
+                if needle not in haystack:
+                    continue
+            results.append({k: v for k, v in user.items() if v not in (None, "")})
+            if len(results) >= _clamp_limit(limit):
+                break
+
+        return _dumps({"count": len(results), "users": results})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_list_products(
+    search: str = "",
+    kind: str = "",
+    limit: int = DEFAULT_LIMIT,
+) -> str:
+    """Liste les produits et services du catalogue Dolibarr.
+
+    Paramètres :
+    - search : filtre sur la référence ou le libellé (recherche partielle)
+    - kind   : 'product' (biens), 'service' (prestations), vide = les deux
+    - limit  : nombre max de résultats
+
+    Sert à récupérer le `fk_product` des lignes de facture ou de proposition,
+    et le prix catalogue associé.
+
+    Retourne : id, ref, libellé, type, prix de vente HT, taux de TVA, statut
+    de vente.
+    """
+    try:
+        kinds = {"": 0, "product": 1, "service": 2, "produit": 1, "prestation": 2}
+        wanted = str(kind or "").strip().lower()
+        if wanted not in kinds:
+            return f"kind invalide : '{kind}'. Valeurs acceptées : 'product', 'service', ou vide."
+
+        params: dict[str, Any] = {
+            "sortfield": "t.ref",
+            "sortorder": "ASC",
+            "limit": _clamp_limit(limit),
+            "mode": kinds[wanted],
+        }
+        if search:
+            needle = _sf_like(search)
+            params["sqlfilters"] = f"((t.ref:like:'%{needle}%') or (t.label:like:'%{needle}%'))"
+
+        rows = await api_get(PRODUCTS_ENDPOINT, params)
+        results = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            results.append({k: v for k, v in {
+                "id": _id_int(row.get("id") or row.get("rowid")),
+                "ref": row.get("ref"),
+                "label": row.get("label"),
+                "type": _line_type_label(row.get("type")),
+                "price_ht": _num(row.get("price")),
+                "price_ttc": _num(row.get("price_ttc")),
+                "tva_tx": _num(row.get("tva_tx")),
+                "on_sell": str(row.get("status") or "0") == "1",
+            }.items() if v not in (None, "")})
+
+        return _dumps({"count": len(results), "kind": wanted or "tous", "products": results})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_list_payment_types() -> str:
+    """Liste les modes de règlement actifs de l'instance (dictionnaire c_paiement).
+
+    Sans paramètre. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
+    'PRE'…), son identifiant numérique et son libellé.
+
+    Les deux formes servent : les outils de règlement attendent l'identifiant,
+    les écritures bancaires attendent le code. Le connecteur accepte l'une ou
+    l'autre partout et convertit — cet outil sert à savoir ce qui existe sur
+    l'instance, dont la liste est configurable.
+    """
+    try:
+        types = await _payment_types()
+        rows = sorted(types["by_code"].values(), key=lambda t: t["code"])
+        return _dumps({"count": len(rows), "payment_types": rows})
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Trésorerie : prévisionnel, virements internes, relevés
+# ---------------------------------------------------------------------------
+
+BANK_TRANSFER_ENDPOINT = "bankaccounts/transfer"
+
+#: Fenêtre remontée par défaut pour recenser les relevés existants.
+BANK_STATEMENTS_DEFAULT_WINDOW_DAYS = 365
+
+
+@mcp.tool()
+async def dolibarr_cash_forecast(horizon_days: int = 90, include_supplier: bool = True) -> str:
+    """Prévisionnel de trésorerie : soldes, encaissements et décaissements attendus.
+
+    Paramètres :
+    - horizon_days : profondeur du prévisionnel en jours (défaut 90)
+    - include_supplier : intégrer les factures fournisseur à payer (défaut oui)
+
+    Assemble en une réponse ce qu'il fallait jusqu'ici recouper à la main :
+    - le solde de chaque compte ouvert hors caisse, et leur total ;
+    - les factures clients validées non payées, avec leur reste à encaisser ;
+    - les factures fournisseur validées non payées, avec leur reste à payer ;
+    - une ventilation par échéance : en retard, 0-30 j, 31-60 j, 61-90 j, au-delà ;
+    - le solde projeté à l'horizon.
+
+    Le solde projeté est une PROJECTION D'ÉCHÉANCES, pas un engagement : il
+    suppose que chaque facture est réglée à sa date d'échéance. Les factures
+    déjà en retard y sont comptées à l'échéance dépassée, donc immédiatement.
+
+    Le reste à payer vient de `remaintopay` quand Dolibarr le fournit, et du
+    total TTC sinon — un règlement partiel non reflété gonflerait la prévision.
+    """
+    try:
+        from datetime import datetime
+
+        horizon = max(1, int(horizon_days))
+        today = _today_iso()
+        horizon_date = _shift_days(today, horizon)
+
+        accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+        cash = []
+        for raw in accounts if isinstance(accounts, list) else []:
+            acc = _format_bank_account(raw)
+            if not acc.get("id") or acc.get("closed") or acc.get("type") == BANK_ACCOUNT_TYPE_CASH:
+                continue
+            cash.append({
+                "account_id": acc["id"],
+                "label": acc.get("label"),
+                "balance": float(acc.get("balance") or 0),
+            })
+        opening = round(sum(a["balance"] for a in cash), 2)
+
+        async def _pending(endpoint: str) -> list:
+            rows = await _api_get_list(endpoint, {
+                "sortfield": "t.date_lim_reglement",
+                "sortorder": "ASC",
+                "limit": CLIENT_FILTER_SCAN_LIMIT,
+                "sqlfilters": "(t.fk_statut:=:1)",
+            })
+            return rows if isinstance(rows, list) else []
+
+        def _due_bucket(due: str) -> str:
+            if not due:
+                return "sans échéance"
+            if due < today:
+                return "en retard"
+            delta = (
+                datetime.strptime(due, "%Y-%m-%d") - datetime.strptime(today, "%Y-%m-%d")
+            ).days
+            if delta <= 30:
+                return "0-30 j"
+            if delta <= 60:
+                return "31-60 j"
+            if delta <= 90:
+                return "61-90 j"
+            return "au-delà"
+
+        def _digest(rows: list, supplier: bool) -> tuple:
+            items, buckets = [], {}
+            for inv in rows:
+                due = _ts_to_date(inv.get("date_lim_reglement"))
+                total = float(inv.get("total_ttc") or 0)
+                remaining = inv.get("remaintopay")
+                amount = float(remaining) if remaining not in (None, "") else total
+                if round(amount, 2) == 0:
+                    continue
+                bucket = _due_bucket(due)
+                buckets[bucket] = round(buckets.get(bucket, 0) + amount, 2)
+                items.append({
+                    "id": _id_int(inv.get("id")),
+                    "ref": inv.get("ref"),
+                    "ref_supplier": inv.get("ref_supplier") if supplier else None,
+                    "thirdparty": inv.get("thirdparty_name") or inv.get("socid"),
+                    "amount": round(amount, 2),
+                    "date_due": due or None,
+                    "bucket": bucket,
+                })
+            items.sort(key=lambda i: (i["date_due"] or "9999-12-31"))
+            return items, buckets
+
+        receivable, in_buckets = _digest(await _pending("invoices"), supplier=False)
+        payable, out_buckets = ([], {})
+        if include_supplier:
+            payable, out_buckets = _digest(await _pending("supplierinvoices"), supplier=True)
+
+        def _within(items: list) -> float:
+            return round(sum(
+                i["amount"] for i in items
+                if not i["date_due"] or i["date_due"] <= horizon_date
+            ), 2)
+
+        cash_in = _within(receivable)
+        cash_out = _within(payable)
+
+        return _dumps({
+            "today": today,
+            "horizon_days": horizon,
+            "horizon_date": horizon_date,
+            "opening_balance": opening,
+            "accounts": cash,
+            "expected_in": cash_in,
+            "expected_out": cash_out,
+            "projected_balance": round(opening + cash_in - cash_out, 2),
+            "receivable_total": round(sum(i["amount"] for i in receivable), 2),
+            "payable_total": round(sum(i["amount"] for i in payable), 2),
+            "receivable_by_due": in_buckets,
+            "payable_by_due": out_buckets,
+            "overdue_in": in_buckets.get("en retard", 0),
+            "overdue_out": out_buckets.get("en retard", 0),
+            "receivable": receivable[:MAX_LIMIT],
+            "payable": payable[:MAX_LIMIT],
+            "basis_note": (
+                "Projection à l'échéance : chaque facture est comptée à sa date "
+                "d'échéance, les retards à effet immédiat. Reste dû lu sur "
+                "`remaintopay`, à défaut sur le total TTC."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_transfer_between_accounts(
+    from_account_id: int,
+    to_account_id: int,
+    date: str,
+    amount: float,
+    description: str,
+) -> str:
+    """Enregistre un virement interne entre deux comptes bancaires.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - from_account_id : compte débité (obligatoire)
+    - to_account_id   : compte crédité (obligatoire)
+    - date            : date d'opération (YYYY-MM-DD, obligatoire)
+    - amount          : montant, positif (obligatoire)
+    - description     : libellé porté sur les deux écritures (obligatoire)
+
+    Dolibarr crée les DEUX écritures et les relie entre elles
+    (`POST /bankaccounts/transfer`) : ne pas les saisir à la main avec
+    dolibarr_create_bank_entry, qui produirait deux lignes sans lien.
+
+    Retourne le solde des deux comptes avant et après. Un virement laisse la
+    trésorerie totale inchangée : c'est le contrôle à lire en premier.
+    """
+    try:
+        if not from_account_id or not to_account_id:
+            return "Veuillez fournir from_account_id et to_account_id."
+        if from_account_id == to_account_id:
+            return "Les comptes source et destination sont identiques."
+        if not str(description or "").strip():
+            return "La description est obligatoire (elle sert de libellé aux deux écritures)."
+        try:
+            date_ts = _date_str_to_ts(date)
+        except ValueError:
+            return f"Format date invalide : '{date}'. Attendu : YYYY-MM-DD."
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return f"Montant invalide : {amount!r}."
+        if value <= 0:
+            return f"Le montant doit être strictement positif (reçu : {value})."
+
+        async def _balance(account_id: int) -> float:
+            return float(
+                _num(await api_get(BANK_BALANCE_ENDPOINT.format(account_id=account_id))) or 0
+            )
+
+        from_before, to_before = await _balance(from_account_id), await _balance(to_account_id)
+
+        await api_post(BANK_TRANSFER_ENDPOINT, {
+            "bankaccount_from_id": from_account_id,
+            "bankaccount_to_id": to_account_id,
+            "date": date_ts,
+            "description": str(description).strip(),
+            "amount": value,
+        })
+
+        from_after, to_after = await _balance(from_account_id), await _balance(to_account_id)
+        moved_out = round(from_before - from_after, 2)
+        moved_in = round(to_after - to_before, 2)
+
+        report: dict[str, Any] = {
+            "success": True,
+            "amount": round(value, 2),
+            "from": {
+                "account_id": from_account_id,
+                "balance_before": round(from_before, 2),
+                "balance_after": round(from_after, 2),
+                "delta": round(from_after - from_before, 2),
+            },
+            "to": {
+                "account_id": to_account_id,
+                "balance_before": round(to_before, 2),
+                "balance_after": round(to_after, 2),
+                "delta": round(to_after - to_before, 2),
+            },
+            "total_delta": round((from_after + to_after) - (from_before + to_before), 2),
+            "message": (
+                f"Virement de {value} du compte {from_account_id} vers le compte "
+                f"{to_account_id} : {description}."
+            ),
+        }
+        if abs(moved_out - value) > 0.01 or abs(moved_in - value) > 0.01:
+            report["success"] = False
+            report["balance_warning"] = (
+                f"Les soldes n'ont pas bougé du montant attendu ({value}) : "
+                f"−{moved_out} sur le compte source, +{moved_in} sur le compte cible."
+            )
+        return _dumps(report)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def dolibarr_list_bank_statements(
+    account_id: int,
+    date_start: str = "",
+    date_end: str = "",
+) -> str:
+    """Recense les relevés déjà posés sur un compte, et les écritures restantes.
+
+    Paramètres :
+    - account_id : ID du compte (obligatoire)
+    - date_start : début de la période inspectée (YYYY-MM-DD). Par défaut,
+      365 jours en arrière — l'API ne sait pas agréger, chaque écriture de la
+      période est relue.
+    - date_end   : fin de la période inspectée (YYYY-MM-DD, optionnel)
+
+    Retourne, par numéro de relevé : nombre d'écritures, première et dernière
+    date, total mouvementé. Plus `unassigned`, le compte des écritures encore
+    sans relevé — celles que dolibarr_set_bank_statement reste à traiter.
+    """
+    try:
+        if not account_id:
+            return "Veuillez fournir un account_id."
+        invalid = _valid_dates(date_start=date_start, date_end=date_end)
+        if invalid:
+            return invalid
+
+        window_start = date_start or _shift_days(
+            date_end or _today_iso(), -BANK_STATEMENTS_DEFAULT_WINDOW_DAYS
+        )
+        lines = await _bank_lines(
+            account_id, _bank_date_filter(after=window_start, before=date_end)
+        )
+
+        statements: dict[str, dict] = {}
+        unassigned, unreconciled = 0, 0
+        for line in lines:
+            amount = float(_num(line.get("amount")) or 0)
+            date = _ts_to_date(line.get("dateo"))
+            num = str(line.get("num_releve") or "").strip()
+            if not _id_int(line.get("rappro")):
+                unreconciled += 1
+            if not num:
+                unassigned += 1
+                continue
+            entry = statements.setdefault(
+                num, {"num_releve": num, "entries": 0, "total": 0.0,
+                      "first_date": date, "last_date": date}
+            )
+            entry["entries"] += 1
+            entry["total"] = round(entry["total"] + amount, 2)
+            entry["first_date"] = min(entry["first_date"] or date, date or "9999-12-31")
+            entry["last_date"] = max(entry["last_date"] or date, date or "")
+
+        ordered = sorted(statements.values(), key=lambda s: s["last_date"], reverse=True)
+        return _dumps({
+            "account_id": account_id,
+            "date_start": window_start,
+            "date_end": date_end or None,
+            "entries_scanned": len(lines),
+            "count": len(ordered),
+            "unassigned_entries": unassigned,
+            "unreconciled_entries": unreconciled,
+            "last_statement": ordered[0]["num_releve"] if ordered else None,
+            "statements": ordered,
         })
 
     except Exception as exc:

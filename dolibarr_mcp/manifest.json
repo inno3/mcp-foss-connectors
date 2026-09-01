@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "dolibarr-mcp",
   "display_name": "Dolibarr ERP",
-  "version": "1.4.1",
-  "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures, propositions, tickets, comptes-rendus. API REST Dolibarr 16+.",
+  "version": "1.7.0",
+  "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures clients et fournisseurs, propositions, banque, règlements, trésorerie, pièces jointes, tickets, comptes-rendus. API REST Dolibarr 16+.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -19,7 +19,9 @@
       "env": {
         "PYTHONPATH": "${__dirname}/src/lib",
         "DOLIBARR_URL": "${user_config.dolibarr_url}",
-        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}"
+        "DOLIBARR_API_KEY": "${user_config.dolibarr_api_key}",
+        "DOLIBARR_WEB_LOGIN": "${user_config.dolibarr_web_login}",
+        "DOLIBARR_WEB_PASSWORD": "${user_config.dolibarr_web_password}"
       }
     }
   },
@@ -36,6 +38,22 @@
       "title": "Clé API Dolibarr (DOLAPIKEY)",
       "description": "Clé API d'un utilisateur Dolibarr (envoyée dans l'en-tête DOLAPIKEY). À générer dans Dolibarr : fiche utilisateur > onglet 'Clé API'.",
       "required": true,
+      "sensitive": true
+    },
+    "dolibarr_web_login": {
+      "type": "string",
+      "title": "Identifiant web Dolibarr (optionnel)",
+      "description": "Login d'un utilisateur Dolibarr, utilisé UNIQUEMENT pour les écritures que l'API REST n'expose pas — à ce jour le seul rapprochement bancaire (dolibarr_set_bank_statement). Laisser vide désactive ce repli : l'outil concerné refuse alors explicitement au lieu de simuler un succès.",
+      "required": false,
+      "default": "",
+      "sensitive": false
+    },
+    "dolibarr_web_password": {
+      "type": "string",
+      "title": "Mot de passe web Dolibarr (optionnel)",
+      "description": "Mot de passe du compte ci-dessus. Nécessite le droit « banque : rapprocher ». Inutile si vous n'utilisez pas dolibarr_set_bank_statement.",
+      "required": false,
+      "default": "",
       "sensitive": true
     }
   },
@@ -221,6 +239,22 @@
       "description": "Crée un ticket de support"
     },
     {
+      "name": "dolibarr_close_ticket",
+      "description": "Ferme (ou rouvre) un ticket : statut cible, message de clôture optionnel"
+    },
+    {
+      "name": "dolibarr_add_ticket_message",
+      "description": "Ajoute un message au fil d'un ticket"
+    },
+    {
+      "name": "dolibarr_update_ticket",
+      "description": "Met à jour un ticket : sujet, sévérité, type, rattachements, assignation"
+    },
+    {
+      "name": "dolibarr_delete_ticket",
+      "description": "Supprime définitivement un ticket"
+    },
+    {
       "name": "dolibarr_get_revenue_summary",
       "description": "Synthèse du chiffre d'affaires"
     },
@@ -231,6 +265,110 @@
     {
       "name": "dolibarr_list_actions_open",
       "description": "Liste les actions ouvertes (agenda/CR/suivi)"
+    },
+    {
+      "name": "dolibarr_list_bank_accounts",
+      "description": "Liste les comptes bancaires et leurs soldes"
+    },
+    {
+      "name": "dolibarr_list_bank_entries",
+      "description": "Écritures d'un compte sur une période, solde cumulé compris"
+    },
+    {
+      "name": "dolibarr_get_bank_balance",
+      "description": "Solde d'un compte à une date donnée"
+    },
+    {
+      "name": "dolibarr_create_bank_entry",
+      "description": "Crée une opération diverse sur un compte bancaire"
+    },
+    {
+      "name": "dolibarr_set_bank_statement",
+      "description": "Affecte un numéro de relevé à des écritures et les rapproche"
+    },
+    {
+      "name": "dolibarr_toggle_bank_reconciliation",
+      "description": "Active ou désactive le rapprochement d'un compte"
+    },
+    {
+      "name": "dolibarr_list_invoice_payments",
+      "description": "Règlements d'une facture et leur écriture bancaire"
+    },
+    {
+      "name": "dolibarr_add_invoice_payment",
+      "description": "Enregistre un règlement client et l'écriture bancaire"
+    },
+    {
+      "name": "dolibarr_add_supplier_invoice_payment",
+      "description": "Enregistre un règlement fournisseur et l'écriture bancaire"
+    },
+    {
+      "name": "dolibarr_create_supplier_invoice",
+      "description": "Crée une facture fournisseur (brouillon)"
+    },
+    {
+      "name": "dolibarr_create_invoice",
+      "description": "Crée une facture client (brouillon) avec ses lignes"
+    },
+    {
+      "name": "dolibarr_add_invoice_lines",
+      "description": "Ajoute des lignes à une facture brouillon"
+    },
+    {
+      "name": "dolibarr_delete_invoice_line",
+      "description": "Supprime une ligne d'une facture brouillon"
+    },
+    {
+      "name": "dolibarr_create_invoice_from_proposal",
+      "description": "Crée une facture en reprenant une proposition"
+    },
+    {
+      "name": "dolibarr_list_documents",
+      "description": "Liste les pièces jointes d'un objet Dolibarr"
+    },
+    {
+      "name": "dolibarr_upload_document",
+      "description": "Attache un fichier local à un objet Dolibarr"
+    },
+    {
+      "name": "dolibarr_build_document",
+      "description": "(Re)génère le PDF d'un document commercial"
+    },
+    {
+      "name": "dolibarr_list_users",
+      "description": "Liste les utilisateurs Dolibarr et leurs identifiants"
+    },
+    {
+      "name": "dolibarr_list_products",
+      "description": "Liste les produits et services du catalogue"
+    },
+    {
+      "name": "dolibarr_list_payment_types",
+      "description": "Liste les modes de règlement actifs"
+    },
+    {
+      "name": "dolibarr_cash_forecast",
+      "description": "Prévisionnel de trésorerie : soldes, encaissements, décaissements"
+    },
+    {
+      "name": "dolibarr_transfer_between_accounts",
+      "description": "Enregistre un virement interne entre deux comptes"
+    },
+    {
+      "name": "dolibarr_list_bank_statements",
+      "description": "Recense les relevés posés sur un compte"
+    },
+    {
+      "name": "dolibarr_delete_bank_entry",
+      "description": "Supprime une écriture bancaire isolée (non rapprochée, sans règlement lié)"
+    },
+    {
+      "name": "dolibarr_delete_invoice",
+      "description": "Supprime une facture brouillon, client ou fournisseur"
+    },
+    {
+      "name": "dolibarr_validate_supplier_invoice",
+      "description": "Valide une facture fournisseur brouillon"
     }
   ],
   "keywords": [
