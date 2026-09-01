@@ -1,6 +1,6 @@
-# Recette Cowork — connecteur Dolibarr 1.6.2
+# Recette Cowork — connecteur Dolibarr 1.7.0
 
-**Cible : dolibarr-erp-inno3-v2 v1.6.2, 103 outils** (74 du cœur + 29 de
+**Cible : dolibarr-erp-inno3-v2 v1.7.0, 107 outils** (78 du cœur + 29 de
 l'extension inno³).
 
 Cette recette vérifie ce qui a changé depuis la 1.4.1 : banque, règlements,
@@ -26,7 +26,7 @@ en brûlait un.
 ## Prompt à copier
 
 ```
-Tu recettes le connecteur MCP Dolibarr 1.6.2 contre l'instance de production.
+Tu recettes le connecteur MCP Dolibarr 1.7.0 contre l'instance de production.
 Après chaque phase, un tableau : contrôle | attendu | constaté (OK / ÉCART).
 N'enchaîne pas si une phase a produit un ÉCART sur une écriture : arrête-toi
 et montre la réponse brute.
@@ -34,8 +34,9 @@ et montre la réponse brute.
 Contexte : compte bancaire de test <ID> · tiers de test <ID>
 
 ÉTAPE 0 — Contrôle de version, AVANT tout le reste
-Vérifie que `dolibarr_delete_invoice` et `dolibarr_validate_supplier_invoice`
-existent. Si l'un manque, la 1.6.2 n'est pas chargée : ARRÊTE-TOI et dis-le.
+Vérifie que `dolibarr_delete_invoice`, `dolibarr_validate_supplier_invoice` et
+`dolibarr_update_ticket` existent. Si l'un manque, la 1.7.0 n'est pas chargée :
+ARRÊTE-TOI et dis-le.
 
 Règles : aucune écriture hors du compte et du tiers de test. Montants < 10 €.
 Ne valide AUCUNE facture. Tu nettoies en phase F.
@@ -115,6 +116,20 @@ E8. dolibarr_cash_forecast(horizon_days=90) : opening_balance égal à la somme
     des comptes ouverts hors caisse, et les retards connus dans overdue_in.
 E9. dolibarr_add_invoice_payment sur une facture BROUILLON : refus attendu.
 
+PHASE E bis — Tickets (nouveau en 1.7.0) [ÉCRITURE]
+Ces quatre outils viennent d'une session parallèle : je ne les ai pas encore
+exercés contre l'instance. Traite-les comme non éprouvés.
+Eb1. dolibarr_create_ticket sur le tiers de test, sujet « ZZ recette ticket ».
+     Note l'id et la ref.
+Eb2. dolibarr_add_ticket_message : un message de recette. Puis relis le ticket
+     et vérifie que le message y figure.
+Eb3. dolibarr_update_ticket : change le sujet. Relis pour confirmer.
+Eb4. dolibarr_close_ticket. Attendu : le statut passe à fermé, vérifié par
+     relecture — pas seulement annoncé.
+Eb5. dolibarr_delete_ticket. Attendu : succès, puis get_ticket ne le trouve
+     plus. Si l'un de ces cinq contrôles échoue, montre la réponse brute :
+     c'est du code que je n'ai pas relu en profondeur.
+
 PHASE F — Nettoyage
 F1. dolibarr_delete_bank_entry sur les deux écritures de C1/C2. Si elles ont
     été rapprochées en D3, l'outil DOIT refuser : c'est le comportement
@@ -139,7 +154,7 @@ SYNTHÈSE
 
 | Symptôme | Ce que ça veut dire |
 |---|---|
-| `dolibarr_delete_invoice` absent | 1.6.2 non chargée — ne pas recetter |
+| `dolibarr_delete_invoice` ou `dolibarr_update_ticket` absent | 1.7.0 non chargée — ne pas recetter |
 | A1 rend 5 au lieu de 7 | le correctif `min_amount` n'est pas actif |
 | B1 : brut + avoirs ≠ net | régression arithmétique, à remonter telle quelle |
 | B1 juste mais chiffres différents | une facture a été émise depuis : recouper avec A1 |
