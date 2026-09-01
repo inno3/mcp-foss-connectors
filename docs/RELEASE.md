@@ -21,7 +21,7 @@ Everything here runs **offline** — no live server, token, or network is requir
   errors that an already-installed source tree hides — e.g. a malformed
   `[project]` table).
 - [ ] `ruff check .` → "All checks passed!"
-- [ ] `pytest -q` → all green (currently 401 tests on py3.11 / py3.12).
+- [ ] `pytest -q` → all green (currently 561 tests on py3.11 / py3.12).
 
 The CI configs (`.github/workflows/ci.yml`, `.gitlab-ci.yml`) run exactly these
 three steps on Python 3.11 and 3.12.
@@ -50,6 +50,44 @@ three steps on Python 3.11 and 3.12.
   needs them at runtime (see [PACKAGING.md](PACKAGING.md)).
 - [ ] Bundles are **build artifacts** — never commit them (`.gitignore` covers
   `*.mcpb`).
+
+## 4bis. Updating an already-installed extension in place
+
+Replacing an installed extension's files by hand is faster than the install
+dialog and keeps the client's stored configuration — but only if you touch the
+right things. **A local update must change the code, `tools` and `version`, and
+nothing else.**
+
+The rest of the manifest belongs to the *installation*, not to the repo. In
+particular:
+
+- **`user_config` field names are the keys under which the client stored the
+  user's values.** Renaming them — even just changing their case — makes every
+  `${user_config.X}` reference resolve to nothing. If the fields are required,
+  the client will not start the server at all, and it will not say why.
+- `server.mcp_config.command` and `env` may legitimately differ from the repo:
+  a deployment can hardcode a host, or use `python` where the repo says
+  `python3`.
+- `compatibility` can gate loading. The repo declares `python >= 3.11`; an
+  installation that predates it declares nothing, and may run an older
+  interpreter.
+
+Verified the hard way on 01/09/2026: rebuilding the n8n bundle from the repo
+renamed `N8N_BASE_URL` / `N8N_API_KEY` to lowercase. After the next restart the
+server never came back — no error, no log line, simply absent from the client.
+Matrix survived the same treatment only because the field it needed happened to
+already be declared.
+
+The safe merge, before copying anything into place:
+
+```python
+merged = dict(installed_manifest)          # config contract wins
+merged["tools"] = new_manifest["tools"]
+merged["version"] = new_manifest["version"]
+```
+
+Back the installation up first — `manifest.json` and `src/` — and after the
+restart, check that the server actually reappears rather than assuming it did.
 
 ## 5. Dolibarr extension point (generic core stays generic)
 
