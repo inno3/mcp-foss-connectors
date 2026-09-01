@@ -397,6 +397,125 @@ def _format_media(m: dict) -> dict:
     }
 
 
+_BLOCK_MARKER = "<!-- wp:"
+
+
+def _with_warning(payload: dict, warning: str | None) -> dict:
+    """Ajoute la clé `warning` au retour d'une écriture, si garde-fou déclenché."""
+    if warning:
+        payload["warning"] = warning
+    return payload
+
+
+async def _gutenberg_downgrade_warning(
+    server: str, endpoint: str, content: str, subsite: str = ""
+) -> str | None:
+    """Prévient qu'une écriture va faire retomber un contenu à blocs en HTML classique.
+
+    Un article Gutenberg réécrit sans ses délimiteurs `<!-- wp: -->` redevient un
+    contenu classique : WordPress réactive alors wpautop, qui injecte des
+    paragraphes vides. L'API REST accepte l'écriture sans rien signaler, d'où ce
+    contrôle préalable. Renvoie None si le contenu envoyé porte déjà des blocs,
+    si le contenu actuel n'en portait pas, ou si la lecture de contrôle échoue.
+    """
+    if not content or _BLOCK_MARKER in content:
+        return None
+    try:
+        current = await _wp_get(server, endpoint, {"context": "edit"}, subsite=subsite)
+    except Exception:
+        return None
+    if not isinstance(current, dict):
+        return None
+    current_obj = current.get("content", {})
+    current_raw = current_obj.get("raw", "") if isinstance(current_obj, dict) else ""
+    if _BLOCK_MARKER not in current_raw:
+        return None
+    return (
+        "Le contenu actuel était un contenu à blocs Gutenberg, le contenu envoyé ne "
+        "contient aucun délimiteur `<!-- wp:`. La publication est désormais un contenu "
+        "classique : wpautop redevient actif et peut injecter des paragraphes vides. "
+        "Pour conserver la structure, repartir du champ `content` renvoyé par les "
+        "outils de lecture en context=\"edit\", ou encapsuler le HTML dans un bloc "
+        "`<!-- wp:html -->` ... `<!-- /wp:html -->`."
+    )
+
+
+_EMPTY_P_RE = re.compile(r"<p[^>]*>(?:\s|&nbsp;|&#160;|<br\s*/?>)*</p>", re.I)
+_IMG_RE = re.compile(r"<img\b[^>]*>", re.I)
+_ALT_RE = re.compile(r"""\balt\s*=\s*(["'])(.*?)\1""", re.I | re.S)
+_H1_RE = re.compile(r"<h1\b", re.I)
+
+
+def _plain_text(html: str) -> str:
+    """Texte nu d'un fragment HTML, commentaires de blocs et scripts retirés."""
+    text = re.sub(r"(?s)<!--.*?-->", " ", html or "")
+    text = re.sub(r"(?si)<(script|style)\b.*?</\1>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _content_health(raw: str, rendered: str = "") -> dict:
+    """Relève les défauts courants d'un contenu WordPress, sans rien modifier.
+
+    Reprend les contrôles qu'il fallait jusqu'ici mener à la main après une
+    écriture. La présence de blocs se mesure sur la source (`raw`) : elle seule
+    porte les délimiteurs. Tout le reste se mesure sur le rendu, parce que les
+    paragraphes vides de wpautop n'existent pas dans la source, ils
+    apparaissent à l'affichage dès qu'un contenu est retombé en classique.
+    """
+    raw = raw or ""
+    surface = rendered if rendered else raw
+    imgs = _IMG_RE.findall(surface)
+    no_alt = 0
+    for tag in imgs:
+        found = _ALT_RE.search(tag)
+        if found is None or not found.group(2).strip():
+            no_alt += 1
+    text = _plain_text(surface)
+    empty_p = len(_EMPTY_P_RE.findall(surface))
+    blocks = raw.count(_BLOCK_MARKER)
+    headings = len(_H1_RE.findall(surface))
+    em_dashes = text.count("—")
+
+    issues: list[str] = []
+    if empty_p:
+        issues.append(
+            f"{empty_p} paragraphe(s) vide(s) au rendu : signature de wpautop "
+            "sur un contenu ayant perdu ses délimiteurs de blocs"
+        )
+    if not blocks:
+        issues.append(
+            "aucun délimiteur `<!-- wp:` dans la source : contenu classique, "
+            "wpautop reste actif"
+        )
+    if no_alt:
+        issues.append(f"{no_alt} image(s) sans alternative textuelle")
+    if headings > 1:
+        issues.append(f"{headings} titres de niveau 1 : un seul attendu")
+    if em_dashes:
+        issues.append(f"{em_dashes} tiret(s) cadratin(s) dans le corps (souvent proscrits par les chartes de rédaction)")
+
+    return {
+        "blocks": blocks,
+        "empty_paragraphs": empty_p,
+        "images": len(imgs),
+        "images_without_alt": no_alt,
+        "h1": headings,
+        "em_dashes": em_dashes,
+        "chars": len(raw),
+        "words": len(text.split()) if text else 0,
+        "measured_on": "rendered" if rendered else "raw",
+        "issues": issues,
+        "clean": not issues,
+    }
+
+
+def _parse_id_list(value: str) -> list[int] | None:
+    """"12, 34" -> [12, 34]. Renvoie None si la chaîne ne contient aucun entier."""
+    ids = [int(part) for part in re.findall(r"\d+", value or "")]
+    return ids or None
+
+
 def _format_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
@@ -483,6 +602,11 @@ async def wordpress_get_page(
     Gutenberg brut avec les commentaires `<!-- wp:* -->`, indispensable pour
     tout refactor structurel sans perte (wpautop n'est pas appliqué).
     `content_html` reste disponible si on a besoin du rendu HTML final.
+
+    Ne jamais repartir de `content_html` (le `rendered` de l'API) pour une
+    réécriture : WordPress y a déjà supprimé les délimiteurs de blocs, et
+    renvoyer ce contenu transforme la publication en contenu classique, ce qui
+    réactive wpautop et injecte des paragraphes vides.
 
     Args:
         page_id: ID WordPress de la page
@@ -613,16 +737,17 @@ async def wordpress_update_page(
     if not data:
         return "Aucun champ à modifier fourni."
 
+    warning = await _gutenberg_downgrade_warning(server, f"pages/{page_id}", content, subsite)
     try:
         p = await _wp_put(server, f"pages/{page_id}", data, subsite=subsite)
-        return json.dumps({
+        return json.dumps(_with_warning({
             "updated": True,
             "id": p.get("id"),
             "link": p.get("link"),
             "status": p.get("status"),
             "title": p.get("title", {}).get("rendered", ""),
             "modified": p.get("modified", "")[:19] if p.get("modified") else "",
-        }, ensure_ascii=False, separators=(",", ":"))
+        }, warning), ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -728,6 +853,11 @@ async def wordpress_get_post(
     Par défaut (context="edit"), le champ `content` renvoyé est le markup
     Gutenberg brut avec les commentaires `<!-- wp:* -->`.
 
+    Ne jamais repartir de `content_html` (le `rendered` de l'API) pour une
+    réécriture : WordPress y a déjà supprimé les délimiteurs de blocs, et
+    renvoyer ce contenu transforme la publication en contenu classique, ce qui
+    réactive wpautop et injecte des paragraphes vides.
+
     Args:
         post_id: ID de l'article
         server: "prod" ou "test"
@@ -754,6 +884,12 @@ async def wordpress_update_post(
     title: str = "",
     content: str = "",
     status: str = "",
+    slug: str = "",
+    excerpt: str = "",
+    categories: str = "",
+    tags: str = "",
+    featured_media: int = 0,
+    date: str = "",
     acf_fields: str = "",
 ) -> str:
     """Met à jour un article WordPress.
@@ -765,6 +901,12 @@ async def wordpress_update_post(
         title: nouveau titre (ignoré si vide)
         content: nouveau contenu HTML (ignoré si vide)
         status: "publish" | "draft" | "private" (ignoré si vide)
+        slug: nouvel identifiant URL (ignoré si vide)
+        excerpt: nouveau chapeau / extrait (ignoré si vide)
+        categories: IDs de catégories séparés par des virgules (ignoré si vide)
+        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide)
+        featured_media: ID du média mis en avant (ignoré si 0)
+        date: date de publication ISO 8601 (ignoré si vide)
         acf_fields: JSON des champs ACF (ex: '{"champ": "valeur"}')
     """
     data: dict = {}
@@ -774,6 +916,18 @@ async def wordpress_update_post(
         data["content"] = content
     if status:
         data["status"] = status
+    if slug:
+        data["slug"] = slug
+    if excerpt:
+        data["excerpt"] = excerpt
+    if _parse_id_list(categories):
+        data["categories"] = _parse_id_list(categories)
+    if _parse_id_list(tags):
+        data["tags"] = _parse_id_list(tags)
+    if featured_media:
+        data["featured_media"] = featured_media
+    if date:
+        data["date"] = date
     if acf_fields:
         try:
             data["acf"] = json.loads(acf_fields)
@@ -781,14 +935,15 @@ async def wordpress_update_post(
             return f"acf_fields JSON invalide : {e}"
     if not data:
         return "Aucun champ à modifier."
+    warning = await _gutenberg_downgrade_warning(server, f"posts/{post_id}", content, subsite)
     try:
         p = await _wp_put(server, f"posts/{post_id}", data, subsite=subsite)
-        return json.dumps({
+        return json.dumps(_with_warning({
             "updated": True,
             "id": p.get("id"),
             "title": p.get("title", {}).get("rendered", ""),
             "status": p.get("status"),
-        }, ensure_ascii=False, separators=(",", ":"))
+        }, warning), ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -959,6 +1114,12 @@ async def wordpress_update_custom_post(
     title: str = "",
     content: str = "",
     status: str = "",
+    slug: str = "",
+    excerpt: str = "",
+    categories: str = "",
+    tags: str = "",
+    featured_media: int = 0,
+    date: str = "",
     acf_fields: str = "",
 ) -> str:
     """Met à jour un contenu de type personnalisé (CPT) avec ses champs ACF.
@@ -971,6 +1132,12 @@ async def wordpress_update_custom_post(
         title: nouveau titre (ignoré si vide)
         content: nouveau contenu HTML (ignoré si vide)
         status: "publish" | "draft" | "private" (ignoré si vide)
+        slug: nouvel identifiant URL (ignoré si vide)
+        excerpt: nouveau chapeau / extrait (ignoré si vide)
+        categories: IDs de catégories séparés par des virgules (ignoré si vide)
+        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide)
+        featured_media: ID du média mis en avant (ignoré si 0)
+        date: date de publication ISO 8601 (ignoré si vide)
         acf_fields: JSON des champs ACF (ex: '{"nom": "valeur", "date": "2025-01-01"}')
     """
     data: dict = {}
@@ -980,6 +1147,18 @@ async def wordpress_update_custom_post(
         data["content"] = content
     if status:
         data["status"] = status
+    if slug:
+        data["slug"] = slug
+    if excerpt:
+        data["excerpt"] = excerpt
+    if _parse_id_list(categories):
+        data["categories"] = _parse_id_list(categories)
+    if _parse_id_list(tags):
+        data["tags"] = _parse_id_list(tags)
+    if featured_media:
+        data["featured_media"] = featured_media
+    if date:
+        data["date"] = date
     if acf_fields:
         try:
             data["acf"] = json.loads(acf_fields)
@@ -988,15 +1167,16 @@ async def wordpress_update_custom_post(
     if not data:
         return "Aucun champ à modifier."
 
+    warning = await _gutenberg_downgrade_warning(server, f"{post_type}/{post_id}", content, subsite)
     try:
         p = await _wp_put(server, f"{post_type}/{post_id}", data, subsite=subsite)
-        return json.dumps({
+        return json.dumps(_with_warning({
             "updated": True,
             "id": p.get("id"),
             "title": p.get("title", {}).get("rendered", "") if isinstance(p.get("title"), dict) else str(p.get("title", "")),
             "status": p.get("status"),
             "link": p.get("link", ""),
-        }, ensure_ascii=False, separators=(",", ":"))
+        }, warning), ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -1016,6 +1196,11 @@ async def wordpress_get_custom_post(
     refactor structurel sans casser les blocs. `content_html` reste accessible
     si on veut le rendu post-wpautop, et `title_raw` / `excerpt_raw` exposent
     les versions non filtrées.
+
+    Ne jamais repartir de `content_html` (le `rendered` de l'API) pour une
+    réécriture : WordPress y a déjà supprimé les délimiteurs de blocs, et
+    renvoyer ce contenu transforme la publication en contenu classique, ce qui
+    réactive wpautop et injecte des paragraphes vides.
 
     Args:
         post_type: rest_base du type (découvert via wordpress_list_post_types)
@@ -1053,6 +1238,11 @@ async def wordpress_create_custom_post(
     content: str = "",
     status: str = "draft",
     slug: str = "",
+    excerpt: str = "",
+    categories: str = "",
+    tags: str = "",
+    featured_media: int = 0,
+    date: str = "",
     acf_fields: str = "",
     server: str = "prod",
     subsite: str = "",
@@ -1068,6 +1258,11 @@ async def wordpress_create_custom_post(
         content: contenu HTML (optionnel)
         status: "draft" (défaut) | "publish" | "private" | "pending"
         slug: identifiant URL (généré automatiquement si vide)
+        excerpt: chapeau / extrait (ignoré si vide)
+        categories: IDs de catégories séparés par des virgules (ignoré si vide)
+        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide)
+        featured_media: ID du média mis en avant (ignoré si 0)
+        date: date de publication ISO 8601 (ignoré si vide)
         acf_fields: JSON des champs ACF (ex: '{"chapeau": "..."}')
         server: "prod" ou "test"
         subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
@@ -1079,6 +1274,16 @@ async def wordpress_create_custom_post(
     }
     if slug:
         data["slug"] = slug
+    if excerpt:
+        data["excerpt"] = excerpt
+    if _parse_id_list(categories):
+        data["categories"] = _parse_id_list(categories)
+    if _parse_id_list(tags):
+        data["tags"] = _parse_id_list(tags)
+    if featured_media:
+        data["featured_media"] = featured_media
+    if date:
+        data["date"] = date
     if acf_fields:
         try:
             data["acf"] = json.loads(acf_fields)
@@ -1797,6 +2002,401 @@ async def wordpress_check_connection(
         checks["status"] = f"ERREUR: {exc}"
 
     return json.dumps(checks, ensure_ascii=False, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------------------
+# Tools — Révisions (rattrapage après une écriture qui a dégradé un contenu)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def wordpress_list_revisions(
+    post_id: int,
+    post_type: str = "posts",
+    server: str = "prod",
+    subsite: str = "",
+    per_page: int = 10,
+) -> str:
+    """Liste les révisions d'une publication, de la plus récente à la plus ancienne.
+
+    C'est le filet de sécurité après une écriture qui a dégradé un contenu :
+    WordPress conserve l'état antérieur, `wordpress_restore_revision` le remet
+    en place. Attention : certains sites n'utilisent pas ce type natif pour leur
+    blog mais un CPT dédié. Vérifier via wordpress_list_post_types.
+
+    Chaque entrée porte `blocks` (nombre de délimiteurs `<!-- wp:` de la
+    révision) et `empty_paragraphs` : c'est ce qui permet de repérer la
+    dernière révision d'avant un passage en contenu classique.
+
+    Args:
+        post_id: ID de la publication
+        post_type: rest_base du type ("posts", "pages", ou un CPT)
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        per_page: nombre de révisions à remonter (défaut 10)
+    """
+    params = {"context": "edit", "per_page": min(per_page, MAX_PER_PAGE)}
+    try:
+        revs = await _wp_get(
+            server, f"{post_type}/{post_id}/revisions", params, subsite=subsite
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return (
+                f"Aucun historique pour {post_type}/{post_id} : ce type ne déclare "
+                "peut-être pas le support des révisions (add_post_type_support), "
+                "ou l'ID n'existe pas."
+            )
+        return _format_error(exc)
+    except Exception as exc:
+        return _format_error(exc)
+
+    if not isinstance(revs, list):
+        return f"Réponse inattendue : {revs}"
+
+    out = []
+    for r in revs:
+        content_obj = r.get("content", {}) if isinstance(r.get("content"), dict) else {}
+        raw = content_obj.get("raw", "") or content_obj.get("rendered", "")
+        title_obj = r.get("title", {}) if isinstance(r.get("title"), dict) else {}
+        out.append({
+            "id": r.get("id"),
+            "date": r.get("modified", "") or r.get("date", ""),
+            "author": r.get("author"),
+            "title": title_obj.get("raw", "") or title_obj.get("rendered", ""),
+            "chars": len(raw),
+            "blocks": raw.count(_BLOCK_MARKER),
+            "empty_paragraphs": len(_EMPTY_P_RE.findall(raw)),
+        })
+    return json.dumps({
+        "server": server,
+        "post_type": post_type,
+        "post_id": post_id,
+        "count": len(out),
+        "revisions": out,
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.tool()
+async def wordpress_get_revision(
+    post_id: int,
+    revision_id: int,
+    post_type: str = "posts",
+    server: str = "prod",
+    subsite: str = "",
+) -> str:
+    """Lit une révision précise, contenu source compris.
+
+    Le champ `content` est la source de la révision (délimiteurs de blocs
+    compris) : c'est ce qu'il faut comparer à l'état courant avant de décider
+    d'une restauration.
+
+    Args:
+        post_id: ID de la publication parente
+        revision_id: ID de la révision (via wordpress_list_revisions)
+        post_type: rest_base du type ("posts", "pages", ou un CPT)
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+    """
+    try:
+        r = await _wp_get(
+            server,
+            f"{post_type}/{post_id}/revisions/{revision_id}",
+            {"context": "edit"},
+            subsite=subsite,
+        )
+    except Exception as exc:
+        return _format_error(exc)
+
+    if not isinstance(r, dict):
+        return f"Réponse inattendue : {r}"
+    result: dict = {
+        "id": r.get("id"),
+        "parent": r.get("parent"),
+        "date": r.get("modified", "") or r.get("date", ""),
+        "author": r.get("author"),
+    }
+    result.update(_content_fields(r, "edit"))
+    result["health"] = _content_health(result.get("content", ""))
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.tool()
+async def wordpress_restore_revision(
+    post_id: int,
+    revision_id: int,
+    post_type: str = "posts",
+    server: str = "prod",
+    subsite: str = "",
+    restore_title: bool = False,
+) -> str:
+    """Remet une publication dans l'état d'une de ses révisions.
+
+    L'API REST n'expose pas de restauration : ce tool relit la révision en
+    context=edit puis réécrit sa source dans la publication. Le contenu courant
+    devient lui-même une révision, donc l'opération reste réversible par le même
+    chemin. Le retour indique ce qui a été remplacé (`replaced_chars`) et l'état
+    du contenu restauré.
+
+    Args:
+        post_id: ID de la publication à restaurer
+        revision_id: ID de la révision à remettre en place
+        post_type: rest_base du type ("posts", "pages", ou un CPT)
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        restore_title: True = restaurer aussi le titre et le chapeau
+    """
+    try:
+        rev = await _wp_get(
+            server,
+            f"{post_type}/{post_id}/revisions/{revision_id}",
+            {"context": "edit"},
+            subsite=subsite,
+        )
+    except Exception as exc:
+        return _format_error(exc)
+    if not isinstance(rev, dict):
+        return f"Réponse inattendue : {rev}"
+
+    fields = _content_fields(rev, "edit")
+    content = fields.get("content", "")
+    if not content:
+        return f"La révision {revision_id} n'a pas de contenu source exploitable."
+
+    data: dict = {"content": content}
+    if restore_title:
+        if fields.get("title_raw") or fields.get("title"):
+            data["title"] = fields.get("title_raw") or fields.get("title")
+        if fields.get("excerpt_raw"):
+            data["excerpt"] = fields["excerpt_raw"]
+
+    replaced_chars = None
+    try:
+        current = await _wp_get(
+            server, f"{post_type}/{post_id}", {"context": "edit"}, subsite=subsite
+        )
+        if isinstance(current, dict) and isinstance(current.get("content"), dict):
+            replaced_chars = len(current["content"].get("raw", ""))
+    except Exception:
+        pass
+
+    warning = await _gutenberg_downgrade_warning(
+        server, f"{post_type}/{post_id}", content, subsite
+    )
+    try:
+        p = await _wp_put(server, f"{post_type}/{post_id}", data, subsite=subsite)
+        return json.dumps(_with_warning({
+            "restored": True,
+            "id": p.get("id"),
+            "from_revision": revision_id,
+            "link": p.get("link", ""),
+            "status": p.get("status"),
+            "restored_chars": len(content),
+            "replaced_chars": replaced_chars,
+            "health": _content_health(content),
+        }, warning), ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Contrôle de contenu
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def wordpress_check_content(
+    post_id: int,
+    post_type: str = "posts",
+    server: str = "prod",
+    subsite: str = "",
+) -> str:
+    """Contrôle l'état d'une publication sans la modifier.
+
+    Relit la source et le rendu, puis relève les défauts qu'il fallait jusqu'ici
+    vérifier à la main après une écriture : paragraphes vides injectés par
+    wpautop, perte des délimiteurs de blocs, images sans alternative textuelle,
+    titres de niveau 1 en double, tirets cadratins. `clean: true` signifie
+    qu'aucun de ces contrôles ne remonte quoi que ce soit.
+
+    À passer systématiquement après une écriture de contenu.
+
+    Args:
+        post_id: ID de la publication
+        post_type: rest_base du type ("posts", "pages", ou un CPT)
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+    """
+    try:
+        p = await _wp_get(
+            server, f"{post_type}/{post_id}", {"context": "edit"}, subsite=subsite
+        )
+    except Exception as exc:
+        return _format_error(exc)
+    if not isinstance(p, dict):
+        return f"Réponse inattendue : {p}"
+
+    content_obj = p.get("content", {}) if isinstance(p.get("content"), dict) else {}
+    raw = content_obj.get("raw", "")
+    rendered = content_obj.get("rendered", "")
+    title_obj = p.get("title", {}) if isinstance(p.get("title"), dict) else {}
+    return json.dumps({
+        "id": p.get("id"),
+        "title": title_obj.get("rendered", ""),
+        "link": p.get("link", ""),
+        "status": p.get("status", ""),
+        "modified": p.get("modified", ""),
+        **_content_health(raw if raw else rendered, rendered),
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------------------
+# Tools — Articles natifs : création et suppression
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def wordpress_create_post(
+    title: str,
+    content: str = "",
+    server: str = "prod",
+    subsite: str = "",
+    status: str = "draft",
+    slug: str = "",
+    excerpt: str = "",
+    categories: str = "",
+    tags: str = "",
+    featured_media: int = 0,
+    date: str = "",
+    acf_fields: str = "",
+) -> str:
+    """Crée un article natif WordPress (rest_base="posts").
+
+    Attention : certains sites n'utilisent pas ce type natif pour leur
+    blog mais un CPT dédié. Vérifier via wordpress_list_post_types.
+
+    Args:
+        title: titre de l'article
+        content: contenu (markup Gutenberg de préférence)
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        status: "draft" (défaut) | "publish" | "private" | "pending"
+        slug: identifiant URL (généré automatiquement si vide)
+        excerpt: chapeau / extrait
+        categories: IDs de catégories séparés par des virgules (ex: "3,7")
+        tags: IDs d'étiquettes séparés par des virgules
+        featured_media: ID du média mis en avant (0 = aucun)
+        date: date de publication ISO 8601 (ex: "2026-09-01T09:00:00")
+        acf_fields: JSON des champs ACF
+    """
+    data: dict = {"title": title, "content": content, "status": status}
+    if slug:
+        data["slug"] = slug
+    if excerpt:
+        data["excerpt"] = excerpt
+    if _parse_id_list(categories):
+        data["categories"] = _parse_id_list(categories)
+    if _parse_id_list(tags):
+        data["tags"] = _parse_id_list(tags)
+    if featured_media:
+        data["featured_media"] = featured_media
+    if date:
+        data["date"] = date
+    if acf_fields:
+        try:
+            data["acf"] = json.loads(acf_fields)
+        except json.JSONDecodeError as e:
+            return f"acf_fields JSON invalide : {e}"
+    try:
+        p = await _wp_post(server, "posts", data, subsite=subsite)
+        return json.dumps({
+            "created": True,
+            "id": p.get("id"),
+            "link": p.get("link"),
+            "status": p.get("status"),
+            "title": p.get("title", {}).get("rendered", ""),
+        }, ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def wordpress_delete_post(
+    post_id: int,
+    server: str = "prod",
+    subsite: str = "",
+    force: bool = False,
+) -> str:
+    """Met un article natif à la corbeille, ou le supprime définitivement.
+
+    Par défaut l'article part à la corbeille : il reste restaurable depuis
+    l'administration. `force=True` est irréversible et perd aussi les révisions.
+
+    Args:
+        post_id: ID de l'article
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        force: True = suppression définitive, False = corbeille (défaut)
+    """
+    params = {"force": "true" if force else "false"}
+    try:
+        result = await _wp_delete(server, f"posts/{post_id}", params, subsite=subsite)
+        return json.dumps({
+            "deleted": True,
+            "force": force,
+            "id": post_id,
+            "detail": result.get("previous", {}).get("title", {}).get("rendered", "") if isinstance(result, dict) else str(result)[:100],
+        }, ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        return _format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Étiquettes
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def wordpress_list_tags(
+    server: str = "prod",
+    subsite: str = "",
+    search: str = "",
+    per_page: int = 100,
+    hide_empty: bool = False,
+) -> str:
+    """Liste les étiquettes (tags) WordPress.
+
+    Pendant de wordpress_list_categories : sans lui, impossible de résoudre un
+    nom d'étiquette en ID avant une écriture.
+
+    Args:
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        search: filtre texte sur le nom
+        per_page: limite
+        hide_empty: True = masquer les étiquettes sans publication
+    """
+    params: dict = {
+        "per_page": min(per_page, MAX_PER_PAGE),
+        "hide_empty": "true" if hide_empty else "false",
+        "_fields": "id,name,slug,count",
+    }
+    if search:
+        params["search"] = search
+    try:
+        tags = await _wp_get(server, "tags", params, subsite=subsite)
+        if not isinstance(tags, list):
+            return f"Réponse inattendue : {tags}"
+        return json.dumps({
+            "server": server,
+            "count": len(tags),
+            "tags": [
+                {"id": t.get("id"), "name": t.get("name", ""), "slug": t.get("slug", ""), "count": t.get("count", 0)}
+                for t in tags
+            ],
+        }, ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        return _format_error(exc)
 
 
 # ---------------------------------------------------------------------------

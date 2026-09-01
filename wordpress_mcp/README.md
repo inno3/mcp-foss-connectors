@@ -19,7 +19,7 @@ environment variables — no host, login or secret is baked into the code.
 | `WP_TEST_SERVER_AUTH_PASS` | no | HTTP Basic-Auth password for the staging proxy. |
 | `WP_TEST_VERIFY_SSL` | no | Set to `0` to skip TLS verification on the test site (self-signed certs). Default verifies. |
 
-## Tools (26)
+## Tools (33)
 
 - `wordpress_list_pages` — Liste les pages WordPress
 - `wordpress_get_page` — Lit le contenu complet d'une page WordPress (titre, HTML, ACF, métadonnées)
@@ -29,6 +29,8 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_list_posts` — Liste les "Posts" natifs WordPress (rest_base="posts")
 - `wordpress_get_post` — Lit le contenu complet d'un article WordPress
 - `wordpress_update_post` — Met à jour un article WordPress
+- `wordpress_create_post` — Crée un article natif WordPress (rest_base="posts")
+- `wordpress_delete_post` — Met un article natif à la corbeille, ou le supprime définitivement
 - `wordpress_search` — Recherche globale dans WordPress (pages, articles, types custom)
 - `wordpress_list_post_types` — Liste tous les types de contenu disponibles sur le site (pages, posts, CPT...)
 - `wordpress_list_custom_posts` — Liste les publications d'un type de contenu personnalisé (CPT)
@@ -36,6 +38,10 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_get_custom_post` — Récupère un contenu de type personnalisé (CPT) avec ses champs ACF complets
 - `wordpress_create_custom_post` — Crée une nouvelle publication d'un type personnalisé (CPT)
 - `wordpress_delete_custom_post` — Supprime ou met à la corbeille une publication d'un type personnalisé (CPT)
+- `wordpress_list_revisions` — Liste les révisions d'une publication, de la plus récente à la plus ancienne
+- `wordpress_get_revision` — Lit une révision précise, contenu source compris
+- `wordpress_restore_revision` — Remet une publication dans l'état d'une de ses révisions
+- `wordpress_check_content` — Contrôle l'état d'une publication sans la modifier
 - `wordpress_list_media` — Liste la médiathèque WordPress
 - `wordpress_upload_media` — Uploade un fichier dans la médiathèque WordPress
 - `wordpress_list_acf_field_groups` — Liste les groupes de champs ACF disponibles sur le site
@@ -45,6 +51,7 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_delete_redirection` — Supprime une redirection par son ID
 - `wordpress_site_info` — Informations générales sur le site WordPress (nom, URL, version, multisite...)
 - `wordpress_list_categories` — Liste les catégories WordPress
+- `wordpress_list_tags` — Liste les étiquettes (tags) WordPress
 - `wordpress_list_users` — Liste les utilisateurs WordPress
 - `wordpress_check_connection` — Teste la connexion et l'authentification à un serveur WordPress
 
@@ -52,6 +59,18 @@ environment variables — no host, login or secret is baked into the code.
 
 - Reads default to `context=edit` so the **raw Gutenberg markup**
   (`<!-- wp:* -->`) is preserved; pass `context=view` for rendered HTML.
+  Never rewrite a post from `content_html` (the API's `rendered`): WordPress
+  has already stripped the block delimiters there, so writing it back turns
+  the post into classic content, which re-enables `wpautop` and injects empty
+  paragraphs. The `wordpress_update_*` tools detect that case and return a
+  `warning` field alongside the update.
+- Revisions are the recovery path: `wordpress_list_revisions` flags which
+  revisions still carried block delimiters, `wordpress_restore_revision`
+  writes one back. The replaced content itself becomes a revision, so the
+  operation is reversible the same way.
+- `wordpress_check_content` is a read-only lint (empty paragraphs, missing
+  block delimiters, images without alt text, duplicate `h1`). Run it after
+  any content write.
 - Multisite: tools accept a `subsite` argument (e.g. `fr`/`en`) where relevant.
 - ACF and the *Redirection* plugin are optional; their tools degrade gracefully
   when the plugin is absent.

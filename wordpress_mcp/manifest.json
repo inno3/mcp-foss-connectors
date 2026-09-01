@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "wordpress-mcp",
   "display_name": "WordPress",
-  "version": "1.3.0",
-  "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, médias, redirections. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
+  "version": "1.4.0",
+  "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, médias, redirections, révisions et contrôle de contenu. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -140,7 +140,7 @@
     },
     {
       "name": "wordpress_update_page",
-      "description": "Met à jour une page"
+      "description": "Met à jour une page (alerte si les blocs Gutenberg disparaissent)"
     },
     {
       "name": "wordpress_delete_page",
@@ -156,7 +156,15 @@
     },
     {
       "name": "wordpress_update_post",
-      "description": "Met à jour un article"
+      "description": "Met à jour un article (alerte si les blocs Gutenberg disparaissent)"
+    },
+    {
+      "name": "wordpress_create_post",
+      "description": "Crée un article natif"
+    },
+    {
+      "name": "wordpress_delete_post",
+      "description": "Met un article natif à la corbeille (ou le supprime)"
     },
     {
       "name": "wordpress_search",
@@ -180,11 +188,27 @@
     },
     {
       "name": "wordpress_update_custom_post",
-      "description": "Met à jour un CPT avec ACF"
+      "description": "Met à jour un CPT avec ACF (alerte si les blocs Gutenberg disparaissent)"
     },
     {
       "name": "wordpress_delete_custom_post",
       "description": "Supprime ou met à la corbeille un CPT"
+    },
+    {
+      "name": "wordpress_list_revisions",
+      "description": "Liste les révisions (repère la perte des blocs Gutenberg)"
+    },
+    {
+      "name": "wordpress_get_revision",
+      "description": "Lit une révision, source comprise"
+    },
+    {
+      "name": "wordpress_restore_revision",
+      "description": "Restaure une publication depuis une de ses révisions"
+    },
+    {
+      "name": "wordpress_check_content",
+      "description": "Contrôle un contenu publié : paragraphes vides, blocs, alt, cadratins"
     },
     {
       "name": "wordpress_list_media",
@@ -217,6 +241,10 @@
     {
       "name": "wordpress_list_categories",
       "description": "Liste les catégories"
+    },
+    {
+      "name": "wordpress_list_tags",
+      "description": "Liste les étiquettes"
     },
     {
       "name": "wordpress_list_users",

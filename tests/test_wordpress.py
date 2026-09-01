@@ -396,3 +396,412 @@ class TestFetchActivePlugins:
             plugins, note = await _fetch_active_plugins("prod")
         assert plugins is None
         assert "activate_plugins" in note
+
+
+# ---------------------------------------------------------------------------
+# Garde-fou Gutenberg à l'écriture
+#
+# Réécrire un article à blocs sans ses délimiteurs `<!-- wp:` le fait retomber
+# en contenu classique : wpautop redevient actif et injecte des paragraphes
+# vides. L'API REST accepte l'écriture sans rien signaler : c'est ce qui rend
+# le garde-fou nécessaire côté connecteur.
+# ---------------------------------------------------------------------------
+
+CLASSIC_HTML = "<h2>Titre</h2>\n<p>Un paragraphe sans bloc.</p>"
+
+
+def _current_content(raw: str) -> dict:
+    return {"id": 1234, "content": {"raw": raw, "rendered": raw}}
+
+
+@pytest.mark.asyncio
+class TestGutenbergDowngradeWarning:
+    async def test_alerte_quand_les_blocs_disparaissent(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(GUTENBERG_RAW),
+        ):
+            warning = await wp._gutenberg_downgrade_warning(
+                "prod", "posts/1234", CLASSIC_HTML
+            )
+        assert warning is not None
+        assert "wpautop" in warning
+
+    async def test_silencieux_si_le_contenu_envoye_porte_des_blocs(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock
+        ) as mock_get:
+            warning = await wp._gutenberg_downgrade_warning(
+                "prod", "posts/1234", GUTENBERG_RAW
+            )
+        assert warning is None
+        mock_get.assert_not_called()
+
+    async def test_silencieux_si_le_contenu_actuel_est_deja_classique(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(CLASSIC_HTML),
+        ):
+            warning = await wp._gutenberg_downgrade_warning(
+                "prod", "posts/1234", CLASSIC_HTML
+            )
+        assert warning is None
+
+    async def test_silencieux_si_la_lecture_de_controle_echoue(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("403"),
+        ):
+            warning = await wp._gutenberg_downgrade_warning(
+                "prod", "posts/1234", CLASSIC_HTML
+            )
+        assert warning is None
+
+    async def test_update_post_remonte_l_alerte(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(GUTENBERG_RAW),
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 1234, "title": {"rendered": "T"}, "status": "publish"},
+        ):
+            data = json.loads(
+                await wp.wordpress_update_post(
+                    post_id=1234, server="prod", content=CLASSIC_HTML
+                )
+            )
+        assert data["updated"] is True
+        assert "wpautop" in data["warning"]
+
+    async def test_update_post_sans_alerte_quand_les_blocs_sont_conserves(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(GUTENBERG_RAW),
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 1234, "title": {"rendered": "T"}, "status": "publish"},
+        ):
+            data = json.loads(
+                await wp.wordpress_update_post(
+                    post_id=1234, server="prod", content=GUTENBERG_RAW
+                )
+            )
+        assert "warning" not in data
+
+    async def test_update_post_sans_contenu_ne_lit_rien(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock
+        ) as mock_get, patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 1234, "title": {"rendered": "T"}, "status": "draft"},
+        ):
+            data = json.loads(
+                await wp.wordpress_update_post(
+                    post_id=1234, server="prod", status="draft"
+                )
+            )
+        mock_get.assert_not_called()
+        assert "warning" not in data
+
+    async def test_update_custom_post_remonte_l_alerte(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(GUTENBERG_RAW),
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 42, "title": {"rendered": "T"}, "status": "publish"},
+        ):
+            data = json.loads(
+                await wp.wordpress_update_custom_post(
+                    post_type="blog", post_id=42, server="prod", content=CLASSIC_HTML
+                )
+            )
+        assert "wpautop" in data["warning"]
+
+    async def test_update_page_remonte_l_alerte(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_current_content(GUTENBERG_RAW),
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 7, "title": {"rendered": "T"}, "status": "publish"},
+        ):
+            data = json.loads(
+                await wp.wordpress_update_page(
+                    page_id=7, server="prod", content=CLASSIC_HTML
+                )
+            )
+        assert "wpautop" in data["warning"]
+
+
+# ---------------------------------------------------------------------------
+# Contrôle de contenu, révisions, articles natifs, étiquettes
+# ---------------------------------------------------------------------------
+
+WPAUTOP_RENDERED = (
+    "<p></p>\n<h2>Titre</h2>\n<p>&nbsp;</p>\n"
+    "<p>Un paragraphe.</p>\n<p> </p>\n"
+    "<img src=\"a.png\" alt=\"une image\">\n<img src=\"b.png\">"
+)
+
+
+class TestContentHealth:
+    def test_repere_les_paragraphes_vides_du_rendu(self) -> None:
+        health = wp._content_health(CLASSIC_HTML, WPAUTOP_RENDERED)
+        assert health["empty_paragraphs"] == 3
+        assert health["measured_on"] == "rendered"
+        assert health["clean"] is False
+
+    def test_compte_les_blocs_sur_la_source_pas_sur_le_rendu(self) -> None:
+        # Le rendu ne porte jamais de délimiteurs : ils doivent venir du raw.
+        health = wp._content_health(GUTENBERG_RAW, GUTENBERG_RENDERED)
+        assert health["blocks"] > 0
+        assert health["empty_paragraphs"] == 0
+
+    def test_images_sans_alternative(self) -> None:
+        health = wp._content_health("", WPAUTOP_RENDERED)
+        assert health["images"] == 2
+        assert health["images_without_alt"] == 1
+
+    def test_alt_vide_compte_comme_manquant(self) -> None:
+        health = wp._content_health('<img src="a.png" alt="  ">')
+        assert health["images_without_alt"] == 1
+
+    def test_h1_en_double(self) -> None:
+        health = wp._content_health("<h1>A</h1><h1>B</h1>")
+        assert health["h1"] == 2
+        assert any("niveau 1" in i for i in health["issues"])
+
+    def test_tirets_cadratins_dans_le_corps(self) -> None:
+        health = wp._content_health("<!-- wp:paragraph --><p>un texte — coupé</p>")
+        assert health["em_dashes"] == 1
+
+    def test_les_delimiteurs_ne_comptent_pas_comme_du_texte(self) -> None:
+        health = wp._content_health(GUTENBERG_RAW)
+        assert "wp:columns" not in " ".join(health["issues"])
+        assert health["words"] > 0
+
+    def test_contenu_sain(self) -> None:
+        health = wp._content_health(
+            "<!-- wp:paragraph -->\n<p>Bonjour.</p>\n<!-- /wp:paragraph -->"
+        )
+        assert health["clean"] is True
+        assert health["issues"] == []
+
+
+class TestParseIdList:
+    def test_liste_simple(self) -> None:
+        assert wp._parse_id_list("3, 7,12") == [3, 7, 12]
+
+    def test_vide_donne_none(self) -> None:
+        assert wp._parse_id_list("") is None
+        assert wp._parse_id_list("   ") is None
+
+
+def _revision(rev_id: int, raw: str) -> dict:
+    return {
+        "id": rev_id,
+        "parent": 1234,
+        "author": 4,
+        "modified": "2026-08-31T13:00:00",
+        "title": {"raw": "Titre", "rendered": "Titre"},
+        "content": {"raw": raw, "rendered": raw},
+        "excerpt": {"raw": "", "rendered": ""},
+    }
+
+
+@pytest.mark.asyncio
+class TestRevisions:
+    async def test_liste_signale_la_perte_des_blocs(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=[_revision(2, CLASSIC_HTML), _revision(1, GUTENBERG_RAW)],
+        ) as mock_get:
+            data = json.loads(
+                await wp.wordpress_list_revisions(post_id=1234, post_type="blog")
+            )
+        args, _ = mock_get.call_args
+        assert args[1] == "blog/1234/revisions"
+        assert args[2]["context"] == "edit"
+        assert data["revisions"][0]["blocks"] == 0
+        assert data["revisions"][1]["blocks"] > 0
+
+    async def test_404_explique_le_support_des_revisions(self) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://example.test/x")
+        exc = httpx.HTTPStatusError(
+            "not found", request=request, response=httpx.Response(404, request=request)
+        )
+        with patch("wordpress_mcp.server._wp_get", new_callable=AsyncMock, side_effect=exc):
+            out = await wp.wordpress_list_revisions(post_id=1234, post_type="blog")
+        assert "révisions" in out
+
+    async def test_get_revision_expose_la_source_et_son_etat(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_revision(7, GUTENBERG_RAW),
+        ):
+            data = json.loads(
+                await wp.wordpress_get_revision(
+                    post_id=1234, revision_id=7, post_type="blog"
+                )
+            )
+        assert data["content"] == GUTENBERG_RAW
+        assert data["health"]["blocks"] > 0
+
+    async def test_restore_reecrit_la_source_de_la_revision(self) -> None:
+        async def fake_get(server, endpoint, params=None, subsite=""):
+            if endpoint.endswith("/revisions/7"):
+                return _revision(7, GUTENBERG_RAW)
+            return {"id": 1234, "content": {"raw": CLASSIC_HTML}}
+
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock, side_effect=fake_get
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 1234, "status": "publish", "link": "https://x/y"},
+        ) as mock_put:
+            data = json.loads(
+                await wp.wordpress_restore_revision(
+                    post_id=1234, revision_id=7, post_type="blog"
+                )
+            )
+        sent = mock_put.call_args[0][2]
+        assert sent["content"] == GUTENBERG_RAW
+        assert "title" not in sent  # restore_title=False par défaut
+        assert data["restored"] is True
+        assert data["restored_chars"] == len(GUTENBERG_RAW)
+        assert data["replaced_chars"] == len(CLASSIC_HTML)
+        assert "warning" not in data
+
+    async def test_restore_title_renvoie_aussi_le_titre(self) -> None:
+        async def fake_get(server, endpoint, params=None, subsite=""):
+            if endpoint.endswith("/revisions/7"):
+                return _revision(7, GUTENBERG_RAW)
+            return {"id": 1234, "content": {"raw": ""}}
+
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock, side_effect=fake_get
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 1234, "status": "publish"},
+        ) as mock_put:
+            await wp.wordpress_restore_revision(
+                post_id=1234, revision_id=7, post_type="blog", restore_title=True
+            )
+        assert mock_put.call_args[0][2]["title"] == "Titre"
+
+    async def test_restore_d_une_revision_vide_est_refuse(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=_revision(7, ""),
+        ), patch("wordpress_mcp.server._wp_put", new_callable=AsyncMock) as mock_put:
+            out = await wp.wordpress_restore_revision(post_id=1234, revision_id=7)
+        assert "pas de contenu" in out
+        mock_put.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestCheckContent:
+    async def test_mesure_les_paragraphes_vides_sur_le_rendu(self) -> None:
+        payload = {
+            "id": 1234,
+            "title": {"rendered": "SBOM et CRA"},
+            "status": "publish",
+            "link": "https://x/y",
+            "modified": "2026-08-31T13:00:00",
+            "content": {"raw": CLASSIC_HTML, "rendered": WPAUTOP_RENDERED},
+        }
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock, return_value=payload
+        ) as mock_get:
+            data = json.loads(
+                await wp.wordpress_check_content(post_id=1234, post_type="blog")
+            )
+        assert mock_get.call_args[0][2] == {"context": "edit"}
+        assert data["id"] == 1234
+        assert data["empty_paragraphs"] == 3
+        assert data["blocks"] == 0
+        assert data["clean"] is False
+
+
+@pytest.mark.asyncio
+class TestCreateAndDeletePost:
+    async def test_create_post_convertit_categories_et_tags(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_post",
+            new_callable=AsyncMock,
+            return_value={"id": 5, "title": {"rendered": "T"}, "status": "draft"},
+        ) as mock_post:
+            data = json.loads(
+                await wp.wordpress_create_post(
+                    title="T", categories="3, 7", tags="12", featured_media=99
+                )
+            )
+        sent = mock_post.call_args[0][2]
+        assert sent["categories"] == [3, 7]
+        assert sent["tags"] == [12]
+        assert sent["featured_media"] == 99
+        assert data["created"] is True
+
+    async def test_delete_post_va_en_corbeille_par_defaut(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_delete",
+            new_callable=AsyncMock,
+            return_value={"previous": {"title": {"rendered": "T"}}},
+        ) as mock_del:
+            data = json.loads(await wp.wordpress_delete_post(post_id=5))
+        assert mock_del.call_args[0][2] == {"force": "false"}
+        assert data["force"] is False
+
+
+@pytest.mark.asyncio
+class TestUpdatePostNouveauxChamps:
+    async def test_envoie_slug_excerpt_et_taxonomies(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new_callable=AsyncMock
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value={"id": 5, "title": {"rendered": "T"}, "status": "publish"},
+        ) as mock_put:
+            await wp.wordpress_update_post(
+                post_id=5, slug="mon-slug", excerpt="chapeau", categories="4", tags="8,9"
+            )
+        sent = mock_put.call_args[0][2]
+        assert sent["slug"] == "mon-slug"
+        assert sent["excerpt"] == "chapeau"
+        assert sent["categories"] == [4]
+        assert sent["tags"] == [8, 9]
+
+
+@pytest.mark.asyncio
+class TestListTags:
+    async def test_liste_les_etiquettes(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            return_value=[{"id": 8, "name": "SBOM", "slug": "sbom", "count": 3}],
+        ) as mock_get:
+            data = json.loads(await wp.wordpress_list_tags(search="sbom"))
+        assert mock_get.call_args[0][1] == "tags"
+        assert mock_get.call_args[0][2]["search"] == "sbom"
+        assert data["tags"][0]["name"] == "SBOM"
