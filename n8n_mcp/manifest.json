@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "n8n-mcp",
   "display_name": "n8n",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Connecteur n8n : workflows, exécutions, nœuds (Code / HTTP), credentials, variables globales. API publique REST n8n.",
   "author": {
     "name": "inno³",
@@ -107,6 +107,26 @@
     {
       "name": "n8n_create_variable",
       "description": "Crée une variable globale"
+    },
+    {
+      "name": "n8n_list_failures",
+      "description": "Exécutions en échec, tous workflows confondus, avec leur cause"
+    },
+    {
+      "name": "n8n_workflows_health",
+      "description": "État de santé des workflows : échecs consécutifs et cause"
+    },
+    {
+      "name": "n8n_retry_execution",
+      "description": "Rejoue une exécution en échec"
+    },
+    {
+      "name": "n8n_delete_execution",
+      "description": "Supprime une exécution de l'historique"
+    },
+    {
+      "name": "n8n_list_tags",
+      "description": "Liste les étiquettes de l'instance"
     }
   ],
   "keywords": [

@@ -325,123 +325,155 @@ async def n8n_deactivate_workflow(workflow_id: str) -> str:
 
 @mcp.tool()
 async def n8n_get_executions(
-    workflow_id: str,
+    workflow_id: str = "",
     limit: int = 10,
     status: str = "",
+    started_after: str = "",
+    started_before: str = "",
+    with_errors: bool = True,
 ) -> str:
-    """Récupère les exécutions récentes d'un workflow (pour voir les erreurs).
+    """Exécutions récentes, d'un workflow ou de toute l'instance.
 
     Paramètres :
-    - workflow_id : identifiant du workflow
-    - limit : nombre d'exécutions à retourner (défaut 10, max 50)
-    - status : filtrer par statut ('error', 'success', 'waiting', '' = tous)
+    - workflow_id : identifiant du workflow. VIDE = tous les workflows.
+    - limit : nombre d'exécutions (défaut 10, plafond 250)
+    - status : 'error', 'crashed', 'success', 'waiting', 'running', 'canceled',
+      ou vide pour tous
+    - started_after / started_before : bornes ISO 8601
+      (« 2026-08-30T00:00:00Z »), optionnelles
+    - with_errors : résoudre la cause des exécutions en échec (défaut : oui)
 
-    Retourne : id, startedAt, stoppedAt, finished, status, mode, et message d'erreur si présent.
+    Deux corrections par rapport à la version précédente. `workflow_id` n'est
+    plus obligatoire : on peut enfin demander « qu'est-ce qui a tourné », sans
+    savoir où chercher. Et le message d'erreur est réellement renseigné :
+    `GET /executions` ne renvoie pas le champ `data`, si bien que l'extraction
+    qui y était tentée ne trouvait jamais rien et laissait `error` absent malgré
+    la promesse de la docstring. La cause est donc relue par exécution en
+    échec — un appel chacune, plafonné, le dépassement étant signalé.
+
+    Pour une revue d'incidents, préférer n8n_list_failures, qui regroupe par
+    workflow et résout les noms.
     """
     try:
-        params: dict[str, Any] = {
-            "workflowId": workflow_id,
-            "limit": min(limit, 50),
-        }
+        params: dict[str, Any] = {"limit": max(1, min(int(limit), EXEC_MAX_LIMIT))}
+        if workflow_id:
+            params["workflowId"] = workflow_id
         if status:
             params["status"] = status
+        if started_after:
+            params["startedAfter"] = started_after
+        if started_before:
+            params["startedBefore"] = started_before
 
-        data = await api_get("executions", params=params)
-        executions = data.get("data", data) if isinstance(data, dict) else data
+        rows, note = await _fetch_executions(params)
+        results = [_exec_summary(r) for r in rows]
+        looked_up = 0
+        if with_errors:
+            results, looked_up = await _attach_errors(results)
 
-        results = []
-        for ex in executions:
-            entry: dict[str, Any] = {
-                "id": ex.get("id"),
-                "startedAt": ex.get("startedAt"),
-                "stoppedAt": ex.get("stoppedAt"),
-                "finished": ex.get("finished"),
-                "status": ex.get("status"),
-                "mode": ex.get("mode"),
-            }
-            # Extraire le message d'erreur si présent
-            error = ex.get("data", {}) or {}
-            if isinstance(error, dict):
-                result_data = error.get("resultData", {}) or {}
-                run_data = result_data.get("runData", {}) or {}
-                for node_name, node_runs in run_data.items():
-                    if isinstance(node_runs, list):
-                        for run in node_runs:
-                            err = run.get("error") if isinstance(run, dict) else None
-                            if err:
-                                entry["error"] = {
-                                    "node": node_name,
-                                    "message": err.get("message", str(err))[:300],
-                                }
-                                break
-                    if "error" in entry:
-                        break
-            results.append(entry)
-
-        return _dumps(results)
+        response: dict[str, Any] = {
+            "count": len(results),
+            "workflow_id": workflow_id or None,
+            "status_filter": status or None,
+            "errors_resolved": looked_up,
+            "executions": results,
+        }
+        if note:
+            response["note"] = note
+        return _dumps({k: v for k, v in response.items() if v is not None})
     except Exception as exc:
         return _format_error(exc)
 
 
 @mcp.tool()
-async def n8n_get_execution_detail(execution_id: str) -> str:
-    """Récupère le détail complet d'une exécution n8n pour déboguer les erreurs.
-
-    Inclut les données d'entrée/sortie de chaque nœud et les messages d'erreur détaillés.
+async def n8n_get_execution_detail(
+    execution_id: str,
+    include_output: bool = False,
+    max_item_chars: int = 800,
+) -> str:
+    """Détail d'une exécution : statut, erreurs par nœud, volumétrie.
 
     Paramètres :
-    - execution_id : identifiant de l'exécution (obtenu via n8n_get_executions)
+    - execution_id : identifiant de l'exécution
+    - include_output : joindre un aperçu du premier item produit par chaque
+      nœud (défaut : non)
+    - max_item_chars : taille maximale de cet aperçu, par nœud (défaut 800)
 
-    Retourne : statut global, résultats par nœud (output ou erreur).
+    Par défaut la réponse ne contient AUCUNE charge utile : statut global,
+    erreurs nœud par nœud, et nombre d'items produits. La version précédente
+    joignait systématiquement le premier item complet de chaque nœud : sur
+    l'exécution 31027 de cette instance, cela produisait 195 000 caractères,
+    au-delà de ce qu'un client MCP peut ingérer — l'outil de diagnostic
+    devenait inutilisable précisément sur les cas à diagnostiquer.
+
+    Avec `include_output`, chaque aperçu est borné et sa coupe est annoncée
+    dans `preview_truncated`.
+
+    Retourne aussi `errors`, la liste à plat de toutes les erreurs rencontrées,
+    pour lire la cause sans parcourir l'arborescence des nœuds.
     """
     try:
+        if not str(execution_id or "").strip():
+            return "Veuillez fournir un execution_id."
+
         data = await api_get(f"executions/{execution_id}", params={"includeData": "true"})
+        if not isinstance(data, dict):
+            return f"Réponse inattendue pour l'exécution {execution_id}."
 
-        status = data.get("status")
-        started = data.get("startedAt")
-        stopped = data.get("stoppedAt")
-        mode = data.get("mode")
-
-        # Extraire les résultats par nœud
-        run_data = (data.get("data") or {})
-        result_data = run_data.get("resultData", {}) if isinstance(run_data, dict) else {}
+        result_data = (data.get("data") or {}).get("resultData", {}) if isinstance(
+            data.get("data"), dict
+        ) else {}
         node_run_data = result_data.get("runData", {}) if isinstance(result_data, dict) else {}
 
-        nodes_summary = {}
-        for node_name, runs in node_run_data.items():
+        nodes: dict[str, Any] = {}
+        truncated_any = False
+        for node_name, runs in (node_run_data or {}).items():
             if not isinstance(runs, list):
                 continue
-            node_info: dict[str, Any] = {}
+            info: dict[str, Any] = {"runs": len(runs)}
             for run in runs:
                 if not isinstance(run, dict):
                     continue
                 err = run.get("error")
                 if err:
-                    node_info["error"] = {
-                        "message": err.get("message", str(err))[:500],
-                        "stack": (err.get("stack") or "")[:300],
-                    }
-                else:
-                    # Résumé de l'output (premier item de chaque branche)
-                    output_data = run.get("data", {}) or {}
-                    main_output = output_data.get("main", []) if isinstance(output_data, dict) else []
-                    if main_output and isinstance(main_output, list) and main_output[0]:
-                        branch = main_output[0]
-                        if isinstance(branch, list):
-                            node_info["output_count"] = len(branch)
-                            if branch:
-                                first = branch[0]
-                                node_info["first_item"] = (first.get("json") or {})
-            nodes_summary[node_name] = node_info
+                    info["error"] = _clip(
+                        (err.get("message") if isinstance(err, dict) else str(err)) or ""
+                    )
+                    continue
+                output = run.get("data") or {}
+                branches = output.get("main", []) if isinstance(output, dict) else []
+                if branches and isinstance(branches[0], list):
+                    info["output_count"] = len(branches[0])
+                    if include_output and branches[0]:
+                        raw = json.dumps(
+                            (branches[0][0] or {}).get("json") or {}, ensure_ascii=False
+                        )
+                        if len(raw) > max_item_chars:
+                            truncated_any = True
+                            info["preview_truncated"] = True
+                            info["first_item_chars"] = len(raw)
+                        info["first_item"] = raw[:max_item_chars]
+            nodes[node_name] = info
 
-        return _dumps({
-            "id": execution_id,
-            "status": status,
-            "startedAt": started,
-            "stoppedAt": stopped,
-            "mode": mode,
-            "nodes": nodes_summary,
-        })
+        errors = _exec_errors(data)
+        summary = _exec_summary(data)
+        response: dict[str, Any] = {
+            **summary,
+            "duration_s": _duration_seconds(summary.get("started_at"), summary.get("stopped_at")),
+            "last_node_executed": result_data.get("lastNodeExecuted"),
+            "nodes_run": len(nodes),
+            "errors": errors,
+            "nodes": nodes,
+        }
+        if not include_output:
+            response["output_note"] = (
+                "Charges utiles omises. Passer include_output=True pour un aperçu borné."
+            )
+        if truncated_any:
+            response["preview_note"] = (
+                f"Au moins un aperçu dépasse {max_item_chars} caractères et a été coupé."
+            )
+        return _dumps({k: v for k, v in response.items() if v not in (None, {}, [])})
     except Exception as exc:
         return _format_error(exc)
 
@@ -921,6 +953,512 @@ async def n8n_delete_workflow(workflow_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Exécutions : diagnostic et surveillance
+# ---------------------------------------------------------------------------
+
+#: Plafond de `limit` accepté par l'API publique n8n.
+EXEC_MAX_LIMIT = 250
+#: Nombre d'exécutions en échec dont on va rechercher le message d'erreur.
+#: Chaque recherche coûte un appel : sans plafond, une liste large devient
+#: interminable. Le dépassement est signalé, jamais silencieux.
+EXEC_ERROR_LOOKUP_MAX = 25
+#: Longueur retenue d'un message d'erreur. La coupe est annoncée.
+EXEC_ERROR_CHARS = 400
+
+
+def _clip(text: Any, limit: int = EXEC_ERROR_CHARS) -> str:
+    """Tronque un texte en signalant la coupe plutôt qu'en la taisant."""
+    s = "" if text is None else str(text)
+    return s if len(s) <= limit else s[:limit] + f"… (+{len(s) - limit} car.)"
+
+
+def _exec_errors(raw: dict) -> list[dict]:
+    """Extrait TOUTES les erreurs d'une exécution, nœud par nœud.
+
+    Deux emplacements coexistent dans la charge n8n et il faut les deux :
+    `resultData.error` porte l'échec global, `resultData.runData[nœud][i].error`
+    porte l'échec d'un nœud précis. Ne lire que le premier trouvé, comme le
+    faisait la version précédente, masque les échecs en cascade.
+    """
+    if not isinstance(raw, dict):
+        return []
+    result_data = ((raw.get("data") or {}).get("resultData") or {}) if isinstance(
+        raw.get("data"), dict
+    ) else {}
+    errors: list[dict] = []
+    seen: set = set()
+
+    def _add(node: Any, err: Any) -> None:
+        if not isinstance(err, dict):
+            if not err:
+                return
+            err = {"message": str(err)}
+        message = err.get("message") or err.get("description") or ""
+        key = (node, message)
+        if not message or key in seen:
+            return
+        seen.add(key)
+        entry = {
+            "node": node,
+            "message": _clip(message),
+            "type": err.get("name") or err.get("type") or None,
+        }
+        errors.append({k: v for k, v in entry.items() if v is not None})
+
+    _add(result_data.get("lastNodeExecuted"), result_data.get("error"))
+    run_data = result_data.get("runData") or {}
+    if isinstance(run_data, dict):
+        for node_name, runs in run_data.items():
+            if isinstance(runs, list):
+                for run in runs:
+                    if isinstance(run, dict):
+                        _add(node_name, run.get("error"))
+    return errors
+
+
+def _exec_summary(raw: dict) -> dict:
+    """Résumé compact d'une exécution, sans ses charges utiles."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {
+        "id": str(raw.get("id")) if raw.get("id") is not None else None,
+        "workflow_id": raw.get("workflowId"),
+        "workflow_name": (raw.get("workflowData") or {}).get("name")
+        if isinstance(raw.get("workflowData"), dict) else None,
+        "status": raw.get("status"),
+        "mode": raw.get("mode"),
+        "started_at": raw.get("startedAt"),
+        "stopped_at": raw.get("stoppedAt"),
+        "finished": raw.get("finished"),
+        "retry_of": raw.get("retryOf"),
+        "retry_success_id": raw.get("retrySuccessId"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _duration_seconds(started: Any, stopped: Any) -> float | None:
+    """Durée d'une exécution en secondes, ou None si les bornes manquent."""
+    from datetime import datetime
+
+    if not started or not stopped:
+        return None
+    try:
+        fmt = lambda s: datetime.fromisoformat(str(s).replace("Z", "+00:00"))  # noqa: E731
+        return round((fmt(stopped) - fmt(started)).total_seconds(), 2)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _fetch_executions(params: dict) -> "tuple[list, str]":
+    """Liste des exécutions, avec repli si l'instance ignore les bornes de date.
+
+    `startedAfter` / `startedBefore` sont apparus tardivement dans l'API
+    publique. Sur une instance plus ancienne, les envoyer peut produire un 400 :
+    on retente alors sans eux et on filtre côté client, en le disant.
+    """
+    try:
+        data = await api_get("executions", params=params)
+        return (data.get("data", data) if isinstance(data, dict) else data) or [], ""
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400 or not (
+            "startedAfter" in params or "startedBefore" in params
+        ):
+            raise
+    stripped = {k: v for k, v in params.items() if k not in ("startedAfter", "startedBefore")}
+    data = await api_get("executions", params=stripped)
+    rows = (data.get("data", data) if isinstance(data, dict) else data) or []
+    after, before = params.get("startedAfter"), params.get("startedBefore")
+    kept = [
+        r for r in rows
+        if (not after or str(r.get("startedAt") or "") >= after)
+        and (not before or str(r.get("startedAt") or "") <= before)
+    ]
+    return kept, (
+        "Cette instance n'accepte pas les bornes de date sur /executions : "
+        "filtrage effectué côté client, sur la page demandée uniquement."
+    )
+
+
+async def _attach_errors(rows: list, budget: int = EXEC_ERROR_LOOKUP_MAX) -> "tuple[list, int]":
+    """Complète les exécutions en échec avec leur message d'erreur.
+
+    `GET /executions` ne renvoie PAS le champ `data` : la version précédente y
+    cherchait pourtant l'erreur, si bien que le champ `error` promis par la
+    docstring n'était jamais rempli. Le message ne s'obtient qu'en relisant
+    chaque exécution avec `includeData=true` — d'où un appel par échec, borné.
+    """
+    looked_up = 0
+    for row in rows:
+        if row.get("status") not in ("error", "crashed"):
+            continue
+        if looked_up >= budget:
+            row["error_lookup_skipped"] = True
+            continue
+        looked_up += 1
+        try:
+            detail = await api_get(
+                f"executions/{row['id']}", params={"includeData": "true"}
+            )
+            errors = _exec_errors(detail if isinstance(detail, dict) else {})
+            if errors:
+                row["errors"] = errors
+                row["error"] = errors[0]["message"]
+        except Exception as exc:
+            row["error_lookup_failed"] = _format_error(exc)
+    return rows, looked_up
+
+
+@mcp.tool()
+async def n8n_list_failures(
+    hours: int = 24,
+    limit: int = 50,
+    workflow_id: str = "",
+    include_crashed: bool = True,
+) -> str:
+    """Liste les exécutions en ÉCHEC, tous workflows confondus.
+
+    Paramètres :
+    - hours : profondeur de la fenêtre, en heures (défaut 24)
+    - limit : nombre max d'exécutions rendues (défaut 50, plafond 250)
+    - workflow_id : restreindre à un workflow (défaut : tous)
+    - include_crashed : inclure le statut `crashed` en plus de `error`
+
+    C'est la réponse à « qu'est-ce qui a échoué cette nuit ? ». Jusqu'ici il
+    fallait interroger chaque workflow séparément — dix-sept appels sur cette
+    instance — puis relire chaque exécution pour en obtenir la cause.
+
+    Chaque échec est rendu avec le nom de son workflow ET son message d'erreur,
+    résolu par relecture de l'exécution. Les échecs sont regroupés par workflow
+    dans `by_workflow`, avec le nombre d'occurrences : un même workflow qui
+    tombe chaque matin se voit d'un coup d'œil.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        window = max(1, int(hours))
+        since = (datetime.now(timezone.utc) - timedelta(hours=window)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        capped = max(1, min(int(limit), EXEC_MAX_LIMIT))
+
+        rows: list = []
+        notes: set = set()
+        for status in ("error", "crashed") if include_crashed else ("error",):
+            params: dict[str, Any] = {
+                "status": status,
+                "limit": capped,
+                "startedAfter": since,
+            }
+            if workflow_id:
+                params["workflowId"] = workflow_id
+            try:
+                found, note = await _fetch_executions(params)
+            except httpx.HTTPStatusError as exc:
+                # Un statut inconnu de l'instance ne doit pas emporter le reste.
+                if exc.response.status_code == 400 and status == "crashed":
+                    notes.add("Le statut `crashed` n'est pas reconnu par cette instance.")
+                    continue
+                raise
+            if note:
+                notes.add(note)
+            rows.extend(found)
+
+        rows.sort(key=lambda r: str(r.get("startedAt") or ""), reverse=True)
+        rows = [_exec_summary(r) for r in rows[:capped]]
+        rows, looked_up = await _attach_errors(rows)
+
+        # Nom du workflow : absent de la réponse de liste, résolu une fois par
+        # workflow distinct plutôt qu'une fois par exécution.
+        names: dict[str, str] = {}
+        for row in rows:
+            wid = row.get("workflow_id")
+            if not wid or wid in names:
+                continue
+            try:
+                wf = await api_get(f"workflows/{wid}")
+                names[wid] = (wf or {}).get("name") or wid
+            except Exception:
+                names[wid] = wid
+        for row in rows:
+            row["workflow_name"] = names.get(row.get("workflow_id"), row.get("workflow_id"))
+
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            key = row.get("workflow_name") or row.get("workflow_id") or "?"
+            entry = grouped.setdefault(
+                key, {"workflow_id": row.get("workflow_id"), "failures": 0,
+                      "last_started_at": None, "last_error": None}
+            )
+            entry["failures"] += 1
+            if entry["last_started_at"] is None:
+                entry["last_started_at"] = row.get("started_at")
+                entry["last_error"] = row.get("error")
+
+        response: dict[str, Any] = {
+            "window_hours": window,
+            "since": since,
+            "count": len(rows),
+            "workflows_affected": len(grouped),
+            "errors_resolved": looked_up,
+            "by_workflow": sorted(
+                ({"workflow_name": k, **v} for k, v in grouped.items()),
+                key=lambda g: -g["failures"],
+            ),
+            "executions": rows,
+        }
+        if looked_up >= EXEC_ERROR_LOOKUP_MAX:
+            response["error_lookup_note"] = (
+                f"Causes résolues pour les {EXEC_ERROR_LOOKUP_MAX} premiers échecs "
+                "seulement ; les suivants portent `error_lookup_skipped`."
+            )
+        if notes:
+            response["notes"] = sorted(notes)
+        return _dumps(response)
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) -> str:
+    """État de santé des workflows : dernière exécution, échecs consécutifs, cause.
+
+    Paramètres :
+    - active_only : ne regarder que les workflows actifs (défaut : oui)
+    - per_workflow : profondeur d'historique inspectée par workflow (défaut 5)
+
+    Pour chaque workflow : statut de la dernière exécution, date du dernier
+    succès, nombre d'échecs CONSÉCUTIFS et cause du dernier. C'est ce compteur
+    qui distingue un incident isolé d'un workflow cassé depuis des jours —
+    celui qui échoue toutes les nuits sans que personne ne le voie.
+
+    Les workflows sont rendus les plus dégradés en tête. `never_ran` signale
+    ceux qui n'ont aucune exécution : actifs mais jamais déclenchés, ce qui est
+    souvent un défaut de configuration plutôt qu'une absence d'événement.
+
+    Coûte un appel par workflow inspecté : sur un parc important, préférer
+    n8n_list_failures pour une vue rapide.
+    """
+    try:
+        data = await api_get("workflows", params={"limit": 250})
+        workflows = (data.get("data", data) if isinstance(data, dict) else data) or []
+        if active_only:
+            workflows = [w for w in workflows if w.get("active")]
+
+        report = []
+        for wf in workflows:
+            wid = wf.get("id")
+            entry: dict[str, Any] = {
+                "workflow_id": wid,
+                "name": wf.get("name"),
+                "active": bool(wf.get("active")),
+            }
+            try:
+                rows, _ = await _fetch_executions(
+                    {"workflowId": wid, "limit": max(1, min(int(per_workflow), 50))}
+                )
+            except Exception as exc:
+                entry["health"] = "inconnu"
+                entry["lookup_error"] = _format_error(exc)
+                report.append(entry)
+                continue
+
+            rows = sorted(rows, key=lambda r: str(r.get("startedAt") or ""), reverse=True)
+            if not rows:
+                entry.update({"health": "jamais exécuté", "never_ran": True,
+                              "consecutive_failures": 0})
+                report.append(entry)
+                continue
+
+            summaries = [_exec_summary(r) for r in rows]
+            last = summaries[0]
+            consecutive = 0
+            for row in summaries:
+                if row.get("status") in ("error", "crashed"):
+                    consecutive += 1
+                else:
+                    break
+            last_success = next(
+                (r["started_at"] for r in summaries
+                 if r.get("status") == "success" and r.get("started_at")), None
+            )
+            entry.update({
+                "health": "en échec" if consecutive else "ok",
+                "last_status": last.get("status"),
+                "last_started_at": last.get("started_at"),
+                "last_duration_s": _duration_seconds(
+                    last.get("started_at"), last.get("stopped_at")
+                ),
+                "consecutive_failures": consecutive,
+                "last_success_at": last_success,
+                "inspected": len(summaries),
+            })
+            if consecutive:
+                # `consecutive == inspected` veut dire que la fenêtre inspectée
+                # ne contient aucun succès : l'échec peut être plus ancien.
+                if consecutive >= len(summaries):
+                    entry["consecutive_failures_at_least"] = True
+                enriched, _ = await _attach_errors([dict(last)], budget=1)
+                if enriched[0].get("errors"):
+                    entry["last_error"] = enriched[0]["errors"][0]["message"]
+                    entry["last_error_node"] = enriched[0]["errors"][0].get("node")
+            report.append(entry)
+
+        rank = {"en échec": 0, "jamais exécuté": 1, "inconnu": 2, "ok": 3}
+        report.sort(key=lambda e: (rank.get(e.get("health"), 9),
+                                   -(e.get("consecutive_failures") or 0)))
+        failing = [e for e in report if e.get("health") == "en échec"]
+        return _dumps({
+            "checked": len(report),
+            "active_only": active_only,
+            "failing": len(failing),
+            "never_ran": sum(1 for e in report if e.get("never_ran")),
+            "workflows": report,
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def n8n_retry_execution(execution_id: str, load_workflow: bool = False) -> str:
+    """Rejoue une exécution en échec.
+
+    Confirmation utilisateur requise avant exécution.
+
+    Paramètres :
+    - execution_id : identifiant de l'exécution à rejouer
+    - load_workflow : rejouer avec la version ACTUELLE du workflow (défaut :
+      non, c'est-à-dire avec la version qui avait échoué). Passer True après
+      avoir corrigé le workflow, sinon la correction n'est pas prise en compte.
+
+    Rejouer relance le traitement réel : si le workflow envoie un message ou
+    écrit quelque part, il le refera. Vérifier d'abord la cause avec
+    n8n_get_execution_detail.
+
+    Retourne l'identifiant de la nouvelle exécution et son issue. Une instance
+    trop ancienne pour exposer cette route le dit explicitement.
+    """
+    try:
+        if not str(execution_id or "").strip():
+            return "Veuillez fournir un execution_id."
+        try:
+            result = await api_post(
+                f"executions/{execution_id}/retry", {"loadWorkflow": bool(load_workflow)}
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                return _dumps({
+                    "success": False,
+                    "execution_id": execution_id,
+                    "message": (
+                        "Cette instance n'expose pas /executions/{id}/retry "
+                        f"(HTTP {exc.response.status_code}). Rejouer depuis "
+                        "l'interface n8n, ou déclencher le workflow avec "
+                        "n8n_trigger_workflow."
+                    ),
+                })
+            raise
+
+        summary = _exec_summary(result if isinstance(result, dict) else {})
+        enriched, _ = await _attach_errors([summary], budget=1) if summary else ([summary], 0)
+        return _dumps({
+            "success": summary.get("status") not in ("error", "crashed"),
+            "retried_execution_id": execution_id,
+            "loaded_current_workflow": bool(load_workflow),
+            "new_execution": enriched[0] if enriched else summary,
+            "message": (
+                f"Exécution {execution_id} rejouée ; nouvelle exécution "
+                f"{summary.get('id')} en statut {summary.get('status')}."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def n8n_delete_execution(execution_id: str) -> str:
+    """Supprime une exécution de l'historique n8n.
+
+    Confirmation utilisateur requise avant exécution (action destructive).
+
+    Paramètres :
+    - execution_id : identifiant de l'exécution à supprimer
+
+    Sert à purger un historique encombré par un workflow qui a bouclé. La
+    suppression ne touche PAS le workflow, seulement la trace de son passage,
+    et elle est définitive : les données d'entrée et de sortie disparaissent
+    avec, donc plus aucun diagnostic possible après coup.
+
+    Retourne la confirmation, vérifiée par relecture.
+    """
+    try:
+        if not str(execution_id or "").strip():
+            return "Veuillez fournir un execution_id."
+
+        before = await api_get(f"executions/{execution_id}")
+        summary = _exec_summary(before if isinstance(before, dict) else {})
+        await api_delete(f"executions/{execution_id}")
+
+        gone = True
+        try:
+            again = await api_get(f"executions/{execution_id}")
+            gone = not (isinstance(again, dict) and again.get("id"))
+        except httpx.HTTPStatusError as exc:
+            gone = exc.response.status_code == 404
+
+        return _dumps({
+            "success": gone,
+            "execution_id": execution_id,
+            "deleted": summary,
+            "message": (
+                f"Exécution {execution_id} supprimée." if gone else
+                f"Le DELETE a répondu sans erreur mais l'exécution {execution_id} "
+                "est toujours lisible : suppression non effective."
+            ),
+        })
+
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def n8n_list_tags() -> str:
+    """Liste les étiquettes définies sur l'instance n8n.
+
+    Sans paramètre. Retourne id, nom et dates de chaque étiquette.
+
+    Les étiquettes servent à filtrer les workflows par domaine. Une instance
+    trop ancienne pour exposer /tags le dit explicitement plutôt que de rendre
+    une liste vide, qui se lirait comme « aucune étiquette définie ».
+    """
+    try:
+        try:
+            data = await api_get("tags", params={"limit": 250})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                return _dumps({
+                    "success": False,
+                    "message": (
+                        "Cette instance n'expose pas /tags "
+                        f"(HTTP {exc.response.status_code})."
+                    ),
+                })
+            raise
+
+        rows = (data.get("data", data) if isinstance(data, dict) else data) or []
+        tags = [
+            {"id": t.get("id"), "name": t.get("name"), "updated_at": t.get("updatedAt")}
+            for t in rows if isinstance(t, dict)
+        ]
+        return _dumps({"success": True, "count": len(tags), "tags": tags})
+
+    except Exception as exc:
+        return _format_error(exc)
+
 
 def main() -> None:
     """Point d'entree du serveur MCP (stdio)."""
