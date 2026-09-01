@@ -72,6 +72,32 @@ environment variables — no host, login or secret is baked into the code.
 - `kanboard_who_am_i` — Diagnostic : affiche l'identite de l'utilisateur authentifie pour un compte
 - `kanboard_list_accounts` — Liste les comptes Kanboard configures sur ce MCP (multi-compte)
 
+## A sweep that stopped early, and did not push back
+
+Kanboard has no global search in JSON-RPC, so the connector walks projects one
+by one. It stopped as soon as `limit` results were found — which biases the
+answer towards low-numbered projects and leaves the rest unread. Measured on the
+inno³ instance on 31/08/2026: a search at `limit=20` stopped at project 26 of
+65. The response did report `projects_scanned`, but a caller reading `count: 0`
+had nothing telling them what to do about it.
+
+`scan_all=True` now walks every project and reports `total_matches`, the real
+count, while the returned list stays capped. When the sweep does stop early, a
+`scan_warning` says so in words and names the remedy.
+
+## Names, not identifiers
+
+Creating a task needed the numeric ids of its column, swimlane and category —
+so three lookups before every creation. Across the measured sessions,
+`list_swimlanes`, `list_columns` and `list_categories` accounted for 31 calls
+against 25 task creations.
+
+`column_name` already existed; `swimlane_name` and `category_name` now join it.
+Identifiers still work, and passing both an id and a name for the same thing is
+refused rather than silently resolved one way. An unknown name fails the
+creation and enumerates what exists — better than a task filed in the wrong
+swimlane.
+
 ## Multi-account model
 
 Write tools accept an `as_user` argument (`primary` | `agent`). This lets a human
@@ -167,3 +193,9 @@ would target an unrelated link.
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
+
+## Acceptance test against a live instance
+
+[`RECETTE_COWORK.md`](RECETTE_COWORK.md) is a script to run from an MCP
+client against a real instance. It is read-only except where marked, and
+cleans up after itself.

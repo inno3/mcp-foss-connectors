@@ -437,6 +437,43 @@ async def _get_my_tasks(status_id: int = 1, as_user: str = "") -> tuple[list[dic
     return results, ""
 
 
+_PROJECT_NAMES: dict[int, str] = {}
+_CATEGORY_NAMES: dict[int, dict] = {}
+
+
+async def _get_project_name(project_id: Any) -> str:
+    """Nom d'un projet, memorise le temps de la session."""
+    pid = int(project_id) if str(project_id or "").isdigit() else 0
+    if not pid:
+        return ""
+    if pid in _PROJECT_NAMES:
+        return _PROJECT_NAMES[pid]
+    try:
+        p = await kb_call("getProjectById", {"project_id": pid})
+        name = (p or {}).get("name") or ""
+    except Exception:
+        name = ""
+    _PROJECT_NAMES[pid] = name
+    return name
+
+
+async def _get_category_name(project_id: Any, category_id: Any) -> str:
+    """Nom d'une categorie, memorise par projet."""
+    pid = int(project_id) if str(project_id or "").isdigit() else 0
+    cid = int(category_id) if str(category_id or "").isdigit() else 0
+    if not pid or not cid:
+        return ""
+    if pid not in _CATEGORY_NAMES:
+        try:
+            rows = await kb_call("getAllCategories", {"project_id": pid})
+            _CATEGORY_NAMES[pid] = {
+                int(c["id"]): c.get("name") or "" for c in (rows or []) if c.get("id")
+            }
+        except Exception:
+            _CATEGORY_NAMES[pid] = {}
+    return _CATEGORY_NAMES[pid].get(cid, "")
+
+
 async def _task_summary(t: dict, as_user: str = "") -> dict:
     """Extrait les champs essentiels d'une tache, en resolvant les IDs en noms."""
     pid = t.get("project_id")
@@ -456,13 +493,26 @@ async def _task_summary(t: dict, as_user: str = "") -> dict:
     if not sw_name:
         sw_name = await _get_swimlane_name(pid, t.get("swimlane_id"))
 
+    # Projet : getAllTasks ne renseigne PAS project_name, il revenait donc
+    # toujours vide et obligeait a un appel de plus pour situer une tache.
+    proj_name = t.get("project_name") or ""
+    if not proj_name:
+        proj_name = await _get_project_name(pid)
+
+    # Categorie : absente de la sortie jusqu'ici, elle n'etait lisible que par
+    # kanboard_get_board, dont la reponse complete depasse la limite de tokens.
+    cat_name = t.get("category_name") or ""
+    if not cat_name:
+        cat_name = await _get_category_name(pid, t.get("category_id"))
+
     return {
         "id": t.get("id"),
         "title": t.get("title"),
         "project_id": pid,
-        "project_name": t.get("project_name", ""),
+        "project_name": proj_name,
         "column_name": col_name,
         "swimlane_name": sw_name,
+        "category_name": cat_name,
         "assignee": assignee,
         "priority": t.get("priority"),
         "due_date": _ts_to_date(t.get("date_due")),
@@ -614,9 +664,29 @@ async def kanboard_get_task(task_id: int = 0, full_comments: bool = False) -> st
     if not task_id:
         return "Erreur : task_id est obligatoire."
     try:
-        task = await kb_call("getTask", {"task_id": task_id})
+        try:
+            task = await kb_call("getTask", {"task_id": task_id})
+        except Exception as exc:
+            # Kanboard controle l'acces au PROJET de la tache : une tache
+            # supprimee n'ayant plus de projet, il rend un refus de permission
+            # la ou l'objet n'existe simplement plus. Annoncer « permissions
+            # insuffisantes » envoie alors chercher un probleme de droits qui
+            # n'existe pas.
+            if _is_permission_error(exc):
+                return _dumps({
+                    "found": False,
+                    "task_id": task_id,
+                    "message": (
+                        f"Tache {task_id} illisible : soit elle n'existe plus (Kanboard "
+                        "rend un refus d'acces pour une tache supprimee, faute de projet "
+                        "rattache), soit elle appartient a un projet hors de votre "
+                        "perimetre. Les deux cas sont indiscernables via l'API."
+                    ),
+                })
+            raise
         if not task:
-            return "Tache introuvable."
+            return _dumps({"found": False, "task_id": task_id,
+                           "message": f"Tache {task_id} introuvable."})
 
         # Recuperer commentaires et sous-taches en parallele
         comments_raw = await kb_call("getAllComments", {"task_id": task_id})
@@ -672,9 +742,15 @@ async def kanboard_get_task(task_id: int = 0, full_comments: bool = False) -> st
             "title": task.get("title"),
             "description": (task.get("description") or "")[:2000],
             "project_id": pid,
-            "project_name": task.get("project_name", ""),
+            # Resolus comme dans search_tasks : getTask ne renseigne ni l'un ni
+            # l'autre, et la categorie n'etait lisible que par get_board, dont
+            # la sortie complete depasse la limite de tokens.
+            "project_name": task.get("project_name") or await _get_project_name(pid),
             "column_name": col_name,
             "swimlane_name": sw_name,
+            "category_name": task.get("category_name")
+            or await _get_category_name(pid, task.get("category_id")),
+            "category_id": task.get("category_id"),
             "assignee": assignee,
             "creator": creator,
             "priority": task.get("priority"),
@@ -699,6 +775,8 @@ async def kanboard_get_task(task_id: int = 0, full_comments: bool = False) -> st
 async def kanboard_search_tasks(
     query: str = "",
     limit: int = DEFAULT_LIMIT,
+    scan_all: bool = False,
+    offset: int = 0,
 ) -> str:
     """Recherche de taches par mot-cle dans tous les projets accessibles.
 
@@ -710,9 +788,24 @@ async def kanboard_search_tasks(
     Parametres :
     - query : texte a rechercher (insensible a la casse)
     - limit : nombre max de resultats (defaut 20, max 100)
+    - scan_all : balayer TOUS les projets avant de rendre la main (defaut non).
+      Le balayage par defaut s'arrete des que `limit` resultats sont trouves,
+      ce qui biaise le resultat vers les premiers projets : sur cette instance,
+      une recherche a limit=20 s'arretait au 27e projet sur 66, sans jamais
+      regarder les 39 suivants. Avec scan_all, `total_matches` porte le compte
+      REEL et la liste rendue reste plafonnee a `limit`.
+    - offset : nombre de correspondances a sauter avant de commencer a rendre.
+      Sans lui, `scan_all` corrigeait le COMPTE sans donner acces a la LISTE :
+      195 correspondances annoncees, toujours les 20 memes rendues, et aucune
+      des 175 autres nommable. A utiliser avec scan_all, sans quoi l'ordre de
+      balayage change d'un appel a l'autre.
 
-    Retourne : count, scope, has_more, projects_scanned, projects_total, et
-    results (taches dont le titre ou la description contient le texte).
+    Retourne : count, total_matches, scope, has_more, projects_scanned,
+    projects_total, offset, has_more_results, next_offset, et results (taches
+    dont le titre ou la description contient le texte). Chaque tache porte
+    desormais son `project_name` et sa `category_name`, resolus.
+    `scan_warning` apparait quand le balayage s'est arrete en chemin : une
+    absence de resultat n'y prouve rien.
 
     `scope` vaut "all" ou "member" selon que le compte est administrateur ou
     non : en "member" le balayage ne couvre que les projets dont il est membre.
@@ -736,7 +829,9 @@ async def kanboard_search_tasks(
         query_lower = query.lower()
         results: list[dict] = []
         limit_val = _clamp_limit(limit)
+        skip = max(0, int(offset))
         scanned = 0
+        matches = 0
 
         for p in active:
             scanned += 1
@@ -750,22 +845,44 @@ async def kanboard_search_tasks(
                 title = (t.get("title") or "").lower()
                 desc = (t.get("description") or "").lower()
                 if query_lower in title or query_lower in desc:
-                    results.append(await _task_summary(t))
-                    if len(results) >= limit_val:
+                    matches += 1
+                    if matches > skip and len(results) < limit_val:
+                        results.append(await _task_summary(t))
+                    elif len(results) >= limit_val and not scan_all:
                         break
-            if len(results) >= limit_val:
+            if not scan_all and len(results) >= limit_val:
                 break
 
-        return _dumps({
+        stopped_early = scanned < len(active)
+        payload: dict[str, Any] = {
             "count": len(results),
+            # `total_matches` ne vaut le compte reel que si tout a ete balaye ;
+            # sinon il ne compte que ce que le balayage a eu le temps de voir.
+            "total_matches": matches,
             "scope": scope,
             # Le balayage s'arrete a `limit` : sans ce drapeau, une recherche
             # coupee en cours de route se lit comme exhaustive.
-            "has_more": scanned < len(active),
+            "has_more": stopped_early,
             "projects_scanned": scanned,
             "projects_total": len(active),
+            "offset": skip,
+            # Deux causes de « il en reste » : des correspondances vues mais non
+            # rendues, ET un balayage arrete avant la fin. Les conditionner a
+            # scan_all faisait cohabiter dans la meme reponse un scan_warning
+            # disant que tout n'a pas ete regarde et un booleen disant le
+            # contraire. Un appelant qui se fie au booleen conclut a tort.
+            "has_more_results": (skip + len(results)) < matches or stopped_early,
             "results": results,
-        })
+        }
+        if (skip + len(results)) < matches:
+            payload["next_offset"] = skip + len(results)
+        if stopped_early:
+            payload["scan_warning"] = (
+                f"Balayage arrete au projet {scanned} sur {len(active)} : les suivants "
+                "n'ont PAS ete regardes. Une absence de resultat n'y prouve rien. "
+                "Relancer avec scan_all=True pour un balayage exhaustif."
+            )
+        return _dumps(payload)
     except Exception as exc:
         return _format_error(exc)
 
@@ -1258,6 +1375,29 @@ async def kanboard_open_task(task_id: int = 0, as_user: str = "") -> str:
         return _format_error(exc)
 
 
+async def _resolve_by_name(
+    method: str, project_id: int, name: str, label: str, as_user: str = ""
+) -> "tuple[int | None, str]":
+    """Traduit un nom de swimlane ou de categorie en identifiant.
+
+    Creer une tache demandait de connaitre ces identifiants, donc un appel de
+    recherche prealable pour chacun : sur cette instance, list_swimlanes et
+    list_categories totalisaient 31 appels pour 25 creations. Les noms sont ce
+    que l'appelant a sous la main.
+
+    Retourne (id, "") si trouve, (None, message) sinon — le message enumere les
+    valeurs disponibles plutot que de laisser chercher.
+    """
+    rows = await kb_call(method, {"project_id": project_id}, as_user=as_user)
+    wanted = str(name).lower().strip()
+    for row in (rows or []):
+        title = str(row.get("name") or row.get("title") or "").lower().strip()
+        if title == wanted:
+            return int(row["id"]), ""
+    available = [r.get("name") or r.get("title") for r in (rows or [])]
+    return None, f"{label} '{name}' introuvable. Valeurs disponibles : {available}"
+
+
 @mcp.tool()
 async def kanboard_create_task(
     project_id: int | str = 0,
@@ -1269,6 +1409,8 @@ async def kanboard_create_task(
     due_date: str = "",
     swimlane_id: int = 0,
     category_id: int = 0,
+    swimlane_name: str = "",
+    category_name: str = "",
     tags: list[str] | None = None,
     as_user: str = "",
 ) -> str:
@@ -1286,8 +1428,15 @@ async def kanboard_create_task(
     - due_date : date d'echeance YYYY-MM-DD (optionnel)
     - swimlane_id : ID du swimlane cible (0 = swimlane par defaut)
     - category_id : ID de la categorie / tag structure (0 = aucune)
+    - swimlane_name : nom du swimlane, a la place de swimlane_id
+    - category_name : nom de la categorie, a la place de category_id
     - tags : liste de tags libres a associer (ex: ["urgent","backend"])
     - as_user : compte qui cree la tache ("" = defaut, "primary"/"agent")
+
+    Colonne, swimlane et categorie s'indiquent par leur NOM : les identifiants
+    restent acceptes, mais ne sont plus a chercher au prealable. Un nom inconnu
+    fait echouer la creation en enumerant les valeurs disponibles, plutot que
+    de creer la tache au mauvais endroit.
 
     Retourne l'ID de la tache creee.
     """
@@ -1296,6 +1445,10 @@ async def kanboard_create_task(
         return "Erreur : project_id est obligatoire."
     if not title:
         return "Erreur : title est obligatoire."
+    if swimlane_name and swimlane_id:
+        return "Erreur : fournir swimlane_id OU swimlane_name, pas les deux."
+    if category_name and category_id:
+        return "Erreur : fournir category_id OU category_name, pas les deux."
     try:
         params: dict[str, Any] = {
             "project_id": project_id,
@@ -1315,6 +1468,21 @@ async def kanboard_create_task(
             params["category_id"] = category_id
         if tags:
             params["tags"] = list(tags)
+
+        if swimlane_name:
+            resolved, err = await _resolve_by_name(
+                "getAllSwimlanes", project_id, swimlane_name, "Swimlane", as_user
+            )
+            if resolved is None:
+                return err
+            params["swimlane_id"] = resolved
+        if category_name:
+            resolved, err = await _resolve_by_name(
+                "getAllCategories", project_id, category_name, "Categorie", as_user
+            )
+            if resolved is None:
+                return err
+            params["category_id"] = resolved
 
         # Resolve column name to ID if provided
         if column_name:

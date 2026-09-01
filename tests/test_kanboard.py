@@ -18,6 +18,7 @@ os.environ.setdefault("KANBOARD_TOKEN", "tok-primary")
 os.environ.setdefault("KANBOARD_USER_ALT", "bot")
 os.environ.setdefault("KANBOARD_TOKEN_ALT", "tok-agent")
 
+from kanboard_mcp import server  # noqa: E402
 from kanboard_mcp.server import (  # noqa: E402
     ACTIVITY_API_CAP,
     COMMENT_PREVIEW_CHARS,
@@ -27,6 +28,7 @@ from kanboard_mcp.server import (  # noqa: E402
     _resolve_account,
     _ts_to_date,
     kanboard_check_project_access,
+    kanboard_create_task,
     kanboard_create_task_link,
     kanboard_get_board,
     kanboard_get_comment,
@@ -1183,3 +1185,330 @@ class TestRemoveTaskLink:
             mock_call.return_value = False
             data = json.loads(await kanboard_remove_task_link(task_link_id=17))
         assert data["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# Balayage exhaustif et resolution par nom
+# ---------------------------------------------------------------------------
+
+
+class TestSearchSweepIsHonestAboutWhatItSaw:
+    """Le balayage s'arretait a `limit`, biaisant vers les premiers projets.
+
+    Constate le 31/08/2026 sur l'instance : une recherche a limit=20 s'arretait
+    au 26e projet sur 65. Les 39 suivants n'etaient jamais regardes, et rien
+    dans la reponse ne disait quoi faire de cette absence.
+    """
+
+    @staticmethod
+    def _dispatch(projects: int, matches_per_project: int):
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                return [{"id": i, "name": f"P{i}", "is_active": "1"}
+                        for i in range(1, projects + 1)]
+            if method == "getAllTasks":
+                pid = (params or {}).get("project_id", 1)
+                return [{"id": pid * 100 + j, "title": "cible", "description": "",
+                         "project_id": pid} for j in range(matches_per_project)]
+            raise AssertionError(f"methode inattendue : {method}")
+
+        return _run
+
+    async def test_an_early_stop_now_says_what_to_do(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=10, matches_per_project=5)):
+            data = json.loads(await kanboard_search_tasks(query="cible", limit=5))
+
+        assert data["has_more"] is True
+        assert data["projects_scanned"] < data["projects_total"]
+        assert "scan_all=True" in data["scan_warning"]
+        assert "n'ont PAS ete regardes" in data["scan_warning"]
+
+    async def test_scan_all_visits_every_project(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=10, matches_per_project=5)):
+            data = json.loads(await kanboard_search_tasks(
+                query="cible", limit=5, scan_all=True))
+
+        assert data["projects_scanned"] == data["projects_total"] == 10
+        assert data["has_more"] is False
+        assert "scan_warning" not in data
+        # La liste reste plafonnee, mais le compte reel est rendu.
+        assert data["count"] == 5
+        assert data["total_matches"] == 50
+
+    async def test_a_complete_sweep_without_scan_all_is_not_warned(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=2, matches_per_project=1)):
+            data = json.loads(await kanboard_search_tasks(query="cible", limit=20))
+
+        assert data["has_more"] is False
+        assert "scan_warning" not in data
+        assert data["total_matches"] == 2
+
+
+class TestCreateTaskAcceptsNames:
+    """Creer une tache demandait 3 recherches d'identifiants au prealable."""
+
+    @staticmethod
+    def _dispatch(created_id=42):
+        calls: list = []
+
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append((method, params))
+            if method == "getAllSwimlanes":
+                return [{"id": 7, "name": "Direction inno³"},
+                        {"id": 8, "name": "Missions & Hermine"}]
+            if method == "getAllCategories":
+                return [{"id": 3, "name": "Pilotage"}]
+            if method == "getColumns":
+                return [{"id": 11, "title": "A faire"}]
+            if method == "createTask":
+                return created_id
+            raise AssertionError(f"methode inattendue : {method}")
+
+        _run.calls = calls
+        return _run
+
+    async def test_a_swimlane_name_is_resolved(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            data = json.loads(await kanboard_create_task(
+                project_id=262, title="T", swimlane_name="Missions & Hermine"))
+
+        created = [p for m, p in dispatch.calls if m == "createTask"][0]
+        assert created["swimlane_id"] == 8
+        assert data["success"] is True
+
+    async def test_a_category_name_is_resolved(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            await kanboard_create_task(project_id=262, title="T", category_name="Pilotage")
+
+        created = [p for m, p in dispatch.calls if m == "createTask"][0]
+        assert created["category_id"] == 3
+
+    async def test_an_unknown_name_lists_what_exists_and_creates_nothing(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            msg = await kanboard_create_task(
+                project_id=262, title="T", swimlane_name="Inexistant")
+
+        assert "introuvable" in msg
+        assert "Direction inno³" in msg
+        assert not [m for m, _ in dispatch.calls if m == "createTask"]
+
+    async def test_giving_both_id_and_name_is_refused(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock) as call:
+            msg = await kanboard_create_task(
+                project_id=262, title="T", swimlane_id=7, swimlane_name="Direction inno³")
+        assert "pas les deux" in msg
+        call.assert_not_called()
+
+    async def test_ids_still_work_unchanged(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            await kanboard_create_task(project_id=262, title="T",
+                                       swimlane_id=7, category_id=3)
+
+        created = [p for m, p in dispatch.calls if m == "createTask"][0]
+        assert created["swimlane_id"] == 7 and created["category_id"] == 3
+        # Aucune resolution declenchee quand l'identifiant est donne.
+        assert not [m for m, _ in dispatch.calls if m in ("getAllSwimlanes", "getAllCategories")]
+
+
+# ---------------------------------------------------------------------------
+# Non-regression : recette du 01/09/2026
+# ---------------------------------------------------------------------------
+
+
+class TestSearchResultsAreReachable:
+    """scan_all corrigeait le COMPTE sans donner acces a la LISTE.
+
+    Constate a la recette : 195 correspondances annoncees sur l'instance,
+    toujours les 20 memes rendues, aucune des 175 autres nommable.
+    """
+
+    @staticmethod
+    def _dispatch(projects=3, per_project=10):
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                return [{"id": i, "name": f"P{i}", "is_active": "1"}
+                        for i in range(1, projects + 1)]
+            if method == "getAllTasks":
+                pid = (params or {}).get("project_id", 1)
+                return [{"id": pid * 100 + j, "title": f"cible {pid}-{j}",
+                         "description": "", "project_id": pid}
+                        for j in range(per_project)]
+            if method == "getProjectById":
+                return {"name": f"Projet {(params or {}).get('project_id')}"}
+            if method == "getAllCategories":
+                return []
+            return []
+
+        return _run
+
+    async def test_offset_reaches_beyond_the_first_page(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch()):
+            first = json.loads(await kanboard_search_tasks(
+                query="cible", limit=5, scan_all=True))
+            second = json.loads(await kanboard_search_tasks(
+                query="cible", limit=5, scan_all=True, offset=5))
+
+        ids_first = {t["id"] for t in first["results"]}
+        ids_second = {t["id"] for t in second["results"]}
+        assert ids_first and ids_second
+        assert not (ids_first & ids_second)      # aucun recoupement
+        assert second["offset"] == 5
+
+    async def test_the_next_offset_is_handed_back(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch()):
+            data = json.loads(await kanboard_search_tasks(
+                query="cible", limit=5, scan_all=True))
+
+        assert data["total_matches"] == 30
+        assert data["has_more_results"] is True
+        assert data["next_offset"] == 5
+
+    async def test_the_last_page_says_there_is_no_more(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=1, per_project=3)):
+            data = json.loads(await kanboard_search_tasks(
+                query="cible", limit=20, scan_all=True))
+
+        assert data["has_more_results"] is False
+        assert "next_offset" not in data
+
+    async def test_results_carry_project_and_category_names(self) -> None:
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                return [{"id": 262, "name": "Pilotage", "is_active": "1"}]
+            if method == "getAllTasks":
+                return [{"id": 1, "title": "cible", "description": "",
+                         "project_id": 262, "category_id": 3}]
+            if method == "getProjectById":
+                return {"name": "Coordination Claude x Benjamin"}
+            if method == "getAllCategories":
+                return [{"id": 3, "name": "Interne"}]
+            return []
+
+        server._PROJECT_NAMES.clear()
+        server._CATEGORY_NAMES.clear()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_run):
+            data = json.loads(await kanboard_search_tasks(query="cible", scan_all=True))
+
+        task = data["results"][0]
+        # Tous deux revenaient vides : le nom de projet n'etait jamais resolu,
+        # et la categorie n'etait lisible que par get_board, trop volumineux.
+        assert task["project_name"] == "Coordination Claude x Benjamin"
+        assert task["category_name"] == "Interne"
+
+
+class TestDeletedTaskIsNotAPermissionProblem:
+    """Kanboard rend un refus d'acces pour une tache supprimee."""
+
+    async def test_the_message_names_both_causes(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=RuntimeError("Access denied")):
+            data = json.loads(await kanboard_get_task(task_id=7847))
+
+        assert data["found"] is False
+        assert "n'existe plus" in data["message"]
+        assert "perimetre" in data["message"]
+
+    async def test_a_null_task_is_plainly_absent(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=None):
+            data = json.loads(await kanboard_get_task(task_id=999))
+
+        assert data["found"] is False
+        assert "introuvable" in data["message"]
+
+    async def test_a_real_error_is_still_raised(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=RuntimeError("boom réseau")):
+            msg = await kanboard_get_task(task_id=1)
+        assert "boom" in msg
+
+
+class TestHasMoreResultsNeverContradictsTheWarning:
+    """Deux champs voisins se contredisaient dans la meme reponse.
+
+    Constate a la seconde passe : count=20, total_matches=21, scan_warning
+    present — et has_more_results=false. Un appelant qui se fie au booleen
+    conclut qu'il a tout vu.
+    """
+
+    @staticmethod
+    def _dispatch(projects=10, per_project=5):
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllProjects":
+                return [{"id": i, "name": f"P{i}", "is_active": "1"}
+                        for i in range(1, projects + 1)]
+            if method == "getAllTasks":
+                pid = (params or {}).get("project_id", 1)
+                return [{"id": pid * 100 + j, "title": "cible", "description": "",
+                         "project_id": pid} for j in range(per_project)]
+            if method == "getProjectById":
+                return {"name": "P"}
+            return []
+
+        return _run
+
+    async def test_a_truncated_sweep_admits_there_is_more(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch()):
+            data = json.loads(await kanboard_search_tasks(query="cible", limit=5))
+
+        assert "scan_warning" in data
+        # Le booleen doit dire la meme chose que l'avertissement.
+        assert data["has_more_results"] is True
+
+    async def test_unrendered_matches_count_even_without_scan_all(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=1, per_project=5)):
+            data = json.loads(await kanboard_search_tasks(query="cible", limit=3))
+
+        assert data["total_matches"] > data["count"]
+        assert data["has_more_results"] is True
+        assert data["next_offset"] == 3
+
+    async def test_a_complete_exhaustive_sweep_says_no_more(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=self._dispatch(projects=1, per_project=3)):
+            data = json.loads(await kanboard_search_tasks(
+                query="cible", limit=20, scan_all=True))
+
+        assert data["has_more_results"] is False
+        assert "next_offset" not in data
+        assert "scan_warning" not in data
+
+
+class TestGetTaskExposesProjectAndCategory:
+    """La resolution n'avait ete faite que sur search_tasks."""
+
+    async def test_both_names_are_resolved(self) -> None:
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getTask":
+                return {"id": 7848, "title": "ZZ", "project_id": 262,
+                        "category_id": 3, "column_id": 1, "swimlane_id": 2}
+            if method == "getProjectById":
+                return {"name": "Coordination Claude x Benjamin"}
+            if method == "getAllCategories":
+                return [{"id": 3, "name": "Interne"}]
+            return []
+
+        server._PROJECT_NAMES.clear()
+        server._CATEGORY_NAMES.clear()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_run):
+            data = json.loads(await kanboard_get_task(task_id=7848))
+
+        assert data["project_name"] == "Coordination Claude x Benjamin"
+        assert data["category_name"] == "Interne"
+        assert data["category_id"] == 3
