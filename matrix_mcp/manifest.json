@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "matrix-mcp",
   "display_name": "Matrix",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Connecteur Matrix : salons, messages, membres, invitations. API Matrix Client-Server v3.",
   "author": {
     "name": "inno³",
@@ -79,6 +79,54 @@
     {
       "name": "matrix_set_topic",
       "description": "Définit le sujet d'un salon"
+    },
+    {
+      "name": "matrix_reply_in_thread",
+      "description": "Répond dans le fil d'un message"
+    },
+    {
+      "name": "matrix_get_thread",
+      "description": "Lit toutes les réponses d'un fil"
+    },
+    {
+      "name": "matrix_react",
+      "description": "Pose une réaction sur un message"
+    },
+    {
+      "name": "matrix_edit_message",
+      "description": "Corrige un message déjà envoyé"
+    },
+    {
+      "name": "matrix_redact_message",
+      "description": "Supprime un message d'un salon"
+    },
+    {
+      "name": "matrix_send_file",
+      "description": "Envoie un fichier local dans un salon"
+    },
+    {
+      "name": "matrix_get_event_context",
+      "description": "Lit les messages autour d'un message"
+    },
+    {
+      "name": "matrix_get_permalink",
+      "description": "Construit un lien matrix.to vers un message"
+    },
+    {
+      "name": "matrix_get_reactions",
+      "description": "Lit les réactions posées sur un message, et par qui"
+    },
+    {
+      "name": "matrix_list_unread",
+      "description": "Salons ayant des messages non lus, avec leur compteur"
+    },
+    {
+      "name": "matrix_mark_read",
+      "description": "Marque un salon comme lu jusqu'à un message"
+    },
+    {
+      "name": "matrix_list_files",
+      "description": "Liste les fichiers et images partagés dans un salon"
     }
   ]
 }
