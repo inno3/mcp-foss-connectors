@@ -38,6 +38,7 @@ from kanboard_mcp.server import (  # noqa: E402
     kanboard_list_projects,
     kanboard_list_task_links,
     kanboard_my_dashboard,
+    kanboard_my_overdue,
     kanboard_recent_activity,
     kanboard_remove_comment,
     kanboard_remove_task_link,
@@ -1512,3 +1513,176 @@ class TestGetTaskExposesProjectAndCategory:
         assert data["project_name"] == "Coordination Claude x Benjamin"
         assert data["category_name"] == "Interne"
         assert data["category_id"] == 3
+
+
+class TestMyOverdueUsesTheDedicatedProcedure:
+    """`getOverdueTasks` rend en un appel ce que le balayage des ~70 projets
+    cherchait projet par projet. La procedure ne filtrant pas par utilisateur,
+    le tri sur owner_id se fait cote client."""
+
+    PAST = "1609459200"    # 2021-01-01
+    OLDER = "1577836800"   # 2020-01-01
+    FUTURE = "4102444800"  # 2100-01-01
+
+    def _rows(self) -> list[dict]:
+        """Lignes telles que les rend getOverdueTasks : tous utilisateurs melanges."""
+        return [
+            {"id": "10", "title": "Ma vieille tache", "project_id": "262",
+             "project_name": "Pilotage", "owner_id": "84",
+             "assignee_name": "Agent IA", "date_due": self.OLDER},
+            {"id": "11", "title": "Ma tache en retard", "project_id": "262",
+             "project_name": "Pilotage", "owner_id": "84",
+             "assignee_name": "Agent IA", "date_due": self.PAST},
+            {"id": "12", "title": "La tache d'un collegue", "project_id": "263",
+             "project_name": "Autre", "owner_id": "4",
+             "assignee_name": "Alice", "date_due": self.PAST},
+            {"id": "13", "title": "Tache non assignee", "project_id": "263",
+             "project_name": "Autre", "owner_id": "0",
+             "assignee_name": "", "date_due": self.PAST},
+        ]
+
+    async def test_one_call_replaces_the_project_sweep(self) -> None:
+        calls: list[str] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append(method)
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                return self._rows()
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            data = json.loads(await kanboard_my_overdue(as_user="agent"))
+
+        assert calls.count("getOverdueTasks") == 1
+        # Le balayage projet par projet ne doit plus avoir lieu.
+        assert "getAllProjects" not in calls
+        assert "getMyProjects" not in calls
+        assert "getAllTasks" not in calls
+        assert data["source"] == "getOverdueTasks"
+
+    async def test_other_users_tasks_are_filtered_out(self) -> None:
+        """getOverdueTasks rend toute l'instance : sans filtre, on lirait les
+        retards des collegues comme les siens."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                return self._rows()
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            data = json.loads(await kanboard_my_overdue(as_user="agent"))
+
+        assert data["overdue_count"] == 2
+        assert [t["id"] for t in data["tasks"]] == ["10", "11"]  # plus ancien d'abord
+        assert data["tasks"][0]["days_overdue"] > data["tasks"][1]["days_overdue"]
+        assert data["as_user"] == "agent"
+
+    async def test_the_requested_account_is_the_one_queried(self) -> None:
+        """as_user doit porter jusqu'a l'appel JSON-RPC : interroger le compte
+        primary pour un as_user='agent' rendrait les retards du mauvais humain."""
+        seen: list[tuple[str, str]] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            seen.append((method, as_user))
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                return []
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            await kanboard_my_overdue(as_user="agent")
+
+        assert ("getOverdueTasks", "agent") in seen
+
+    async def test_a_future_due_date_is_not_overdue(self) -> None:
+        """Le filtre client reste necessaire : le repli par balayage, lui, rend
+        des taches dont l'echeance n'est pas passee."""
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                return [
+                    {"id": "20", "title": "Plus tard", "project_id": "262",
+                     "project_name": "Pilotage", "owner_id": "84",
+                     "assignee_name": "Agent IA", "date_due": self.FUTURE},
+                    {"id": "21", "title": "Sans echeance", "project_id": "262",
+                     "project_name": "Pilotage", "owner_id": "84",
+                     "assignee_name": "Agent IA", "date_due": "0"},
+                ]
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            data = json.loads(await kanboard_my_overdue(as_user="agent"))
+
+        assert data["overdue_count"] == 0
+
+    async def test_a_refused_procedure_falls_back_to_the_sweep(self) -> None:
+        """getOverdueTasks est admin-only sur certaines instances : un 403 doit
+        rendre la reponse par le balayage, pas une erreur."""
+        calls: list[str] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append(method)
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                raise _http_403()
+            if method == "getAllProjects":
+                return [{"id": 262, "name": "Pilotage", "is_active": "1"}]
+            if method == "getAllTasks":
+                return [
+                    {"id": "30", "title": "En retard", "project_id": "262",
+                     "project_name": "Pilotage", "owner_id": "84",
+                     "assignee_name": "Agent IA", "date_due": self.PAST},
+                    {"id": "31", "title": "Plus tard", "project_id": "262",
+                     "project_name": "Pilotage", "owner_id": "84",
+                     "assignee_name": "Agent IA", "date_due": self.FUTURE},
+                ]
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            data = json.loads(await kanboard_my_overdue(as_user="agent"))
+
+        assert "getAllTasks" in calls
+        assert data["source"] == "scan_projets"
+        assert [t["id"] for t in data["tasks"]] == ["30"]
+
+    async def test_a_non_permission_error_is_not_hidden_behind_a_sweep(self) -> None:
+        """Une panne serveur doit se voir, pas se deguiser en reponse lente."""
+        calls: list[str] = []
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append(method)
+            if method == "getMe":
+                return {"id": 84, "username": "bot", "name": "Agent IA"}
+            if method == "getOverdueTasks":
+                request = httpx.Request("POST", "https://kb.example.test/jsonrpc.php")
+                raise httpx.HTTPStatusError(
+                    "Server Error", request=request,
+                    response=httpx.Response(500, request=request),
+                )
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server._my_id_cache", {}), patch(
+            "kanboard_mcp.server.kb_call", new_callable=AsyncMock, side_effect=_dispatch
+        ):
+            out = await kanboard_my_overdue(as_user="agent")
+
+        assert "500" in out
+        assert "getAllTasks" not in calls

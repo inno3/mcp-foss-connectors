@@ -141,6 +141,14 @@ of the two applied through a `scope` field: `all` for the whole instance,
 `member` for the narrower set — the difference matters, because a `member` list
 is not proof that a project does not exist.
 
+`kanboard_my_overdue` no longer sweeps every project: it calls `getOverdueTasks`
+once for the whole instance and filters on `owner_id` client-side, since that
+procedure returns everybody's overdue tasks. Where the account may not call it,
+the tool falls back to the project sweep and says so through `source`
+(`getOverdueTasks` or `scan_projets`). The fast path carries no column,
+swimlane, category or priority — `getOverdueTasks` does not return them, and
+resolving them would cost one call per task.
+
 Run `kanboard_check_project_access` before writing to find out which account can
 reach a given project, rather than discovering it as a 403 at post time. Without
 arguments it reports the gap between the two accounts; with `project_id` it

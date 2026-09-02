@@ -896,27 +896,68 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
 
     Parametres :
     - as_user : compte cible ("primary" = humain, "agent" = assistant IA, "" = defaut)
+
+    Repose sur la procedure `getOverdueTasks`, qui rend en UN appel les taches
+    en retard de toute l'instance : le balayage projet par projet coutait ~70
+    appels `getAllTasks` pour la meme reponse. `getOverdueTasks` ne filtre pas
+    par utilisateur (elle rend les taches de tout le monde), d'ou le filtrage
+    sur owner_id cote client, apres coup.
+
+    Si le compte n'a pas le droit d'appeler `getOverdueTasks` (procedure
+    reservee aux administrateurs sur certaines instances), on retombe sur le
+    balayage : mieux vaut une reponse lente qu'un 403 sec. Le champ `source`
+    dit laquelle des deux voies a repondu.
+
+    Les lignes de `getOverdueTasks` ne portent ni colonne, ni swimlane, ni
+    categorie, ni priorite : ces champs ressortent vides sur cette voie. Les
+    resoudre demanderait un appel par tache, ce qui annulerait le gain.
     """
     try:
-        tasks, err = await _get_my_tasks(status_id=1, as_user=as_user)
-        if err:
+        account = _resolve_account(as_user)
+        my_uid, err = await _get_my_user_id(as_user=account)
+        if my_uid <= 0:
             return f"Erreur : {err}"
+
+        source = "getOverdueTasks"
+        try:
+            tasks = await kb_call("getOverdueTasks", as_user=account) or []
+        except Exception as exc:
+            if not _is_permission_error(exc):
+                raise
+            source = "scan_projets"
+            tasks, err = await _get_my_tasks(status_id=1, as_user=account)
+            if err:
+                return f"Erreur : {err}"
+
         now_ts = int(datetime.now().timestamp())
         overdue = []
         for t in tasks:
+            try:
+                if int(t.get("owner_id") or 0) != my_uid:
+                    continue
+            except (ValueError, TypeError):
+                continue
             due = t.get("date_due")
-            if due and due != "0":
-                try:
-                    if int(due) < now_ts and int(due) > 0:
-                        summary = await _task_summary(t, as_user=as_user)
-                        summary["days_overdue"] = (now_ts - int(due)) // 86400
-                        overdue.append(summary)
-                except (ValueError, TypeError):
-                    pass
+            if not due or due == "0":
+                continue
+            try:
+                due_ts = int(due)
+            except (ValueError, TypeError):
+                continue
+            if not 0 < due_ts < now_ts:
+                continue
+            summary = await _task_summary(t, as_user=account)
+            summary["days_overdue"] = (now_ts - due_ts) // 86400
+            overdue.append(summary)
 
         # Trier par date d'echeance croissante (plus ancien en premier)
         overdue.sort(key=lambda x: x.get("due_date", ""))
-        return _dumps({"as_user": _resolve_account(as_user), "overdue_count": len(overdue), "tasks": overdue})
+        return _dumps({
+            "as_user": account,
+            "source": source,
+            "overdue_count": len(overdue),
+            "tasks": overdue,
+        })
     except Exception as exc:
         return _format_error(exc)
 
