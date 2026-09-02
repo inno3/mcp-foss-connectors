@@ -336,7 +336,12 @@ class TestWorkflowsHealth:
         wf = data["workflows"][0]
         assert wf["health"] == "en échec"
         assert wf["consecutive_failures"] == 5
-        assert wf["consecutive_failures_at_least"] is True   # aucun succès dans la fenêtre
+        # L'historique mocké s'arrête là (aucun `nextCursor`) : les cinq échecs
+        # SONT toute l'histoire, le compte est donc exact et non un minorant.
+        # `consecutive_failures_at_least` ne sert plus qu'au dépassement de
+        # HEALTH_MAX_DEPTH — cf. TestConsecutiveFailuresReachTheirRealValue.
+        assert "consecutive_failures_at_least" not in wf
+        assert wf["never_succeeded"] is True
         assert wf["last_error"] == "Converting circular structure to JSON"
         assert data["failing"] == 1
 
@@ -506,3 +511,323 @@ class TestTags:
 
         assert data["success"] is False
         assert "count" not in data
+
+
+# ---------------------------------------------------------------------------
+# Défauts relevés en recette du bundle 1.2.0, les 01 et 02/09/2026, contre
+# l'instance de production (19 workflows actifs).
+# ---------------------------------------------------------------------------
+
+
+def _hours_ago(hours: float) -> str:
+    """Horodatage ISO relatif à maintenant : les fenêtres sont glissantes."""
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _failures(count, workflow_id, *, start_id=0, first_hours_ago=1.0, step=0.5,
+              status="error") -> list:
+    """Une série d'échecs d'un même workflow, du plus récent au plus ancien."""
+    return [
+        _execution(id=start_id + i, workflowId=workflow_id, status=status,
+                   startedAt=_hours_ago(first_hours_ago + i * step))
+        for i in range(count)
+    ]
+
+
+def _fake_instance(rows, *, accepts_date_bounds=False, workflows=None, names=None):
+    """Instance n8n mockée : /executions pagine par curseur, comme la vraie.
+
+    `accepts_date_bounds=False` reproduit l'instance inno³, qui répond 400 dès
+    qu'on lui passe `startedAfter` — d'où le filtrage côté client.
+    """
+    names = names or {}
+    calls: list = []
+
+    async def fake_get(path, params=None):
+        params = dict(params or {})
+        calls.append((path, params))
+        if path == "executions":
+            if not accepts_date_bounds and (
+                "startedAfter" in params or "startedBefore" in params
+            ):
+                resp = httpx.Response(400, request=httpx.Request("GET", "http://t"))
+                raise httpx.HTTPStatusError("", request=resp.request, response=resp)
+            sel = list(rows)
+            if params.get("status"):
+                sel = [r for r in sel if r.get("status") == params["status"]]
+            if params.get("workflowId"):
+                sel = [r for r in sel if r.get("workflowId") == params["workflowId"]]
+            if params.get("startedAfter"):
+                sel = [r for r in sel
+                       if str(r.get("startedAt") or "") >= params["startedAfter"]]
+            sel.sort(key=lambda r: str(r.get("startedAt") or ""), reverse=True)
+            start = int(params.get("cursor") or 0)
+            size = int(params.get("limit") or 10)
+            page = {"data": sel[start:start + size]}
+            if start + size < len(sel):
+                page["nextCursor"] = str(start + size)
+            return page
+        if path == "workflows":
+            return {"data": workflows or []}
+        if path.startswith("workflows/"):
+            wid = path.split("/", 1)[1]
+            return {"name": names.get(wid, wid)}
+        return _execution_with_error()
+
+    fake_get.calls = calls
+    return fake_get
+
+
+_NAMES = {
+    "wf-bot": "Bot Matrix inno3pilot",
+    "wf-cal": "Cal.com miroir",
+    "wf-brief": "Brief quotidien",
+}
+
+
+def _sixty_failures() -> list:
+    """La semaine relevée le 01/09 : 45 + 10 + 5 échecs sur trois workflows."""
+    return (
+        _failures(45, "wf-bot", start_id=100)
+        + _failures(10, "wf-cal", start_id=200, first_hours_ago=2)
+        + _failures(5, "wf-brief", start_id=300, first_hours_ago=3, step=24)
+    )
+
+
+class TestFailureCountsAreTotalsNotPageSizes:
+    """Défaut 1 : troncature silencieuse au plafond `limit`.
+
+    Sur la même fenêtre de 168 h, limit=50 rendait « 36 / 9 / 5 » et limit=60
+    « 45 / 10 / 5 ». Un compte qui varie avec le plafond n'est pas un total, et
+    rien dans la réponse ne signalait que la fenêtre n'était pas couverte.
+    """
+
+    async def test_by_workflow_carries_window_totals_not_the_page_count(self) -> None:
+        api = _fake_instance(_sixty_failures(), names=_NAMES)
+        with patch("n8n_mcp.server.api_get", new=AsyncMock(side_effect=api)):
+            data = json.loads(await n8n_list_failures(hours=168, limit=50))
+
+        totals = {g["workflow_name"]: g["failures"] for g in data["by_workflow"]}
+        assert totals == {"Bot Matrix inno3pilot": 45, "Cal.com miroir": 10,
+                          "Brief quotidien": 5}
+        assert data["total_failures"] == 60
+        assert data["window_complete"] is True
+        assert data["count"] == 50            # `executions` reste borné par limit
+        assert "truncation_note" in data      # et la coupe est dite
+
+    async def test_the_totals_do_not_move_with_the_limit(self) -> None:
+        def totals(payload):
+            return {g["workflow_name"]: g["failures"] for g in payload["by_workflow"]}
+
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=_fake_instance(_sixty_failures(),
+                                                            names=_NAMES))):
+            fifty = json.loads(await n8n_list_failures(hours=168, limit=50))
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=_fake_instance(_sixty_failures(),
+                                                            names=_NAMES))):
+            sixty = json.loads(await n8n_list_failures(hours=168, limit=60))
+
+        assert totals(fifty) == totals(sixty)
+        assert fifty["total_failures"] == sixty["total_failures"] == 60
+
+    async def test_a_window_the_page_cap_cannot_cover_is_announced(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(server, "EXEC_MAX_PAGES", 1)
+        api = _fake_instance(_failures(600, "wf-bot", step=0.2), names=_NAMES)
+        with patch("n8n_mcp.server.api_get", new=AsyncMock(side_effect=api)):
+            data = json.loads(await n8n_list_failures(hours=168, limit=50))
+
+        assert data["window_complete"] is False
+        assert data["oldest_seen_at"]
+        assert any("NON couverte" in n for n in data["notes"])
+
+
+class TestTheWindowIsActuallyAWindow:
+    """Défaut 2 : `hours` filtrait la page demandée, pas la fenêtre.
+
+    L'instance refuse les bornes de date sur /executions ; le filtre côté
+    client ne portait que sur une page, si bien que « les 168 dernières
+    heures » valait en réalité « les N derniers échecs, puis filtrés ».
+    """
+
+    async def test_the_window_is_walked_until_its_bound_is_crossed(self) -> None:
+        rows = (_failures(30, "wf-bot", start_id=100)
+                + _failures(30, "wf-old", start_id=400, first_hours_ago=300, step=1))
+        api = _fake_instance(rows, names={"wf-bot": "Bot Matrix inno3pilot",
+                                          "wf-old": "Vieux workflow"})
+        with patch("n8n_mcp.server.api_get", new=AsyncMock(side_effect=api)):
+            data = json.loads(await n8n_list_failures(hours=168, limit=10))
+
+        assert data["total_failures"] == 30
+        assert data["workflows_affected"] == 1
+        assert data["window_complete"] is True
+        assert any("côté client" in n for n in data["notes"])
+
+    def test_the_docstring_states_the_instance_limitation(self) -> None:
+        doc = n8n_list_failures.__doc__ or ""
+        assert "400" in doc and "page" in doc
+
+
+class TestConsecutiveFailuresReachTheirRealValue:
+    """Défaut 3 : neuf échecs consécutifs se lisaient « 5 ».
+
+    `per_workflow` plafonnait la profondeur inspectée sans que la valeur réelle
+    soit atteignable, et `last_success_at = null` ne distinguait pas « n'a
+    jamais réussi » de « dernier succès hors de la profondeur inspectée ».
+    """
+
+    @staticmethod
+    def _instance(statuses, wid="esFmnG1NIMOQD2C0"):
+        rows = [
+            _execution(id=i, workflowId=wid, status=s, startedAt=_hours_ago(i * 24))
+            for i, s in enumerate(statuses)
+        ]
+        return _fake_instance(
+            rows,
+            workflows=[{"id": wid, "name": "Brief quotidien direction", "active": True}],
+        )
+
+    async def test_the_streak_is_followed_beyond_the_first_page(self) -> None:
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=self._instance(["error"] * 9))):
+            data = json.loads(await n8n_workflows_health())
+
+        wf = data["workflows"][0]
+        assert wf["consecutive_failures"] == 9          # et non 5
+        assert "consecutive_failures_at_least" not in wf
+        assert wf["last_success_at"] is None
+        assert wf["never_succeeded"] is True            # levée de l'ambiguïté
+        assert wf["oldest_failure_at"]
+
+    async def test_a_success_beyond_the_first_page_closes_the_streak(self) -> None:
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=self._instance(["error"] * 6
+                                                            + ["success"] * 3))):
+            data = json.loads(await n8n_workflows_health())
+
+        wf = data["workflows"][0]
+        assert wf["consecutive_failures"] == 6
+        assert wf["last_success_at"] is not None
+        assert "never_succeeded" not in wf
+        assert "last_success_unknown" not in wf
+
+    async def test_the_depth_actually_inspected_is_reported(self, monkeypatch) -> None:
+        monkeypatch.setattr(server, "HEALTH_MAX_DEPTH", 10)
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=self._instance(["error"] * 40))):
+            data = json.loads(await n8n_workflows_health())
+
+        wf = data["workflows"][0]
+        assert wf["inspected"] == 10
+        assert wf["consecutive_failures"] == 10
+        assert wf["consecutive_failures_at_least"] is True
+        assert wf["last_success_unknown"] is True       # ≠ « n'a jamais réussi »
+        assert "never_succeeded" not in wf
+
+    def test_the_docstring_states_what_per_workflow_now_means(self) -> None:
+        doc = (n8n_workflows_health.__doc__ or "").lower()
+        assert "première passe" in doc and "health_max_depth" in doc
+
+
+class TestSweepingTheInstance:
+    """Défaut 4 : un workflow déclenché toutes les 2 min sature l'historique.
+
+    Sans filtre, 13 des 15 exécutions rendues appartenaient au même workflow :
+    l'appel ne balayait pas l'instance, il rendait un seul workflow.
+    """
+
+    @staticmethod
+    def _rows():
+        noisy = [_execution(id=i, workflowId="igqOctuwbRaabeUS", status="success",
+                            startedAt=_hours_ago(i / 30)) for i in range(200)]
+        others = [_execution(id=900 + i, workflowId=f"wf-{i}", status="success",
+                             startedAt=_hours_ago(5 + i)) for i in range(4)]
+        return noisy + others
+
+    async def test_a_noisy_workflow_can_be_excluded(self) -> None:
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=_fake_instance(self._rows()))):
+            data = json.loads(await n8n_get_executions(
+                limit=15, exclude_workflow_ids="igqOctuwbRaabeUS"))
+
+        assert data["count"] == 4
+        assert "igqOctuwbRaabeUS" not in {
+            e["workflow_id"] for e in data["executions"]
+        }
+        assert data["excluded_workflow_ids"] == ["igqOctuwbRaabeUS"]
+
+    async def test_one_per_workflow_gives_a_view_of_the_instance(self) -> None:
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=_fake_instance(self._rows()))):
+            data = json.loads(await n8n_get_executions(limit=15, one_per_workflow=True))
+
+        ids = [e["workflow_id"] for e in data["executions"]]
+        assert len(ids) == len(set(ids)) == 5
+        assert data["one_per_workflow"] is True
+
+    async def test_without_a_filter_the_call_still_costs_one_page(self) -> None:
+        with patch("n8n_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = {"data": [_execution(status="success")]}
+            await n8n_get_executions(limit=15)
+
+        assert get.await_count == 1
+
+
+class TestPaginationDegradesInsteadOfBreaking:
+    """Paginer, c'est parier sur `cursor`. Une instance peut le refuser.
+
+    Le pari ne doit jamais coûter la première page, qui, elle, a répondu.
+    """
+
+    @staticmethod
+    def _refuses_cursor(rows):
+        refused = httpx.HTTPStatusError(
+            "", request=httpx.Request("GET", "http://t"),
+            response=httpx.Response(400, request=httpx.Request("GET", "http://t")),
+        )
+
+        async def fake_get(path, params=None):
+            params = dict(params or {})
+            if path == "executions":
+                if "startedAfter" in params or "cursor" in params:
+                    raise refused
+                sel = [r for r in rows if r.get("status") == params.get("status", r.get("status"))]
+                size = int(params.get("limit") or 10)
+                return {"data": sel[:size], "nextCursor": "next"}
+            if path == "workflows":
+                return {"data": [{"id": "W1", "name": "Brief", "active": True}]}
+            if path.startswith("workflows/"):
+                return {"name": "Brief"}
+            return _execution_with_error()
+
+        return fake_get
+
+    async def test_a_refused_next_page_keeps_the_first_one(self) -> None:
+        rows = _failures(3, "W1")
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=self._refuses_cursor(rows))):
+            data = json.loads(await n8n_get_executions(
+                limit=15, exclude_workflow_ids="autre"))
+
+        assert data["count"] == 3
+        assert data["pages_scanned"] == 1
+        assert "sweep_note" in data          # le balayage s'est arrêté, il le dit
+
+    async def test_a_refused_next_page_leaves_the_streak_a_minorant(self) -> None:
+        rows = [_execution(id=i, workflowId="W1", status="error",
+                           startedAt=_hours_ago(i * 24)) for i in range(5)]
+        with patch("n8n_mcp.server.api_get",
+                   new=AsyncMock(side_effect=self._refuses_cursor(rows))):
+            data = json.loads(await n8n_workflows_health())
+
+        wf = data["workflows"][0]
+        assert wf["consecutive_failures"] == 5
+        assert wf["consecutive_failures_at_least"] is True
+        assert wf["last_success_unknown"] is True      # et non « n'a jamais réussi »
+        assert "never_succeeded" not in wf

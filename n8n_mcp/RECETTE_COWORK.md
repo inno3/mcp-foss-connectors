@@ -1,21 +1,21 @@
-# Recette Cowork — connecteur n8n 1.2.0
+# Recette Cowork — connecteur n8n 1.2.1
 
-**Cible : n8n-inno3 v1.2.0, 22 outils.** Lecture seule sauf la phase D.
+**Cible : n8n-inno3 v1.2.1, 22 outils.** Lecture seule sauf la phase D.
 
 Valeurs relevées sur l'instance le 31/08/2026.
 
 ## Prompt à copier
 
 ```
-Tu recettes le connecteur MCP n8n 1.2.0 contre l'instance de production.
+Tu recettes le connecteur MCP n8n 1.2.1 contre l'instance de production.
 Après chaque phase, un tableau : contrôle | attendu | constaté (OK / ÉCART).
 En cas d'ÉCART, montre la réponse brute.
 
 ÉTAPE 0 — Contrôle de version, à faire AVANT tout le reste
-Vérifie que l'outil `n8n_workflows_health` existe. S'il est absent, la 1.2.0
-n'est pas chargée : ARRÊTE-TOI et dis-le. Ne recette pas une version que tu
-n'as pas identifiée — les écarts constatés seraient ceux d'une version
-antérieure, pas des défauts.
+Vérifie que `n8n_get_executions` accepte le paramètre `exclude_workflow_ids`.
+S'il ne l'accepte pas, la 1.2.1 n'est pas chargée : ARRÊTE-TOI et dis-le. Ne
+recette pas une version que tu n'as pas identifiée — les écarts constatés
+seraient ceux d'une version antérieure, pas des défauts.
 
 Les phases A à C sont en lecture seule. La phase D écrit : demande-moi
 confirmation avant de la jouer.
@@ -38,6 +38,39 @@ A3. n8n_list_failures(hours=168)
     correspond à la longueur de by_workflow.
 A4. n8n_list_failures(hours=24) : un sous-ensemble, window_hours = 24.
 
+PHASE A' — Les comptes sont-ils des totaux ? (défauts 1 et 2 de la 1.2.0)
+A'1. n8n_list_failures(hours=168, limit=50) puis n8n_list_failures(hours=168,
+    limit=60), à quelques minutes d'intervalle.
+    Attendu : by_workflow IDENTIQUE entre les deux appels, et total_failures
+    identique. Un compte qui bouge avec limit n'est pas un total : c'est le
+    défaut corrigé. Seul `count` (le détail rendu) doit différer.
+    Ce contrôle ne prouve quelque chose que si la fenêtre contient PLUS
+    d'échecs que le plafond : vérifie d'abord total_failures > 60, sinon
+    élargis hours jusqu'à y parvenir et dis-le.
+A'2. Dans la même réponse : window_complete. Attendu true. S'il est false,
+    relève oldest_seen_at et pages_scanned et signale-le — la réponse annonce
+    alors que ses comptes sont des minorants, ce qui est le comportement
+    voulu, pas un écart.
+A'3. Si total_failures > count : truncation_note doit être présent et dire
+    que la coupe ne porte que sur `executions`.
+A'4. notes doit contenir la mention du filtrage côté client page par page :
+    l'instance refuse les bornes de date, c'est une limite d'instance
+    documentée, pas un défaut.
+
+PHASE A'' — L'ancienneté d'une panne est-elle atteignable ? (défaut 3)
+A''1. n8n_workflows_health() sur un workflow en échec depuis plusieurs jours.
+    Attendu : consecutive_failures est la VALEUR RÉELLE, pas per_workflow.
+    Contrôle croisé : n8n_get_executions(workflow_id=<id>, status="error",
+    limit=20) doit rendre le même nombre d'échecs consécutifs.
+    inspected dit la profondeur réellement lue, oldest_failure_at la date du
+    plus ancien échec de la série.
+A''2. Si last_success_at est null, la réponse DOIT porter never_succeeded
+    (aucun succès dans l'historique conservé) ou last_success_unknown
+    (dernier succès au-delà de la profondeur lue). Un null seul est un écart :
+    les deux situations n'ont pas la même gravité.
+A''3. consecutive_failures_at_least ne doit apparaître que si la série dépasse
+    HEALTH_MAX_DEPTH (valeur rendue dans max_depth).
+
 PHASE B — Ce que la version précédente ne savait pas faire
 B1. n8n_get_executions() SANS workflow_id.
     Attendu : des exécutions de plusieurs workflows. Ce paramètre était
@@ -47,6 +80,14 @@ B2. n8n_get_executions(workflow_id="esFmnG1NIMOQD2C0", status="error", limit=5)
     errors[0].node nommant le nœud CalDAV. errors_resolved = 5.
     Ce champ était toujours absent malgré la promesse de la docstring.
 B3. Même appel avec with_errors=False : errors_resolved = 0, aucun champ error.
+B4bis. n8n_get_executions(limit=15) SANS filtre, puis le même appel avec
+    exclude_workflow_ids=<le workflow qui occupe le plus de lignes>.
+    Attendu : le premier appel est dominé par un seul workflow (sur cette
+    instance, celui déclenché toutes les 2 minutes) ; le second couvre
+    plusieurs workflows et porte pages_scanned.
+B5. n8n_get_executions(limit=15, one_per_workflow=True)
+    Attendu : une exécution par workflow, aucun doublon d'identifiant, et une
+    vue d'ensemble de l'instance en un appel.
 B4. n8n_get_executions(started_after="2026-08-30T00:00:00Z", limit=20)
     Attendu : uniquement des exécutions du 30 août ou après. Si la réponse
     porte un champ `note` parlant de filtrage côté client, signale-le :
@@ -89,6 +130,10 @@ SYNTHÈSE
 
 | Symptôme | Ce que ça veut dire |
 |---|---|
+| `exclude_workflow_ids` refusé | 1.2.1 non chargée — ne pas recetter |
+| A'1 : by_workflow bouge avec `limit` | la fenêtre n'est pas paginée — régression du défaut 1 |
+| A'2 : `window_complete` false | fenêtre trop large pour EXEC_MAX_PAGES ; comptes = minorants, c'est annoncé |
+| A''2 : `last_success_at` null tout seul | régression du défaut 3 : l'ambiguïté est revenue |
 | `n8n_workflows_health` absent | 1.2.0 non chargée — ne pas recetter |
 | A1 ne montre pas le brief en échec | le workflow a été corrigé depuis, ou le parc a changé |
 | B2 : `error` absent | la relecture par exécution ne se fait pas |

@@ -19,7 +19,7 @@ environment variables — no host, login or secret is baked into the code.
 - `n8n_update_workflow_code` — Met à jour le jsCode d'un nœud Code spécifique dans un workflow n8n
 - `n8n_activate_workflow` — Active un workflow n8n (le met en production, il s'exécutera selon son trigger)
 - `n8n_deactivate_workflow` — Désactive un workflow n8n (il ne s'exécutera plus automatiquement)
-- `n8n_get_executions` — Récupère les exécutions récentes d'un workflow (pour voir les erreurs)
+- `n8n_get_executions` — Récupère les exécutions récentes d'un workflow ou de toute l'instance (`exclude_workflow_ids`, `one_per_workflow` pour balayer)
 - `n8n_get_execution_detail` — Récupère le détail complet d'une exécution n8n pour déboguer les erreurs
 - `n8n_trigger_workflow` — Déclenche manuellement un workflow n8n en mode test
 - `n8n_list_credentials` — Liste les credentials disponibles dans n8n (id, nom, type)
@@ -65,6 +65,46 @@ What this surfaced immediately: *Brief quotidien direction → Matrix* had faile
 every morning at 05:30 since at least 25 August, on
 `Converting circular structure to JSON` in its CalDAV node. Nothing had
 reported it.
+
+## Counts that stop lying when you change `limit` (1.2.1)
+
+Four defects found during the 1.2.0 acceptance test against the live instance
+on 01 and 02/09/2026. The first three are silent losses — nothing in the
+response said the number was wrong.
+
+1. **`n8n_list_failures` truncated at `limit` without saying so.** On the same
+   168 h window, `limit=50` returned `36 / 9 / 5` per workflow and `limit=60`
+   returned `45 / 10 / 5`. A count that moves with `limit` is not a total.
+   `by_workflow` and the new `total_failures` now cover the whole window: the
+   history is paged through with `nextCursor` until the window's bound is
+   crossed. `limit` still caps the detail in `executions` — and the response
+   says so in `truncation_note`. When the page guard (`EXEC_MAX_PAGES`) stops
+   the walk first, `window_complete` is `false` and `oldest_seen_at` says how
+   far back it actually got.
+2. **`hours` was not a window.** This instance rejects date bounds on
+   `/executions` (HTTP 400), so the filter only ever applied to the page that
+   had been fetched: `hours=168` really meant "the last N failures, then
+   filtered by date". The walk now pages back to the bound client-side. The
+   limitation itself cannot be lifted — it is the instance's — so it is stated
+   in the docstrings of both `n8n_list_failures` and `n8n_get_executions`.
+3. **`consecutive_failures` was capped at `per_workflow`.** Workflow
+   `esFmnG1NIMOQD2C0` reported 5 where the real value was 9: a nine-day outage
+   read as a five-day one, and it is the age of a failure that sets its
+   severity. When the first pass shows nothing but failures, the history is now
+   walked back to the last success, up to `HEALTH_MAX_DEPTH`. `inspected` and
+   `oldest_failure_at` say what was really read, and `last_success_at: null` is
+   disambiguated by `never_succeeded` (no success in the retained history)
+   versus `last_success_unknown` (last success beyond the depth read).
+   `per_workflow` is now the size of the first pass, not a ceiling.
+4. **No way to set aside a workflow that floods the history** (functional
+   extension, not a fix). One workflow triggered every two minutes took 13 of
+   15 rows: `n8n_get_executions` without `workflow_id` returned one workflow's
+   history, not a view of the instance. `exclude_workflow_ids` (comma
+   separated) and `one_per_workflow` page until they have `limit` rows, and
+   report `pages_scanned` — plus a `sweep_note` when the page guard stopped
+   them early.
+
+Response schemas are unchanged: every field above is additive.
 
 ## License
 

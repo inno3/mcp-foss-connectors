@@ -331,6 +331,8 @@ async def n8n_get_executions(
     started_after: str = "",
     started_before: str = "",
     with_errors: bool = True,
+    exclude_workflow_ids: str = "",
+    one_per_workflow: bool = False,
 ) -> str:
     """Exécutions récentes, d'un workflow ou de toute l'instance.
 
@@ -342,6 +344,8 @@ async def n8n_get_executions(
     - started_after / started_before : bornes ISO 8601
       (« 2026-08-30T00:00:00Z »), optionnelles
     - with_errors : résoudre la cause des exécutions en échec (défaut : oui)
+    - exclude_workflow_ids : identifiants à écarter, séparés par des virgules
+    - one_per_workflow : ne garder que la dernière exécution de chaque workflow
 
     Deux corrections par rapport à la version précédente. `workflow_id` n'est
     plus obligatoire : on peut enfin demander « qu'est-ce qui a tourné », sans
@@ -351,11 +355,25 @@ async def n8n_get_executions(
     la promesse de la docstring. La cause est donc relue par exécution en
     échec — un appel chacune, plafonné, le dépassement étant signalé.
 
+    Sans `workflow_id`, un workflow déclenché toutes les deux minutes occupe à
+    lui seul la première page : l'appel rend alors l'historique d'un workflow,
+    pas une vue de l'instance. `exclude_workflow_ids` l'écarte,
+    `one_per_workflow` donne une exécution par workflow. Les deux enchaînent
+    les pages jusqu'à réunir `limit` lignes ou atteindre EXEC_MAX_PAGES pages ;
+    dans ce dernier cas la réponse porte `sweep_note`.
+
+    Limite d'instance : certaines instances (dont celle d'inno³) refusent
+    `startedAfter` / `startedBefore` sur /executions et répondent 400. Le
+    filtrage est alors fait côté client, SUR LA PAGE DEMANDÉE UNIQUEMENT — la
+    réponse porte alors `note`. Pour une fenêtre temporelle réellement
+    parcourue, utiliser n8n_list_failures, qui pagine jusqu'à sa borne.
+
     Pour une revue d'incidents, préférer n8n_list_failures, qui regroupe par
     workflow et résout les noms.
     """
     try:
-        params: dict[str, Any] = {"limit": max(1, min(int(limit), EXEC_MAX_LIMIT))}
+        capped = max(1, min(int(limit), EXEC_MAX_LIMIT))
+        params: dict[str, Any] = {"limit": capped}
         if workflow_id:
             params["workflowId"] = workflow_id
         if status:
@@ -365,7 +383,16 @@ async def n8n_get_executions(
         if started_before:
             params["startedBefore"] = started_before
 
-        rows, note = await _fetch_executions(params)
+        excluded = {w.strip() for w in str(exclude_workflow_ids or "").split(",") if w.strip()}
+        sweeping = bool(excluded or one_per_workflow)
+        pages, exhausted = 1, False
+        if sweeping:
+            rows, note, pages, exhausted = await _select_executions(
+                params, capped, excluded, bool(one_per_workflow)
+            )
+        else:
+            rows, note = await _fetch_executions(params)
+
         results = [_exec_summary(r) for r in rows]
         looked_up = 0
         if with_errors:
@@ -378,6 +405,18 @@ async def n8n_get_executions(
             "errors_resolved": looked_up,
             "executions": results,
         }
+        if sweeping:
+            response["pages_scanned"] = pages
+            if excluded:
+                response["excluded_workflow_ids"] = sorted(excluded)
+            if one_per_workflow:
+                response["one_per_workflow"] = True
+            if not exhausted and len(results) < capped:
+                response["sweep_note"] = (
+                    f"Balayage arrêté après {pages} page(s) (garde-fou "
+                    f"EXEC_MAX_PAGES={EXEC_MAX_PAGES}) sans réunir {capped} "
+                    "exécutions : l'historique n'a pas été lu jusqu'au bout."
+                )
         if note:
             response["note"] = note
         return _dumps({k: v for k, v in response.items() if v is not None})
@@ -966,6 +1005,26 @@ EXEC_MAX_LIMIT = 250
 EXEC_ERROR_LOOKUP_MAX = 25
 #: Longueur retenue d'un message d'erreur. La coupe est annoncée.
 EXEC_ERROR_CHARS = 400
+#: Taille de page demandée lors d'un parcours paginé (plafond de l'API).
+EXEC_PAGE_SIZE = 250
+#: Garde-fou : nombre maximal de pages parcourues pour couvrir une fenêtre.
+#: Atteindre ce plafond n'est jamais silencieux — la réponse porte alors
+#: `window_complete: false`, et les comptes rendus sont des minorants.
+EXEC_MAX_PAGES = 20
+#: Profondeur maximale remontée par workflow pour dater le dernier succès.
+#: Un workflow en échec depuis longtemps n'a de gravité que par l'ancienneté
+#: de sa panne : on remonte jusqu'au dernier succès plutôt que jusqu'au
+#: plafond d'affichage.
+HEALTH_MAX_DEPTH = 100
+
+_NOTE_CLIENT_DATES = (
+    "Cette instance n'accepte pas les bornes de date sur /executions : "
+    "filtrage effectué côté client, sur la page demandée uniquement."
+)
+_NOTE_CLIENT_DATES_PAGED = (
+    "Cette instance n'accepte pas les bornes de date sur /executions (HTTP 400) : "
+    "filtrage effectué côté client, page par page, en remontant jusqu'à la borne."
+)
 
 
 def _clip(text: Any, limit: int = EXEC_ERROR_CHARS) -> str:
@@ -1051,34 +1110,231 @@ def _duration_seconds(started: Any, stopped: Any) -> float | None:
         return None
 
 
-async def _fetch_executions(params: dict) -> "tuple[list, str]":
-    """Liste des exécutions, avec repli si l'instance ignore les bornes de date.
+def _unwrap_page(data: Any) -> "tuple[list, str | None]":
+    """Sépare les lignes d'une page /executions de son curseur de suite.
+
+    L'API publique n8n rend `{"data": [...], "nextCursor": "..."}`. Le curseur
+    est la seule façon d'aller au-delà d'une page : sans lui, `limit` n'est pas
+    un plafond d'affichage mais la limite de ce qu'on saura jamais.
+    """
+    if isinstance(data, dict):
+        rows = data.get("data", data)
+        return (rows or []), (data.get("nextCursor") or None)
+    return (data or []), None
+
+
+async def _fetch_executions_page(params: dict) -> "tuple[list, str, str | None]":
+    """Une page d'exécutions, avec repli si l'instance ignore les bornes de date.
 
     `startedAfter` / `startedBefore` sont apparus tardivement dans l'API
-    publique. Sur une instance plus ancienne, les envoyer peut produire un 400 :
-    on retente alors sans eux et on filtre côté client, en le disant.
+    publique. Sur une instance plus ancienne, les envoyer produit un 400 : on
+    retente alors sans eux et on filtre côté client, en le disant.
+
+    Retourne (lignes, note, curseur de la page suivante).
     """
     try:
-        data = await api_get("executions", params=params)
-        return (data.get("data", data) if isinstance(data, dict) else data) or [], ""
+        rows, cursor = _unwrap_page(await api_get("executions", params=params))
+        return rows, "", cursor
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 400 or not (
             "startedAfter" in params or "startedBefore" in params
         ):
             raise
     stripped = {k: v for k, v in params.items() if k not in ("startedAfter", "startedBefore")}
-    data = await api_get("executions", params=stripped)
-    rows = (data.get("data", data) if isinstance(data, dict) else data) or []
+    rows, cursor = _unwrap_page(await api_get("executions", params=stripped))
     after, before = params.get("startedAfter"), params.get("startedBefore")
     kept = [
         r for r in rows
         if (not after or str(r.get("startedAt") or "") >= after)
         and (not before or str(r.get("startedAt") or "") <= before)
     ]
-    return kept, (
-        "Cette instance n'accepte pas les bornes de date sur /executions : "
-        "filtrage effectué côté client, sur la page demandée uniquement."
-    )
+    return kept, _NOTE_CLIENT_DATES, cursor
+
+
+async def _fetch_executions(params: dict) -> "tuple[list, str]":
+    """Une page d'exécutions, sans son curseur. Conservé pour les appels
+    qui n'ont besoin que d'un échantillon récent."""
+    rows, note, _ = await _fetch_executions_page(params)
+    return rows, note
+
+
+async def _fetch_executions_window(
+    base_params: dict, since: str, max_pages: int | None = None
+) -> "tuple[list, set, dict]":
+    """TOUTES les exécutions démarrées depuis `since`, page par page.
+
+    Une page n'est pas une fenêtre. Tant qu'on se contente de la première,
+    « les 168 dernières heures » veut dire « les N derniers échecs, puis
+    filtrés par date » — et le compte obtenu varie avec `limit` sans que rien
+    ne le signale. On enchaîne donc les pages jusqu'à sortir de la fenêtre,
+    épuiser l'historique, ou atteindre le garde-fou `EXEC_MAX_PAGES`.
+
+    Ce dernier cas n'est pas silencieux : `complete` vaut False et
+    `oldest_seen_at` dit jusqu'où on est réellement remonté.
+
+    Certaines instances refusent `startedAfter` (HTTP 400) : on reprend alors
+    sans borne et on filtre côté client, en remontant page par page jusqu'à la
+    borne. Les exécutions étant rendues de la plus récente à la plus ancienne,
+    la première hors fenêtre clôt le parcours.
+
+    Retourne (lignes, notes, couverture) où `couverture` porte `complete`,
+    `pages` et `oldest_seen_at`.
+    """
+    cap = max(1, int(max_pages or EXEC_MAX_PAGES))
+    notes: set = set()
+    rows: list = []
+    server_side = True
+    cursor: str | None = None
+    pages = 0
+    complete = False
+    oldest: str | None = None
+
+    while pages < cap:
+        params = dict(base_params, limit=EXEC_PAGE_SIZE)
+        if server_side:
+            params["startedAfter"] = since
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            data = await api_get("executions", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 and server_side and pages == 0:
+                server_side = False
+                notes.add(_NOTE_CLIENT_DATES_PAGED)
+                continue
+            if pages == 0:
+                raise
+            notes.add(
+                f"Parcours interrompu par l'instance à la page {pages + 1} "
+                f"({_format_error(exc)}) : fenêtre non couverte."
+            )
+            break
+
+        pages += 1
+        page, cursor = _unwrap_page(data)
+        if not page:
+            complete = True
+            break
+
+        out_of_window = False
+        for row in page:
+            started = str(row.get("startedAt") or "")
+            if started and (oldest is None or started < oldest):
+                oldest = started
+            if not server_side and started and started < since:
+                out_of_window = True
+                continue
+            rows.append(row)
+        if out_of_window or not cursor:
+            complete = True
+            break
+
+    return rows, notes, {"complete": complete, "pages": pages, "oldest_seen_at": oldest}
+
+
+async def _select_executions(
+    base_params: dict,
+    wanted: int,
+    excluded: set,
+    one_per_workflow: bool,
+    max_pages: int | None = None,
+) -> "tuple[list, str, int, bool]":
+    """Balaie l'historique en écartant ce qui le sature.
+
+    Un workflow déclenché toutes les deux minutes occupe à lui seul la première
+    page : sans filtre, un appel sans `workflow_id` ne balaie pas l'instance,
+    il rend l'historique d'un seul workflow. On enchaîne donc les pages en
+    écartant les workflows exclus et, si demandé, en ne gardant que la dernière
+    exécution de chaque workflow.
+
+    Retourne (lignes, note, pages parcourues, historique épuisé).
+    """
+    cap = max(1, int(max_pages or EXEC_MAX_PAGES))
+    kept: list = []
+    seen: set = set()
+    cursor: str | None = None
+    note = ""
+    pages = 0
+    exhausted = False
+
+    while pages < cap and len(kept) < wanted:
+        params = dict(base_params, limit=EXEC_PAGE_SIZE)
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            page, page_note, cursor = await _fetch_executions_page(params)
+        except httpx.HTTPStatusError:
+            # Une instance qui refuse `cursor` ne doit pas faire perdre la
+            # première page, déjà obtenue. On s'arrête là, sans prétendre
+            # avoir épuisé l'historique.
+            if pages == 0:
+                raise
+            break
+        pages += 1
+        note = note or page_note
+        for row in page:
+            wid = row.get("workflowId")
+            if wid in excluded:
+                continue
+            if one_per_workflow:
+                if wid in seen:
+                    continue
+                seen.add(wid)
+            kept.append(row)
+            if len(kept) >= wanted:
+                break
+        if not cursor:
+            exhausted = True
+            break
+
+    return kept[:wanted], note, pages, exhausted
+
+
+async def _workflow_history(
+    workflow_id: str, first_page: int, max_depth: int | None = None
+) -> "tuple[list, bool]":
+    """Historique d'un workflow, approfondi tant qu'aucun succès n'apparaît.
+
+    Une première page courte suffit à qualifier un workflow sain. Mais quand
+    elle ne contient que des échecs, la série est plus longue que ce qu'on a lu,
+    et c'est justement son ancienneté qui fait la gravité : on remonte alors
+    page par page jusqu'au premier succès, jusqu'à la fin de l'historique
+    conservé par n8n, ou jusqu'à `HEALTH_MAX_DEPTH`.
+
+    Retourne (lignes, historique épuisé). `historique épuisé` distingue
+    « n'a jamais réussi » de « dernier succès hors de la profondeur lue » —
+    deux situations que `last_success_at = null` confondait.
+    """
+    depth = max(1, int(max_depth or HEALTH_MAX_DEPTH))
+    rows: list = []
+    cursor: str | None = None
+    exhausted = False
+    size = max(1, min(int(first_page), 50))
+
+    while True:
+        params: dict[str, Any] = {"workflowId": workflow_id, "limit": size}
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            page, cursor = _unwrap_page(await api_get("executions", params=params))
+        except httpx.HTTPStatusError:
+            # Refus d'une page suivante : on rend ce qu'on a lu, sans le faire
+            # passer pour l'historique complet (`exhausted` reste faux, donc
+            # `last_success_unknown` plutôt que `never_succeeded`).
+            if not rows:
+                raise
+            break
+        rows.extend(page)
+        if not page or not cursor:
+            exhausted = True
+            break
+        if any(r.get("status") not in ("error", "crashed") for r in rows):
+            break
+        if len(rows) >= depth:
+            break
+        size = max(1, min(50, depth - len(rows)))
+
+    return rows, exhausted
 
 
 async def _attach_errors(rows: list, budget: int = EXEC_ERROR_LOOKUP_MAX) -> "tuple[list, int]":
@@ -1120,8 +1376,12 @@ async def n8n_list_failures(
     """Liste les exécutions en ÉCHEC, tous workflows confondus.
 
     Paramètres :
-    - hours : profondeur de la fenêtre, en heures (défaut 24)
-    - limit : nombre max d'exécutions rendues (défaut 50, plafond 250)
+    - hours : profondeur de la fenêtre, en heures (défaut 24). La fenêtre est
+      RÉELLEMENT parcourue : l'historique est lu page par page jusqu'à sa
+      borne, indépendamment de `limit`.
+    - limit : nombre max d'exécutions DÉTAILLÉES dans `executions` (défaut 50,
+      plafond 250). Ce plafond ne tronque pas les comptes : `by_workflow` et
+      `total_failures` portent sur la fenêtre entière.
     - workflow_id : restreindre à un workflow (défaut : tous)
     - include_crashed : inclure le statut `crashed` en plus de `error`
 
@@ -1129,10 +1389,21 @@ async def n8n_list_failures(
     fallait interroger chaque workflow séparément — dix-sept appels sur cette
     instance — puis relire chaque exécution pour en obtenir la cause.
 
-    Chaque échec est rendu avec le nom de son workflow ET son message d'erreur,
-    résolu par relecture de l'exécution. Les échecs sont regroupés par workflow
-    dans `by_workflow`, avec le nombre d'occurrences : un même workflow qui
-    tombe chaque matin se voit d'un coup d'œil.
+    Chaque échec détaillé est rendu avec le nom de son workflow ET son message
+    d'erreur, résolu par relecture de l'exécution. Les échecs sont regroupés par
+    workflow dans `by_workflow`, avec le nombre d'occurrences sur la fenêtre :
+    un même workflow qui tombe chaque matin se voit d'un coup d'œil.
+
+    Limites, explicites plutôt qu'implicites :
+    - Certaines instances (dont celle d'inno³) refusent les bornes de date sur
+      /executions et répondent 400. Le filtrage se fait alors côté client, en
+      remontant page par page jusqu'à la borne ; `notes` le dit.
+    - Le parcours est borné à EXEC_MAX_PAGES pages. S'il s'arrête là,
+      `window_complete` vaut false, `oldest_seen_at` dit jusqu'où on est
+      remonté, et les comptes rendus sont des MINORANTS, pas des totaux.
+    - Les causes ne sont résolues que pour les EXEC_ERROR_LOOKUP_MAX premiers
+      échecs détaillés (`error_lookup_note`). Un groupe dont l'échec le plus
+      récent tombe au-delà de `limit` porte `last_error_unresolved`.
     """
     try:
         from datetime import datetime, timedelta, timezone
@@ -1143,36 +1414,44 @@ async def n8n_list_failures(
         )
         capped = max(1, min(int(limit), EXEC_MAX_LIMIT))
 
-        rows: list = []
+        all_rows: list = []
         notes: set = set()
+        complete = True
+        pages = 0
+        oldest: str | None = None
         for status in ("error", "crashed") if include_crashed else ("error",):
-            params: dict[str, Any] = {
-                "status": status,
-                "limit": capped,
-                "startedAfter": since,
-            }
+            params: dict[str, Any] = {"status": status}
             if workflow_id:
                 params["workflowId"] = workflow_id
             try:
-                found, note = await _fetch_executions(params)
+                found, found_notes, coverage = await _fetch_executions_window(
+                    params, since
+                )
             except httpx.HTTPStatusError as exc:
                 # Un statut inconnu de l'instance ne doit pas emporter le reste.
                 if exc.response.status_code == 400 and status == "crashed":
                     notes.add("Le statut `crashed` n'est pas reconnu par cette instance.")
                     continue
                 raise
-            if note:
-                notes.add(note)
-            rows.extend(found)
+            notes |= found_notes
+            complete = complete and coverage["complete"]
+            pages += coverage["pages"]
+            seen_at = coverage["oldest_seen_at"]
+            if seen_at and (oldest is None or seen_at < oldest):
+                oldest = seen_at
+            all_rows.extend(found)
 
-        rows.sort(key=lambda r: str(r.get("startedAt") or ""), reverse=True)
-        rows = [_exec_summary(r) for r in rows[:capped]]
-        rows, looked_up = await _attach_errors(rows)
+        all_rows.sort(key=lambda r: str(r.get("startedAt") or ""), reverse=True)
+        summaries = [_exec_summary(r) for r in all_rows]
+        # `executions` reste borné par `limit` — une revue d'incidents n'a pas
+        # besoin de six cents lignes — mais la coupe ne touche QUE le détail.
+        detailed = summaries[:capped]
+        detailed, looked_up = await _attach_errors(detailed)
 
         # Nom du workflow : absent de la réponse de liste, résolu une fois par
         # workflow distinct plutôt qu'une fois par exécution.
         names: dict[str, str] = {}
-        for row in rows:
+        for row in summaries:
             wid = row.get("workflow_id")
             if not wid or wid in names:
                 continue
@@ -1181,11 +1460,11 @@ async def n8n_list_failures(
                 names[wid] = (wf or {}).get("name") or wid
             except Exception:
                 names[wid] = wid
-        for row in rows:
+        for row in summaries:
             row["workflow_name"] = names.get(row.get("workflow_id"), row.get("workflow_id"))
 
         grouped: dict[str, dict] = {}
-        for row in rows:
+        for index, row in enumerate(summaries):
             key = row.get("workflow_name") or row.get("workflow_id") or "?"
             entry = grouped.setdefault(
                 key, {"workflow_id": row.get("workflow_id"), "failures": 0,
@@ -1195,19 +1474,38 @@ async def n8n_list_failures(
             if entry["last_started_at"] is None:
                 entry["last_started_at"] = row.get("started_at")
                 entry["last_error"] = row.get("error")
+                if index >= len(detailed) and entry["last_error"] is None:
+                    entry["last_error_unresolved"] = True
 
         response: dict[str, Any] = {
             "window_hours": window,
             "since": since,
-            "count": len(rows),
+            "count": len(detailed),
+            "total_failures": len(summaries),
+            "window_complete": complete,
             "workflows_affected": len(grouped),
             "errors_resolved": looked_up,
             "by_workflow": sorted(
                 ({"workflow_name": k, **v} for k, v in grouped.items()),
                 key=lambda g: -g["failures"],
             ),
-            "executions": rows,
+            "executions": detailed,
         }
+        if len(summaries) > len(detailed):
+            response["truncation_note"] = (
+                f"{len(summaries)} échecs sur la fenêtre ; seuls les {len(detailed)} "
+                "plus récents sont détaillés dans `executions` (plafond `limit`). "
+                "`by_workflow` et `total_failures` portent, eux, sur la fenêtre "
+                "entière."
+            )
+        if not complete:
+            response["oldest_seen_at"] = oldest
+            response["pages_scanned"] = pages
+            notes.add(
+                f"Fenêtre NON couverte : parcours arrêté après {pages} page(s) "
+                f"(garde-fou EXEC_MAX_PAGES={EXEC_MAX_PAGES}). Les comptes rendus "
+                "sont des minorants, pas des totaux."
+            )
         if looked_up >= EXEC_ERROR_LOOKUP_MAX:
             response["error_lookup_note"] = (
                 f"Causes résolues pour les {EXEC_ERROR_LOOKUP_MAX} premiers échecs "
@@ -1227,18 +1525,35 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
 
     Paramètres :
     - active_only : ne regarder que les workflows actifs (défaut : oui)
-    - per_workflow : profondeur d'historique inspectée par workflow (défaut 5)
+    - per_workflow : taille de la PREMIÈRE passe d'historique par workflow
+      (défaut 5). Ce n'est plus un plafond : dès que cette passe ne contient
+      que des échecs, l'historique est remonté page par page jusqu'au dernier
+      succès, jusqu'à la fin de l'historique conservé, ou jusqu'à
+      HEALTH_MAX_DEPTH exécutions. Un workflow sain coûte toujours un appel.
 
     Pour chaque workflow : statut de la dernière exécution, date du dernier
     succès, nombre d'échecs CONSÉCUTIFS et cause du dernier. C'est ce compteur
     qui distingue un incident isolé d'un workflow cassé depuis des jours —
-    celui qui échoue toutes les nuits sans que personne ne le voie.
+    celui qui échoue toutes les nuits sans que personne ne le voie. Sa valeur
+    n'est donc utile que si elle est atteignable : une panne de neuf jours ne
+    doit pas se lire « 5 » parce que l'affichage s'arrête là.
+
+    Champs de la série d'échecs :
+    - `consecutive_failures` : la valeur réelle, sauf mention contraire
+    - `inspected` : profondeur réellement lue
+    - `oldest_failure_at` : date du plus ancien échec de la série vue
+    - `consecutive_failures_at_least` : présent SI la série dépasse
+      HEALTH_MAX_DEPTH — le compte est alors un minorant
+    - `last_success_at` : null est désambiguïsé par `never_succeeded`
+      (aucun succès dans l'historique conservé par n8n) ou
+      `last_success_unknown` (dernier succès au-delà de la profondeur lue)
 
     Les workflows sont rendus les plus dégradés en tête. `never_ran` signale
     ceux qui n'ont aucune exécution : actifs mais jamais déclenchés, ce qui est
     souvent un défaut de configuration plutôt qu'une absence d'événement.
 
-    Coûte un appel par workflow inspecté : sur un parc important, préférer
+    Coûte un appel par workflow sain, davantage pour un workflow en échec
+    (remontée jusqu'au dernier succès) : sur un parc important, préférer
     n8n_list_failures pour une vue rapide.
     """
     try:
@@ -1256,9 +1571,7 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
                 "active": bool(wf.get("active")),
             }
             try:
-                rows, _ = await _fetch_executions(
-                    {"workflowId": wid, "limit": max(1, min(int(per_workflow), 50))}
-                )
+                rows, exhausted = await _workflow_history(wid, per_workflow)
             except Exception as exc:
                 entry["health"] = "inconnu"
                 entry["lookup_error"] = _format_error(exc)
@@ -1295,10 +1608,17 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
                 "last_success_at": last_success,
                 "inspected": len(summaries),
             })
+            if last_success is None:
+                # `null` seul ne dit pas laquelle des deux situations on lit.
+                if exhausted:
+                    entry["never_succeeded"] = True
+                else:
+                    entry["last_success_unknown"] = True
             if consecutive:
-                # `consecutive == inspected` veut dire que la fenêtre inspectée
-                # ne contient aucun succès : l'échec peut être plus ancien.
-                if consecutive >= len(summaries):
+                entry["oldest_failure_at"] = summaries[consecutive - 1].get("started_at")
+                # La série n'est un minorant que si on s'est arrêté avant la fin
+                # de l'historique : l'avoir lu en entier rend le compte exact.
+                if consecutive >= len(summaries) and not exhausted:
                     entry["consecutive_failures_at_least"] = True
                 enriched, _ = await _attach_errors([dict(last)], budget=1)
                 if enriched[0].get("errors"):
@@ -1313,6 +1633,7 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
         return _dumps({
             "checked": len(report),
             "active_only": active_only,
+            "max_depth": HEALTH_MAX_DEPTH,
             "failing": len(failing),
             "never_ran": sum(1 for e in report if e.get("never_ran")),
             "workflows": report,
