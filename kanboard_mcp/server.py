@@ -11,6 +11,8 @@ Auth : Basic Auth (username:token)
 
 import asyncio
 import base64
+import difflib
+import html
 import json
 import logging
 import os
@@ -248,14 +250,127 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
+LABEL_FIELDS = ("name", "title")
+
+
+def _label_key(value: Any) -> str:
+    """Cle de comparaison d'un libelle Kanboard (colonne, swimlane, categorie...).
+
+    Un libelle arrive rarement tel qu'il est stocke : il a souvent transite par
+    une couche HTML (compte rendu, page recopiee, export), qui rend "Missions &
+    Hermine" sous la forme "Missions &amp; Hermine" et l'espace insecable sous
+    la forme "&nbsp;". Compare brut, ce libelle ne se rapproche de rien, et
+    l'appelant relit une liste ou il ne voit aucun ecart.
+
+    Le repli applique, dans cet ordre :
+    - decodage des entites HTML (`&amp;`, `&nbsp;`, `&#39;`...) ;
+    - normalisation Unicode NFC (un "e" + accent combinant se lit comme "e") ;
+    - reduction de toute suite d'espaces, insecables compris, a une espace, et
+      suppression des espaces de bord ;
+    - repli de casse.
+
+    Ce qu'il ne fait PAS : effacer les accents. "Reunion" ne resout pas
+    "Réunion" — deux libelles distincts resteraient distincts. L'ecart est
+    seulement signale dans le message d'erreur.
+    """
+    text = html.unescape(str(value or ""))
+    text = unicodedata.normalize("NFC", text)
+    return " ".join(text.split()).casefold()
+
+
 def _fold(value: Any) -> str:
     """Replie une chaine en minuscules sans accents, pour comparaison souple.
 
     Les noms de projets Kanboard sont saisis a la main ("Pilotage",
     "Référentiel…") : sans repli, un filtre tape sans accent ne trouverait rien.
+
+    Repose sur `_label_key` (entites HTML, espaces, casse) puis efface les
+    accents : c'est le repli le plus large du connecteur. Il sert aux filtres
+    de sous-chaine et a la suggestion de valeur proche, jamais a decider qu'un
+    libelle en designe un autre.
     """
-    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    text = unicodedata.normalize("NFKD", _label_key(value))
     return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+def _row_label(row: dict, fields: tuple[str, ...] = LABEL_FIELDS) -> str:
+    """Libelle affichable d'une ligne Kanboard (`name` ou `title` selon l'objet)."""
+    for field in fields:
+        value = row.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def _closest_hint(name: str, available: "list[str]") -> str:
+    """Phrase designant la valeur disponible la plus proche, ou "" si aucune.
+
+    Enumerer les valeurs ne suffit pas quand l'ecart tient a un caractere
+    invisible a la lecture : "Missions &amp; Hermine" et "Missions & Hermine"
+    se juxtaposent sans que rien ne saute aux yeux. La suggestion nomme la
+    valeur candidate et, quand c'est le cas, dit que l'ecart se limite aux
+    accents, a la casse ou a des variantes typographiques.
+    """
+    candidates = [v for v in available if v]
+    if not candidates:
+        return ""
+    wanted = _label_key(name)
+    folded = _fold(wanted)
+    for value in candidates:
+        if _fold(_label_key(value)) == folded:
+            return (f" Valeur la plus proche : '{value}' — l'ecart ne porte que sur "
+                    "les accents, la casse ou des variantes typographiques.")
+    keys = {_label_key(v): v for v in candidates}
+    close = difflib.get_close_matches(wanted, list(keys), n=1, cutoff=0.6)
+    if close:
+        return f" Valeur la plus proche : '{keys[close[0]]}'."
+    return ""
+
+
+def _resolve_label(
+    rows: "list[dict] | None",
+    name: str,
+    label: str,
+    fields: tuple[str, ...] = LABEL_FIELDS,
+) -> "tuple[dict | None, str]":
+    """Rapproche un libelle fourni par l'appelant d'une des lignes Kanboard.
+
+    Retourne (ligne, "") si le rapprochement est certain, (None, message) sinon.
+
+    Trois passes, dans cet ordre :
+    1. la comparaison historique (casse et espaces de bord ignores), pour que
+       tout ce qui resolvait hier resolve encore, sur la meme ligne ;
+    2. le repli complet de `_label_key` ;
+    3. echec — le message enumere les valeurs disponibles et designe la plus
+       proche.
+
+    Une ligne exacte l'emporte donc sur une ligne qui ne correspond qu'apres
+    repli. Si le repli seul fait correspondre plusieurs lignes, la resolution
+    est refusee plutot qu'arbitrale : choisir a la place de l'appelant
+    ecrirait dans un swimlane qu'il n'a pas demande.
+    """
+    rows = list(rows or [])
+    legacy = str(name).lower().strip()
+    for row in rows:
+        if _row_label(row, fields).lower().strip() == legacy:
+            return row, ""
+
+    wanted = _label_key(name)
+    matches = [r for r in rows if wanted and _label_key(_row_label(r, fields)) == wanted]
+    if len(matches) == 1:
+        return matches[0], ""
+
+    available = [_row_label(r, fields) for r in rows]
+    if len(matches) > 1:
+        return None, (
+            f"{label} '{name}' est ambigu : {[_row_label(r, fields) for r in matches]} "
+            "se ressemblent une fois les entites HTML, les espaces et la casse "
+            "replies. Preciser l'identifiant."
+        )
+    return None, (
+        f"{label} '{name}' introuvable. Valeurs disponibles : {available}."
+        f"{_closest_hint(name, available)}"
+    )
 
 
 def _ts_to_date(value: Any) -> str:
@@ -561,8 +676,8 @@ async def kanboard_list_projects(
     - limit : nombre max de resultats (defaut 20, max 100)
     - offset : nombre de projets a sauter avant de decouper (pagination)
     - name_filter : sous-chaine filtrant le nom OU l'identifiant du projet,
-      insensible a la casse et aux accents (ex. "pilotage" trouve
-      "[Pilotage] Coordination")
+      insensible a la casse, aux accents, aux entites HTML (`&amp;`) et aux
+      espaces superflus (ex. "pilotage" trouve "[Pilotage] Coordination")
 
     Retourne : total_available (avant pagination), offset, count, has_more,
     scope, et projects (id, nom, identifiant, description tronquee a 200
@@ -1052,6 +1167,15 @@ async def kanboard_move_task(
     - as_user : compte qui execute le deplacement ("" = defaut, "primary"/"agent")
 
     Resout les noms de colonne et swimlane en IDs automatiquement.
+
+    Le rapprochement des noms replie les entites HTML (`&amp;` se lit `&`,
+    `&nbsp;` se lit comme une espace), les suites d'espaces, les espaces de bord,
+    la casse et les formes Unicode NFC/NFD : un nom recopie depuis une page HTML
+    ou un compte rendu resout donc sans retouche. Les accents, eux, ne sont PAS
+    replies : "Reunion" ne designe pas "Réunion". Un nom exact l'emporte toujours
+    sur un nom qui ne correspond qu'apres repli ; si le repli seul fait
+    correspondre plusieurs valeurs, la resolution est refusee et demande
+    l'identifiant.
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
@@ -1074,32 +1198,18 @@ async def kanboard_move_task(
         if not columns:
             return "Erreur : aucune colonne trouvee pour ce projet."
 
-        # Chercher la colonne par nom (insensible a la casse)
-        target_col = None
-        col_lower = column_name.lower()
-        for c in columns:
-            if (c.get("title") or "").lower() == col_lower:
-                target_col = c
-                break
-
-        if not target_col:
-            available = [c.get("title") for c in columns]
-            return f"Colonne '{column_name}' introuvable. Colonnes disponibles : {available}"
-
+        # Chercher la colonne par nom (entites HTML, espaces et casse replies)
+        target_col, err = _resolve_label(columns, column_name, "Colonne")
+        if target_col is None:
+            return err
         col_id = int(target_col["id"])
 
         # Resoudre le swimlane par nom si fourni
         if swimlane_name:
             swimlanes = await kb_call("getActiveSwimlanes", {"project_id": pid}, as_user=as_user)
-            sw_lower = swimlane_name.lower()
-            target_sw = None
-            for s in (swimlanes or []):
-                if (s.get("name") or "").lower() == sw_lower:
-                    target_sw = s
-                    break
-            if not target_sw:
-                available_sw = [s.get("name") for s in (swimlanes or [])]
-                return f"Swimlane '{swimlane_name}' introuvable. Swimlanes disponibles : {available_sw}"
+            target_sw, err = _resolve_label(swimlanes, swimlane_name, "Swimlane")
+            if target_sw is None:
+                return err
             swimlane_id = int(target_sw["id"])
 
         success = await kb_call("moveTaskPosition", {
@@ -1205,7 +1315,10 @@ async def kanboard_assign_task(
     - as_user : compte qui effectue la modification ("" = defaut, "primary"/"agent")
 
     Resolution par nom :
-    - Recherche insensible a la casse dans les membres du projet (nom affiche ET login).
+    - Recherche dans les membres du projet (nom affiche ET login), en repliant
+      entites HTML, espaces superflus, casse et formes Unicode NFC/NFD — meme
+      traitement que les noms de colonne, swimlane et categorie. Les accents ne
+      sont pas replies.
     - Erreur explicite si aucune correspondance ou ambiguite.
     - L'utilisateur doit etre membre du projet ; sinon erreur avec suggestion
       d'utiliser kanboard_assign_project_user.
@@ -1249,17 +1362,19 @@ async def kanboard_assign_task(
             else:
                 member_list = [{"id": int(m.get("id", 0)), "username": m.get("username", "") or m.get("name", "")} for m in members_raw]
 
-            name_lower = user_name.lower().strip()
+            # Meme repli que pour les colonnes et swimlanes : un nom affiche
+            # recopie depuis une page HTML porte "&amp;" la ou Kanboard stocke "&".
+            name_key = _label_key(user_name)
             matches: list[dict] = []
             for m in member_list:
                 uid = m["id"]
                 # Comparer login Kanboard
-                if (m.get("username") or "").lower() == name_lower:
+                if _label_key(m.get("username")) == name_key:
                     matches.append(m)
                     continue
                 # Comparer nom affiche (appel getUser, cached)
                 display = await _get_user_name(uid, as_user=as_user)
-                if display.lower() == name_lower:
+                if _label_key(display) == name_key:
                     matches.append({**m, "display_name": display})
 
             if len(matches) == 0:
@@ -1428,15 +1543,16 @@ async def _resolve_by_name(
 
     Retourne (id, "") si trouve, (None, message) sinon — le message enumere les
     valeurs disponibles plutot que de laisser chercher.
+
+    Le rapprochement passe par `_resolve_label` : entites HTML, espaces et casse
+    sont replies avant comparaison, et le message d'echec designe la valeur
+    disponible la plus proche.
     """
     rows = await kb_call(method, {"project_id": project_id}, as_user=as_user)
-    wanted = str(name).lower().strip()
-    for row in (rows or []):
-        title = str(row.get("name") or row.get("title") or "").lower().strip()
-        if title == wanted:
-            return int(row["id"]), ""
-    available = [r.get("name") or r.get("title") for r in (rows or [])]
-    return None, f"{label} '{name}' introuvable. Valeurs disponibles : {available}"
+    row, err = _resolve_label(rows, name, label)
+    if row is None:
+        return None, err
+    return int(row["id"]), ""
 
 
 @mcp.tool()
@@ -1476,8 +1592,17 @@ async def kanboard_create_task(
 
     Colonne, swimlane et categorie s'indiquent par leur NOM : les identifiants
     restent acceptes, mais ne sont plus a chercher au prealable. Un nom inconnu
-    fait echouer la creation en enumerant les valeurs disponibles, plutot que
-    de creer la tache au mauvais endroit.
+    fait echouer la creation en enumerant les valeurs disponibles et en
+    designant la plus proche, plutot que de creer la tache au mauvais endroit.
+
+    Le rapprochement des noms replie les entites HTML (`&amp;` se lit `&`,
+    `&nbsp;` se lit comme une espace), les suites d'espaces, les espaces de bord,
+    la casse et les formes Unicode NFC/NFD : un nom recopie depuis une page HTML
+    ou un compte rendu resout donc sans retouche. Les accents, eux, ne sont PAS
+    replies : "Reunion" ne designe pas "Réunion". Un nom exact l'emporte toujours
+    sur un nom qui ne correspond qu'apres repli ; si le repli seul fait
+    correspondre plusieurs valeurs, la resolution est refusee et demande
+    l'identifiant.
 
     Retourne l'ID de la tache creee.
     """
@@ -1528,16 +1653,10 @@ async def kanboard_create_task(
         # Resolve column name to ID if provided
         if column_name:
             columns = await kb_call("getColumns", {"project_id": project_id}, as_user=as_user)
-            col_id = None
-            for col in (columns or []):
-                if col.get("title", "").lower().strip() == column_name.lower().strip():
-                    col_id = int(col["id"])
-                    break
-            if col_id:
-                params["column_id"] = col_id
-            else:
-                available = [c.get("title") for c in (columns or [])]
-                return f"Colonne '{column_name}' introuvable. Colonnes disponibles : {available}"
+            col, err = _resolve_label(columns, column_name, "Colonne")
+            if col is None:
+                return err
+            params["column_id"] = int(col["id"])
 
         task_id = await kb_call("createTask", params, as_user=as_user)
 

@@ -98,6 +98,36 @@ refused rather than silently resolved one way. An unknown name fails the
 creation and enumerates what exists — better than a task filed in the wrong
 swimlane.
 
+### A name that went through HTML
+
+A name rarely arrives as Kanboard stores it. Copied out of a meeting note, a
+recopied page or an export, `Missions & Hermine` comes back as
+`Missions &amp; Hermine`, and a plain space as `&nbsp;`. Compared raw, that name
+matched nothing, and the refusal listed the available values next to it — two
+strings that read as identical, differing only by `&amp;` against `&`. The
+caller re-read the list, saw no gap, and replayed the same call.
+
+Every name-to-id resolution — column, swimlane, category in
+`kanboard_create_task` and `kanboard_move_task`, and the member name in
+`kanboard_assign_task` — now compares on a folded key: HTML entities decoded,
+Unicode normalised to NFC, runs of whitespace (non-breaking space included)
+reduced to one, leading and trailing spaces dropped, case folded. The same fold
+backs the `name_filter` of `kanboard_list_projects`.
+
+Three limits are deliberate:
+
+- **Accents are not folded.** `Reunion` does not resolve `Réunion`; two distinct
+  labels stay distinct. The gap is only named in the error message.
+- **An exact name wins.** A row matching the way it always did is picked before
+  any row that only matches after folding, so nothing that resolved before
+  resolves elsewhere now.
+- **Folding may not arbitrate.** If the fold alone makes two rows match, the
+  call is refused and asks for the identifier, rather than writing into a
+  swimlane nobody asked for.
+
+A name that still resolves to nothing gets the available values *and* the
+closest one, saying when the gap is only accents, case or typographic variants.
+
 ## Multi-account model
 
 Write tools accept an `as_user` argument (`primary` | `agent`). This lets a human

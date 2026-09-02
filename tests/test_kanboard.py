@@ -25,8 +25,10 @@ from kanboard_mcp.server import (  # noqa: E402
     _clamp_limit,
     _dumps,
     _fold,
+    _label_key,
     _resolve_account,
     _ts_to_date,
+    kanboard_assign_task,
     kanboard_check_project_access,
     kanboard_create_task,
     kanboard_create_task_link,
@@ -37,6 +39,7 @@ from kanboard_mcp.server import (  # noqa: E402
     kanboard_list_link_types,
     kanboard_list_projects,
     kanboard_list_task_links,
+    kanboard_move_task,
     kanboard_my_dashboard,
     kanboard_my_overdue,
     kanboard_recent_activity,
@@ -1686,3 +1689,251 @@ class TestMyOverdueUsesTheDedicatedProcedure:
 
         assert "500" in out
         assert "getAllTasks" not in calls
+
+
+# ---------------------------------------------------------------------------
+# Non-regression : recette du 02/09/2026 — resolution par nom
+# ---------------------------------------------------------------------------
+
+
+class TestLabelKeyNormalisation:
+    """La cle de comparaison d'un libelle, isolee de tout appel reseau."""
+
+    def test_html_entities_are_decoded(self) -> None:
+        assert _label_key("Missions &amp; Hermine") == _label_key("Missions & Hermine")
+
+    def test_surrounding_and_repeated_spaces_are_collapsed(self) -> None:
+        assert _label_key("  Missions   &  Hermine ") == _label_key("Missions & Hermine")
+
+    def test_non_breaking_space_reads_as_a_space(self) -> None:
+        assert _label_key("Missions &nbsp;& Hermine") == _label_key("Missions & Hermine")
+
+    def test_case_is_ignored(self) -> None:
+        assert _label_key("MISSIONS & HERMINE") == _label_key("missions & hermine")
+
+    def test_decomposed_and_composed_accents_match(self) -> None:
+        # Meme mot, ecrit une fois en NFC ("\u00e9") et une fois en NFD ("e\u0301") :
+        # un copier-coller depuis une page HTML rend parfois la forme decomposee.
+        assert _label_key("R\u00e9union") == _label_key("Re\u0301union")
+
+    def test_accents_are_not_erased(self) -> None:
+        # Le repli ne va pas jusqu'a confondre deux libelles distincts.
+        assert _label_key("Réunion") != _label_key("Reunion")
+
+
+class TestCreateTaskResolvesLabelsThatWentThroughHtml:
+    """Recette 02/09/2026 : '&amp;' dans un nom faisait echouer la creation.
+
+    Le refus etait correct sur le fond, mais le message juxtaposait deux
+    chaines visuellement identiques sans nommer l'ecart.
+    """
+
+    @staticmethod
+    def _dispatch(created_id=42):
+        calls: list = []
+
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append((method, params))
+            if method == "getAllSwimlanes":
+                return [{"id": 7, "name": "Direction inno³"},
+                        {"id": 8, "name": "Missions & Hermine"}]
+            if method == "getAllCategories":
+                return [{"id": 3, "name": "Pilotage & suivi"}]
+            if method == "getColumns":
+                return [{"id": 11, "title": "A faire"},
+                        {"id": 12, "title": "En cours & bloque"}]
+            if method == "createTask":
+                return created_id
+            raise AssertionError(f"methode inattendue : {method}")
+
+        _run.calls = calls
+        return _run
+
+    async def _create(self, dispatch, **kwargs) -> str:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            return await kanboard_create_task(project_id=262, title="T", **kwargs)
+
+    async def test_a_swimlane_named_with_an_html_entity_resolves(self) -> None:
+        dispatch = self._dispatch()
+        data = json.loads(await self._create(
+            dispatch, swimlane_name="Missions &amp; Hermine"))
+        assert data["success"] is True
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["swimlane_id"] == 8
+
+    async def test_a_literal_ampersand_still_resolves(self) -> None:
+        dispatch = self._dispatch()
+        data = json.loads(await self._create(dispatch, swimlane_name="Missions & Hermine"))
+        assert data["success"] is True
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["swimlane_id"] == 8
+
+    async def test_superfluous_spaces_resolve(self) -> None:
+        dispatch = self._dispatch()
+        data = json.loads(await self._create(dispatch, swimlane_name="  Missions   & Hermine  "))
+        assert data["success"] is True
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["swimlane_id"] == 8
+
+    async def test_a_different_case_resolves(self) -> None:
+        dispatch = self._dispatch()
+        data = json.loads(await self._create(dispatch, swimlane_name="missions & HERMINE"))
+        assert data["success"] is True
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["swimlane_id"] == 8
+
+    async def test_a_category_named_with_an_html_entity_resolves(self) -> None:
+        dispatch = self._dispatch()
+        await self._create(dispatch, category_name="Pilotage &amp; suivi")
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["category_id"] == 3
+
+    async def test_a_column_named_with_an_html_entity_resolves(self) -> None:
+        dispatch = self._dispatch()
+        await self._create(dispatch, column_name="En cours &amp; bloque")
+        assert [p for m, p in dispatch.calls if m == "createTask"][0]["column_id"] == 12
+
+    async def test_an_unknown_name_names_the_closest_value(self) -> None:
+        dispatch = self._dispatch()
+        msg = await self._create(dispatch, swimlane_name="Mission & Hermin")
+        assert "introuvable" in msg
+        assert "Valeur la plus proche" in msg
+        assert "Missions & Hermine" in msg
+        assert not [m for m, _ in dispatch.calls if m == "createTask"]
+
+    async def test_an_accent_only_gap_is_named_as_such(self) -> None:
+        dispatch = self._dispatch()
+        msg = await self._create(dispatch, swimlane_name="direction inno3")
+        assert "introuvable" in msg
+        assert "Direction inno³" in msg
+        assert "accents" in msg
+        assert not [m for m, _ in dispatch.calls if m == "createTask"]
+
+    async def test_a_name_matching_two_rows_after_normalisation_is_refused(self) -> None:
+        """Aucune ligne ne correspond exactement, deux se ressemblent apres repli."""
+        async def dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllSwimlanes":
+                return [{"id": 7, "name": "Missions &amp; Hermine"},
+                        {"id": 8, "name": "Missions  &  Hermine"}]
+            if method == "createTask":
+                raise AssertionError("aucune tache ne doit etre creee")
+            return []
+
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            msg = await kanboard_create_task(
+                project_id=262, title="T", swimlane_name="Missions & Hermine")
+        assert "ambigu" in msg.lower()
+        assert "Missions &amp; Hermine" in msg and "Missions  &  Hermine" in msg
+
+    async def test_an_exact_match_wins_over_a_normalised_one(self) -> None:
+        """Deux lignes se ressemblent apres repli : la frappe exacte tranche."""
+        async def dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getAllSwimlanes":
+                return [{"id": 7, "name": "Missions &amp; Hermine"},
+                        {"id": 8, "name": "Missions & Hermine"}]
+            if method == "createTask":
+                return 42
+            return []
+
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch) as call:
+            data = json.loads(await kanboard_create_task(
+                project_id=262, title="T", swimlane_name="Missions & Hermine"))
+        assert data["success"] is True
+        created = [c.args[1] for c in call.call_args_list if c.args[0] == "createTask"][0]
+        assert created["swimlane_id"] == 8
+
+
+class TestMoveTaskResolvesLabelsThatWentThroughHtml:
+    """Le meme traitement s'applique au deplacement, pas seulement a la creation."""
+
+    @staticmethod
+    def _dispatch():
+        calls: list = []
+
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append((method, params))
+            if method == "getTask":
+                return {"id": 100, "project_id": 262, "swimlane_id": 7}
+            if method == "getColumns":
+                return [{"id": 11, "title": "A faire"},
+                        {"id": 12, "title": "En cours & bloque"}]
+            if method == "getActiveSwimlanes":
+                return [{"id": 7, "name": "Direction inno³"},
+                        {"id": 8, "name": "Missions & Hermine"}]
+            if method == "moveTaskPosition":
+                return True
+            raise AssertionError(f"methode inattendue : {method}")
+
+        _run.calls = calls
+        return _run
+
+    async def test_a_column_named_with_an_html_entity_resolves(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            data = json.loads(await kanboard_move_task(
+                task_id=100, column_name="En cours &amp; bloque"))
+        assert data["success"] is True
+        moved = [p for m, p in dispatch.calls if m == "moveTaskPosition"][0]
+        assert moved["column_id"] == 12
+
+    async def test_a_swimlane_named_with_an_html_entity_resolves(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            data = json.loads(await kanboard_move_task(
+                task_id=100, column_name="A faire",
+                swimlane_name=" Missions &amp;  Hermine "))
+        assert data["success"] is True
+        moved = [p for m, p in dispatch.calls if m == "moveTaskPosition"][0]
+        assert moved["swimlane_id"] == 8
+
+    async def test_an_unknown_column_names_the_closest_value(self) -> None:
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            msg = await kanboard_move_task(task_id=100, column_name="En cour & bloqu")
+        assert "introuvable" in msg
+        assert "Valeur la plus proche" in msg
+        assert not [m for m, _ in dispatch.calls if m == "moveTaskPosition"]
+
+
+class TestAssignTaskResolvesLabelsThatWentThroughHtml:
+    """Le nom d'un membre passe lui aussi par la meme cle de comparaison."""
+
+    @staticmethod
+    def _dispatch():
+        calls: list = []
+
+        async def _run(method: str, params: dict | None = None, as_user: str = ""):
+            calls.append((method, params))
+            if method == "getTask":
+                return {"id": 100, "project_id": 262}
+            if method == "getProjectUsers":
+                return {"4": "bjean", "84": "claude"}
+            if method == "getUser":
+                return {"id": params["user_id"],
+                        "name": {4: "Benjamin Jean & co", 84: "Claude"}[int(params["user_id"])]}
+            if method == "updateTask":
+                return True
+            raise AssertionError(f"methode inattendue : {method}")
+
+        _run.calls = calls
+        return _run
+
+    async def test_a_display_name_with_an_html_entity_resolves(self) -> None:
+        server._user_cache.clear()
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            data = json.loads(await kanboard_assign_task(
+                task_id=100, user_name="Benjamin Jean &amp; co"))
+        assert data["success"] is True
+        assert data["owner_id"] == 4
+
+    async def test_a_login_in_another_case_still_resolves(self) -> None:
+        server._user_cache.clear()
+        dispatch = self._dispatch()
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=dispatch):
+            data = json.loads(await kanboard_assign_task(task_id=100, user_name="  BJEAN "))
+        assert data["success"] is True
+        assert data["owner_id"] == 4
