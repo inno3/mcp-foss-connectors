@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "matrix-mcp",
   "display_name": "Matrix",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Connecteur Matrix : salons, messages, membres, invitations. API Matrix Client-Server v3.",
   "author": {
     "name": "inno³",

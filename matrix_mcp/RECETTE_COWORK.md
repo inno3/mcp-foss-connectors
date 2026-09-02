@@ -1,7 +1,8 @@
-# Recette Cowork — connecteur Matrix 1.3.0
+# Recette Cowork — connecteur Matrix 1.4.0
 
-**Cible : matrix-inno3 v1.3.0, 22 outils.** Version issue de trois passages de
-recette : elle ferme onze écarts et ajoute l'état de lecture.
+**Cible : matrix-inno3 v1.4.0, 22 outils.** Version issue de quatre passages de
+recette : elle ferme le contexte amputé, rend les compteurs de non-lus
+auditables et fiabilise la relecture après marquage.
 
 ## Avant de lancer
 
@@ -14,7 +15,7 @@ Prévoyez un petit **PNG** et un petit **PDF** locaux pour la phase C.
 ## Prompt à copier
 
 ```
-Tu recettes le connecteur MCP Matrix 1.3.0 contre l'instance de production.
+Tu recettes le connecteur MCP Matrix 1.4.0 contre l'instance de production.
 Après chaque phase, un tableau : contrôle | attendu | constaté (OK / ÉCART).
 En cas d'ÉCART, montre la réponse brute.
 
@@ -23,9 +24,11 @@ PNG local : <chemin>   PDF local : <chemin>
 
 ÉTAPE 0 — Contrôle de version, AVANT tout le reste
 Vérifie que les outils `matrix_list_files`, `matrix_list_unread` et
-`matrix_mark_read` existent. Si l'un manque, la 1.3.0 n'est pas chargée :
-ARRÊTE-TOI et dis-le. Les trois passages précédents ont produit des « écarts »
-qui n'étaient que des versions antérieures — ne recommence pas.
+`matrix_mark_read` existent, PUIS qu'un `matrix_get_event_context` rend bien un
+champ `complete` et que `matrix_list_unread` rend `counters_note`. Si l'un
+manque, la 1.4.0 n'est pas chargée : ARRÊTE-TOI et dis-le. Les quatre passages
+précédents ont produit des « écarts » qui n'étaient que des versions
+antérieures — ne recommence pas.
 
 Règles : aucune écriture hors du salon de test. Tu nettoies en phase F.
 
@@ -98,20 +101,44 @@ D2. matrix_get_event_context(room_id, <racine>, before=3, after=3)
     corps : les réactions, éditions et suppressions sont écartées par défaut.
 D3. Même appel avec include_bodyless=True : les lignes sans corps réapparaissent
     et portent un `type` qui dit ce qu'elles sont.
+D3bis. FENÊTRE SATURÉE — le défaut du 02/09/2026. Dans le salon de test :
+    poste trois messages « ZZ recette contexte 1/2/3 », puis supprime les deux
+    premiers (matrix_redact_message), puis poste « ZZ recette contexte 4 ».
+    Appelle ensuite matrix_get_event_context(room_id, <id du message 4>,
+    before=3, after=0).
+    Attendu : before contient 3 MESSAGES réels — pas [] et pas les
+    suppressions. `pages_fetched.before` vaut plus de 1 (la fenêtre a été
+    élargie), `events_scanned.before` le confirme, `complete.before` vaut true.
+    Si `complete.before` est false, `truncation_note` doit être présent et dire
+    pourquoi : une amputation annoncée reste acceptable, une liste vide muette
+    non.
 D4. matrix_get_permalink(room_id, <racine>) : ouvre l'URL, elle doit surligner
     le message dans le client.
 
-PHASE E — État de lecture (nouveau en 1.2.0)
+PHASE E — État de lecture (revu en 1.4.0)
 E1. matrix_list_unread()
-    Attendu : les salons ayant du non-lu, mentions (highlights) en tête, avec
-    le dernier message tronqué. Compare les compteurs avec ceux d'Element :
-    ils doivent coïncider. C'est l'outil qui répond à « qu'est-ce qui est
-    arrivé depuis hier » sur 218 salons.
+    Attendu : les salons ayant du non-lu, mentions (highlights) en tête, CHACUN
+    avec un `last_message` — plus aucun salon rendu sans, dans la limite de
+    `lookups_budget` (compare `lookups_spent`). Les conversations directes
+    portent un `room_name` (le nom de l'interlocuteur) et `direct: true`, plus
+    d'identifiant nu.
+E1bis. COMPTEURS. Ne les compare PAS à Element en attendant l'égalité : ils
+    mesurent autre chose, et `counters_note` le dit dans la réponse. Contrôle
+    plutôt la cohérence interne : tout salon portant `counter_suspect: true`
+    doit avoir un `read_marker_at` POSTÉRIEUR à la date de son `last_message`
+    — c'est ce qui rend son compteur impossible. Vérifie ensuite dans Element
+    que ces salons-là sont bien à zéro, et que `total_unread_confirmed` est
+    plus proche du vécu que `total_unread`.
 E2. matrix_list_unread(only_unread=False) : tous les salons, y compris calmes.
+    Attendu : `total_rooms` égale le nombre de salons rejoints, et `truncated`
+    vaut false tant que `limit` couvre ce total. Un compte de plus de 200
+    salons ne doit plus être tronqué en silence.
 E3. matrix_mark_read(room_id=<salon de test>)
     ⚠️ L'état de lecture est PARTAGÉ côté serveur : marquer lu ici efface le
     badge dans Element aussi. Ne le faire que sur le salon de test.
-    Attendu : unread_after=0, et le badge disparu dans le client.
+    Attendu : `unread_after` = 0 (un ENTIER, pas null), `highlights_after` = 0,
+    `read_state_confirmed` = true, et le badge disparu dans le client. Un null
+    accompagné de `unread_after_note` est un échec de relecture, pas un zéro.
 
 PHASE F — Nettoyage
 F1. matrix_redact_message sur la réaction de C4 — avec le reaction_event_id,
@@ -138,15 +165,25 @@ SYNTHÈSE
 
 | Symptôme | Ce que ça veut dire |
 |---|---|
-| `matrix_list_files` absent | 1.3.0 non chargée — ne pas recetter |
+| `complete` absent de D2 ou `counters_note` absent de E1 | 1.4.0 non chargée — ne pas recetter |
 | A5 sans `index_matches_reliable` | version antérieure à 1.2.0 |
 | B2 rend 0 message | le budget de pages saute encore : montrer `empty_page_note`, `pages_fetched` et `events_scanned` |
 | C2 apparaît comme message normal | la relation de fil n'a pas pris |
 | D2 rend 4 après pour 3 demandés | la coupe côté client ne s'applique pas |
 | F3 sans `edits_redacted` | les corrections ne sont plus emportées — le piège revient |
-| E1 : compteurs différents d'Element | l'état vient du serveur : montrer la réponse brute |
+| D3bis rend `before: []` | la fenêtre n'est plus élargie : montrer `pages_fetched`, `events_scanned` et `complete` |
+| E1 : compteurs différents d'Element | attendu, et documenté : ce sont les compteurs du homeserver. L'écart n'est un défaut que si `counter_suspect` manque sur un salon dont le dernier message précède le repère de lecture |
+| E3 rend `unread_after: null` sans note | la relecture ciblée a échoué sans le dire |
 
 ## Ce qui reste hors de portée
+
+- **L'alignement des compteurs de non-lus sur ceux d'un client.** `unread` et
+  `highlights` viennent de `unread_notifications` du /sync : ce que le
+  homeserver compte après votre reçu de lecture, selon vos règles de
+  notification. Element recalcule côté client, compte les fils à part et
+  décrémente à l'affichage. Le connecteur ne peut pas reproduire ce calcul ;
+  il rend le sien vérifiable (`read_marker_at`, `counter_suspect`,
+  `total_unread_confirmed`).
 
 - **La suppression d'une réaction d'autrui** dépend du droit de modération
   Matrix. Rien à faire côté connecteur.

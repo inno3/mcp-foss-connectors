@@ -56,6 +56,25 @@ MESSAGE_FETCH_MAX_PAGES = 12
 #: Le filtrage écarte réactions, éditions, états et suppressions : demander
 #: exactement `limit` événements garantit d'en manquer.
 MESSAGE_FETCH_OVERSAMPLE = 4
+
+#: Pages enchaînées au maximum de CHAQUE côté d'un contexte d'événement.
+#: `/context` ne prend qu'une limite d'événements BRUTS : quand la fenêtre
+#: rendue par le serveur est saturée de suppressions, de réactions ou de
+#: changements d'état, le filtrage la vidait et `before` sortait à [] sur un
+#: salon qui compte des centaines de messages. Vérifié le 02/09/2026.
+CONTEXT_FETCH_MAX_PAGES = 8
+
+#: Salons pour lesquels matrix_list_unread accepte d'aller chercher, un par un,
+#: ce que /sync ne donne pas : le dernier message et la date du repère de
+#: lecture. Chaque salon coûte un appel : la borne évite qu'un compte à
+#: plusieurs centaines de salons déclenche autant de requêtes.
+UNREAD_LOOKUP_MAX = 25
+
+#: Plafond dur du nombre de salons rendus par matrix_list_unread. L'ancien
+#: plafond de 200 tronquait en silence un compte qui en compte davantage — et
+#: c'est ce qui laissait `unread_after` à null après un marquage.
+UNREAD_ROOMS_MAX = 1000
+
 _RETRY_DELAY = 1.0
 
 
@@ -251,7 +270,16 @@ async def matrix_get_room_messages(
     `pages_fetched` dit combien il lui en a fallu. Les messages supprimés sont
     écartés plutôt que rendus avec un corps nul.
 
-    Retourne les messages, `next_token`, `pages_fetched` et `has_more`.
+    Ce chaînage est BORNÉ : au plus `max_pages` pages par appel (voir
+    MESSAGE_FETCH_MAX_PAGES, 12 aujourd'hui), chacune d'au plus 100 événements
+    bruts. Après une série de suppressions, lire 3 messages a demandé 6 pages
+    et 72 événements balayés, contre 1 page et 12 en temps normal — la borne
+    n'est donc pas théorique. `budget_exhausted` dit qu'elle a été atteinte
+    sans réunir `limit` : relancer avec `next_token` reprend là où l'on
+    s'est arrêté, chaque appel disposant d'un budget neuf.
+
+    Retourne les messages, `next_token`, `pages_fetched`, `events_scanned`,
+    `max_pages`, `budget_exhausted` et `has_more`.
     """
     limit = min(max(1, limit), 100)
     direction = direction if direction in ("b", "f") else "b"
@@ -316,6 +344,12 @@ async def matrix_get_room_messages(
         # fin du salon.
         "has_more": bool(end_token) and not last_chunk_empty,
         "limit_reached": len(messages) >= limit,
+        # La borne de pagination était tenue dans une constante du module,
+        # invisible depuis l'appel. Un appelant qui reçoit moins que `limit`
+        # doit pouvoir distinguer « le salon est épuisé » de « mon budget de
+        # pages l'est ».
+        "max_pages": MESSAGE_FETCH_MAX_PAGES,
+        "budget_exhausted": pages >= MESSAGE_FETCH_MAX_PAGES and len(messages) < limit,
     }
     if not messages and payload["has_more"]:
         # Une page vide assortie d'un jeton se lit comme un salon vide. Dire
@@ -488,10 +522,9 @@ async def matrix_search_messages(
         "index_matches": category.get("count"),
         "index_matches_note": (
             "Total de l'index du homeserver. Il REFLÈTE les filtres de salon "
-            "(room_id, exclude_rooms), appliqués côté serveur — mesuré le "
-            "01/09/2026 : 2613 sans exclusion, 2050 avec. Il IGNORE en revanche "
-            "le filtre d'expéditeur et la fenêtre de dates, et compte les "
-            "messages supprimés. Voir index_matches_reliable."
+            "(room_id, exclude_rooms), appliqués côté serveur. Il IGNORE en "
+            "revanche le filtre d'expéditeur et la fenêtre de dates, et compte "
+            "les messages supprimés. Voir index_matches_reliable."
         ),
         # Un appelant automatique qui comparerait count à index_matches se
         # tromperait dès que l'un des filtres non répercutés est actif.
@@ -1076,21 +1109,73 @@ async def matrix_send_file(
         return f"Erreur : {exc}"
 
 
-def _context_side(events: Any, want: int, room_name: str, include_bodyless: bool) -> list:
-    """Un côté du contexte, filtré puis tranché au nombre demandé.
+def _fill_side(
+    kept: list, events: Any, want: int, room_name: str, include_bodyless: bool
+) -> None:
+    """Ajoute à `kept` les événements retenus, sans dépasser `want`.
 
     Le filtrage précède la coupe : trancher d'abord rendrait « 3 messages »
     dont deux réactions.
     """
-    kept = []
+    want = max(0, int(want))
     for e in (events or []):
+        if len(kept) >= want:
+            return
         entry = _format_event(e, room_name, body_chars=BODY_PREVIEW_CHARS)
         if not include_bodyless and not entry.get("body"):
             continue
         kept.append(entry)
-        if len(kept) >= max(0, int(want)):
+
+
+async def _collect_context_side(
+    room_id: str,
+    seed_events: Any,
+    token: Any,
+    direction: str,
+    want: int,
+    room_name: str,
+    include_bodyless: bool,
+) -> "tuple[list, dict]":
+    """Un côté du contexte, ÉLARGI auprès du serveur jusqu'au compte demandé.
+
+    `/context` ne prend qu'une limite d'événements BRUTS, que le serveur
+    répartit à sa guise entre les deux côtés. Suppressions, réactions et
+    changements d'état y comptent, puis disparaissent au filtrage : demander
+    3 messages avant pouvait n'en rendre aucun, sans que rien ne distingue
+    « il n'y a rien avant » de « j'ai tout filtré ». C'est le même défaut que
+    matrix_get_room_messages a déjà corrigé, et la même mécanique : on
+    poursuit la chronologie à partir du jeton rendu par `/context` — `start`
+    pour remonter, `end` pour descendre — jusqu'à réunir le compte ou épuiser
+    le budget de pages.
+
+    Rend (messages, compteurs) où compteurs porte `pages_fetched`,
+    `events_scanned` et `complete`.
+    """
+    want = max(0, int(want))
+    kept: list = []
+    pages = 1                      # l'appel /context lui-même
+    scanned = len(seed_events or [])
+    _fill_side(kept, seed_events, want, room_name, include_bodyless)
+
+    raw_limit = str(min(max(want * MESSAGE_FETCH_OVERSAMPLE, 10), 100))
+    while len(kept) < want and token and pages < CONTEXT_FETCH_MAX_PAGES:
+        pages += 1
+        data = await _get(
+            f"rooms/{quote(room_id)}/messages",
+            params={"dir": direction, "limit": raw_limit, "from": token},
+        )
+        chunk = (data or {}).get("chunk") or []
+        scanned += len(chunk)
+        _fill_side(kept, chunk, want, room_name, include_bodyless)
+        token = (data or {}).get("end")
+        if not chunk:
             break
-    return kept
+
+    return kept, {
+        "pages_fetched": pages,
+        "events_scanned": scanned,
+        "complete": len(kept) >= want,
+    }
 
 
 @mcp.tool()
@@ -1109,7 +1194,15 @@ async def matrix_list_files(room_id: str, limit: int = 20, from_token: str = "")
     porteurs d'un média.
 
     Retourne pour chaque pièce : nom, type, taille, URI mxc://, expéditeur,
-    date et permalien.
+    date et permalien, plus `next_token` et `has_more` — comme
+    matrix_get_room_messages et matrix_search_messages. `next_token` ne vaut
+    quelque chose que s'il y a bien une suite : le serveur rend un jeton même
+    quand il n'a plus rien, ce qui faisait boucler un appelant automatique.
+
+    ⚠️ `limit` compte ici des ÉVÉNEMENTS bruts remontés par le filtre
+    `contains_url`, pas des pièces jointes retenues : contrairement à
+    matrix_get_room_messages, l'outil n'enchaîne pas les pages. Une page peut
+    donc rendre moins que `limit` tout en ayant une suite.
     """
     try:
         if not room_id:
@@ -1146,11 +1239,17 @@ async def matrix_list_files(room_id: str, limit: int = 20, from_token: str = "")
                 "permalink": _permalink(room_id, event.get("event_id") or ""),
             }.items() if v not in (None, "")})
 
+        chunk = (data or {}).get("chunk") or []
+        end = (data or {}).get("end")
+        # Un jeton rendu sur une page vide se lit comme « il reste des choses »
+        # et fait boucler l'appelant. Le serveur en rend un dans tous les cas.
+        has_more = bool(end) and bool(chunk)
         return _compact({
             "room_id": room_id,
             "count": len(files),
             "files": files,
-            "next_token": (data or {}).get("end"),
+            "next_token": end if has_more else None,
+            "has_more": has_more,
         })
     except Exception as exc:
         return f"Erreur : {exc}"
@@ -1181,9 +1280,21 @@ async def matrix_get_event_context(
     l'échange autour, ce qui évite de relire tout le salon pour situer une
     phrase.
 
-    Retourne les messages avant, le message lui-même, et ceux d'après — chaque
-    côté tranché au nombre demandé, y compris les événements sans corps
-    (réactions, éditions) que le serveur inclut dans son décompte.
+    `before` et `after` comptent des MESSAGES, pas des événements — comme
+    `limit` dans matrix_get_room_messages. La limite de `/context` porte, elle,
+    sur les événements BRUTS : suppressions, réactions et changements d'état y
+    entrent, puis disparaissent au filtrage. Sur un salon où un ménage venait
+    d'avoir lieu, `before` sortait à [] alors que des centaines de messages le
+    précédaient. L'outil ÉLARGIT donc sa fenêtre auprès du serveur, côté par
+    côté, jusqu'à réunir le compte demandé.
+
+    Ce chaînage est borné à `max_pages` pages PAR CÔTÉ. Quand la borne tombe
+    avant le compte, `complete` passe à false du côté concerné et
+    `truncation_note` le dit : une amputation annoncée, jamais une liste vide
+    muette.
+
+    Retourne : `before`, `event`, `after`, `bodyless_included`, et pour chaque
+    côté `pages_fetched`, `events_scanned` et `complete`.
     """
     try:
         if not room_id or not event_id:
@@ -1195,38 +1306,165 @@ async def matrix_get_event_context(
             f"rooms/{quote(room_id)}/context/{quote(event_id)}", {"limit": span}
         )
         name = await _room_name(room_id)
+        data = data or {}
         # L'API ne prend qu'UNE limite, qu'elle répartit à sa guise : demander
         # 3 avant et 3 après rendait 3 et 4. On tranche côté client, sans quoi
-        # les deux côtés ne sont pas comparables.
-        return _compact({
+        # les deux côtés ne sont pas comparables — puis on complète auprès du
+        # serveur ce que le filtrage a retiré.
+        before_events, before_stats = await _collect_context_side(
+            room_id, data.get("events_before"), data.get("start"), "b",
+            before, name, include_bodyless,
+        )
+        after_events, after_stats = await _collect_context_side(
+            room_id, data.get("events_after"), data.get("end"), "f",
+            after, name, include_bodyless,
+        )
+
+        payload = {
             "room_id": room_id,
             "room_name": name or None,
-            "before": _context_side(
-                (data or {}).get("events_before"), before, name, include_bodyless
-            ),
-            "event": _format_event((data or {}).get("event") or {}, name,
+            "before": before_events,
+            "event": _format_event(data.get("event") or {}, name,
                                    body_chars=BODY_PREVIEW_CHARS),
-            "after": _context_side(
-                (data or {}).get("events_after"), after, name, include_bodyless
-            ),
+            "after": after_events,
             "bodyless_included": include_bodyless,
-        })
+            "pages_fetched": {"before": before_stats["pages_fetched"],
+                              "after": after_stats["pages_fetched"]},
+            "events_scanned": {"before": before_stats["events_scanned"],
+                               "after": after_stats["events_scanned"]},
+            "complete": {"before": before_stats["complete"],
+                         "after": after_stats["complete"]},
+            "max_pages": CONTEXT_FETCH_MAX_PAGES,
+        }
+        manquants = [c for c in ("before", "after") if not payload["complete"][c]]
+        if manquants:
+            payload["truncation_note"] = (
+                f"Côté(s) {', '.join(manquants)} incomplet(s) : la portion parcourue "
+                "ne contenait pas assez de messages, soit que le salon commence là, "
+                "soit que le budget de pages ait été atteint. Comparer "
+                "events_scanned et pages_fetched à max_pages pour trancher."
+            )
+        return _compact(payload)
     except Exception as exc:
         return f"Erreur : {exc}"
 
 
 #: Filtre de synchronisation réduit au strict nécessaire pour un état de
 #: lecture : /sync rend sinon tout l'historique récent de tous les salons.
+#: `m.fully_read` (account data DU salon) porte le repère de lecture, seul
+#: moyen de confronter un compteur de notifications à ce qui a été lu.
+#: `m.room.member` est chargé paresseusement pour nommer les conversations
+#: directes, qui n'ont pas de `m.room.name`.
 _UNREAD_SYNC_FILTER = {
     "presence": {"types": []},
-    "account_data": {"types": []},
+    "account_data": {"types": ["m.direct"]},
     "room": {
         "timeline": {"limit": 1},
-        "state": {"types": ["m.room.name"], "lazy_load_members": True},
+        "state": {
+            "types": ["m.room.name", "m.room.member"],
+            "lazy_load_members": True,
+        },
         "ephemeral": {"types": []},
-        "account_data": {"types": []},
+        "account_data": {"types": ["m.fully_read"]},
     },
 }
+
+#: Ce que les compteurs mesurent réellement, rendu à chaque appel : ils
+#: viennent de `unread_notifications` du /sync, c'est-à-dire du décompte que
+#: le homeserver tient des événements postérieurs au reçu de lecture et
+#: retenus par les règles de notification (m.push_rules). Ce n'est pas
+#: toujours ce qu'affiche un client : Element recalcule localement, compte les
+#: fils séparément et peut décrémenter à l'affichage. Voir counter_suspect.
+_UNREAD_COUNTERS_NOTE = (
+    "unread et highlights sont les compteurs du homeserver (unread_notifications "
+    "de /sync) : nombre d'événements postérieurs au reçu de lecture et retenus "
+    "par vos règles de notification. Ils peuvent différer du badge d'un client "
+    "Matrix, qui recalcule côté client, compte les fils à part et décrémente à "
+    "l'affichage. Un compteur que le repère de lecture contredit porte "
+    "counter_suspect ; total_unread_confirmed exclut ces salons."
+)
+
+
+def _hero_names(room: dict) -> str:
+    """Nom d'une conversation directe, tiré des membres mis en avant.
+
+    Un DM n'a pas de `m.room.name` : le serveur désigne à la place des
+    « heroes ». Sans cette résolution, la conversation ressortait avec un
+    identifiant opaque là où un client affiche « Karine Salazar ».
+    """
+    heroes = ((room.get("summary") or {}).get("m.heroes")) or []
+    if not heroes:
+        return ""
+    noms = {}
+    for event in ((room.get("state") or {}).get("events") or []):
+        if event.get("type") == "m.room.member":
+            display = (event.get("content") or {}).get("displayname")
+            if display:
+                noms[event.get("state_key")] = display
+    return ", ".join(noms.get(h) or h.lstrip("@").split(":")[0] for h in heroes)
+
+
+def _last_message_of(room: dict, name: str) -> dict | None:
+    """Dernier message de la fenêtre de timeline rendue par /sync, s'il y en a."""
+    for event in reversed(((room.get("timeline") or {}).get("events") or [])):
+        if event.get("type") == "m.room.message" and (event.get("content") or {}):
+            return _format_event(event, name, body_chars=200)
+    return None
+
+
+async def _fetch_last_message(room_id: str, name: str) -> dict | None:
+    """Va chercher le dernier message d'un salon quand /sync n'en a pas rendu.
+
+    La fenêtre de timeline est volontairement d'un seul événement : si c'est
+    une réaction, une édition ou un changement d'état, le salon ressortait
+    sans `last_message` — sur 150 salons sur 200 lors de la recette du
+    02/09/2026, et précisément sur ceux qu'on veut lire en premier.
+    """
+    try:
+        data = await _get(
+            f"rooms/{quote(room_id)}/messages", params={"dir": "b", "limit": "20"}
+        )
+        for event in (data or {}).get("chunk", []) or []:
+            if event.get("type") == "m.room.message" and (event.get("content") or {}):
+                return _format_event(event, name, body_chars=200)
+    except Exception as exc:
+        logger.warning("Dernier message introuvable pour %s : %s", room_id, exc)
+    return None
+
+
+async def _event_timestamp(room_id: str, event_id: str) -> str | None:
+    """Date d'un événement, pour situer un repère de lecture dans le temps."""
+    try:
+        data = await _get(f"rooms/{quote(room_id)}/event/{quote(event_id)}")
+        return _ts_to_iso((data or {}).get("origin_server_ts"))
+    except Exception as exc:
+        logger.warning("Repère de lecture illisible dans %s : %s", room_id, exc)
+        return None
+
+
+async def _room_unread_counts(room_id: str) -> dict | None:
+    """Compteurs de non-lus d'UN salon, par une synchronisation restreinte.
+
+    Relire l'état d'un salon en listant tous les autres échouait dès que le
+    compte dépassait le plafond de la liste : un salon qui vient d'être marqué
+    lu tombe à zéro, donc en queue de tri, donc hors du lot rendu — et
+    `unread_after` sortait à null. Un filtre `rooms` cible le seul salon
+    concerné.
+    """
+    filtre = json.loads(json.dumps(_UNREAD_SYNC_FILTER))
+    filtre["room"]["rooms"] = [room_id]
+    data = await _get("sync", {
+        "timeout": 0,
+        "filter": json.dumps(filtre, separators=(",", ":")),
+    })
+    room = (((data or {}).get("rooms") or {}).get("join") or {}).get(room_id)
+    if room is None:
+        return None
+    counts = room.get("unread_notifications") or {}
+    return {
+        "unread": int(counts.get("notification_count") or 0),
+        "highlights": int(counts.get("highlight_count") or 0),
+    }
 
 
 @mcp.tool()
@@ -1235,19 +1473,39 @@ async def matrix_list_unread(only_unread: bool = True, limit: int = 50) -> str:
 
     Args:
         only_unread : n'afficher que les salons ayant du non-lu (défaut : oui).
-        limit       : nombre max de salons rendus (défaut 50).
+        limit       : nombre max de salons rendus (défaut 50, plafond 1000).
+                      L'ancien plafond de 200 tronquait en silence.
 
     Répond à « qu'est-ce qui est arrivé depuis mon dernier passage ». Rien ne
     le permettait : la recherche et la lecture d'un salon supposent de savoir
     OÙ regarder, ce qui est précisément l'information qui manquait.
 
-    `unread` compte les notifications, `highlights` les mentions directes —
-    c'est ce second chiffre qui distingue une alerte automatique d'un message
-    qui vous vise. Les salons sont rendus les plus sollicitants en tête.
+    CE QUE LES COMPTEURS MESURENT — et c'est une limite qui ne peut pas être
+    levée depuis un client MCP : `unread` et `highlights` sont les compteurs
+    que le HOMESERVER tient (`unread_notifications` de /sync), soit le nombre
+    d'événements postérieurs à votre reçu de lecture et retenus par vos règles
+    de notification. Ce n'est pas nécessairement ce qu'affiche Element : un
+    client recalcule localement, compte les fils séparément et décrémente à
+    l'affichage. Recette du 02/09/2026 : sept salons sur dix-sept divergeaient,
+    dans les deux sens.
 
-    L'état de lecture n'existe que côté serveur : il vient de la même
-    synchronisation qu'utilise un client Matrix, restreinte ici au dernier
-    message par salon pour ne pas rapatrier l'historique.
+    L'outil ne prétend donc plus les aligner, il les rend AUDITABLES :
+    - `read_marker_event_id` / `read_marker_at` : jusqu'où vous avez lu ;
+    - `counter_suspect` : le dernier message du salon est ANTÉRIEUR au repère
+      de lecture, donc il n'y a rien à lire après la marque — c'est le cas d'un
+      salon éteint depuis des années qui annonçait 42 non-lus et 3 mentions,
+      près de la moitié du total. Le drapeau ne retire rien, il signale ;
+    - `total_unread_confirmed` / `total_highlights_confirmed` : les totaux
+      débarrassés de ces salons. `total_unread` reste le total brut.
+
+    `last_message` est rendu pour tous les salons : quand la fenêtre de /sync
+    ne contient qu'une réaction ou un changement d'état, il est cherché dans la
+    chronologie, au plus pour `UNREAD_LOOKUP_MAX` salons par appel
+    (`lookups_spent` dit combien l'ont été, `lookups_budget` la borne). Les
+    salons non lus sont servis en premier. Les conversations directes sont
+    nommées d'après leur interlocuteur, et portent `direct: true`.
+
+    Les salons sont rendus les plus sollicitants en tête.
     """
     try:
         data = await _get("sync", {
@@ -1255,6 +1513,11 @@ async def matrix_list_unread(only_unread: bool = True, limit: int = 50) -> str:
             "filter": json.dumps(_UNREAD_SYNC_FILTER, separators=(",", ":")),
         })
         joined = ((data or {}).get("rooms") or {}).get("join") or {}
+        directs: set[str] = set()
+        for event in ((data or {}).get("account_data") or {}).get("events", []) or []:
+            if event.get("type") == "m.direct":
+                for ids in ((event.get("content") or {}).values()):
+                    directs.update(ids or [])
 
         rooms = []
         for room_id, room in joined.items():
@@ -1268,35 +1531,102 @@ async def matrix_list_unread(only_unread: bool = True, limit: int = 50) -> str:
             for event in ((room.get("state") or {}).get("events") or []):
                 if event.get("type") == "m.room.name":
                     name = (event.get("content") or {}).get("name") or ""
+            heroes = _hero_names(room)
+            direct = room_id in directs or (
+                not name and bool(heroes)
+                and int((room.get("summary") or {}).get("m.joined_member_count") or 0) <= 2
+            )
             if not name:
-                name = await _room_name(room_id)
+                name = heroes or await _room_name(room_id)
 
-            last = None
-            timeline = ((room.get("timeline") or {}).get("events") or [])
-            for event in reversed(timeline):
-                if event.get("type") == "m.room.message":
-                    last = _format_event(event, name, body_chars=200)
-                    break
+            marker = ""
+            for event in ((room.get("account_data") or {}).get("events") or []):
+                if event.get("type") == "m.fully_read":
+                    marker = (event.get("content") or {}).get("event_id") or ""
 
-            rooms.append({k: v for k, v in {
+            rooms.append({
                 "room_id": room_id,
                 "room_name": name or None,
+                "direct": True if direct else None,
                 "unread": unread,
                 "highlights": highlights,
-                "last_message": last,
+                "last_message": _last_message_of(room, name),
+                "read_marker_event_id": marker or None,
                 "permalink": _permalink(room_id),
-            }.items() if v not in (None, "")})
+            })
 
         rooms.sort(key=lambda r: (-r.get("highlights", 0), -r.get("unread", 0)))
-        capped = rooms[:max(1, min(int(limit), 200))]
+        capped = rooms[:max(1, min(int(limit), UNREAD_ROOMS_MAX))]
+
+        # Ce que /sync ne donne pas se cherche salon par salon, donc sous
+        # budget : les salons non lus d'abord, ce sont eux qu'on veut lire.
+        budget = UNREAD_LOOKUP_MAX
+        besoins = sorted(capped, key=lambda r: -(r["unread"] + r["highlights"]))
+
+        # Dater le repère de lecture passe AVANT le reste : c'est lui qui
+        # permet de contredire un compteur. Un compte à plusieurs centaines de
+        # salons épuisait sinon le budget sur des salons calmes, et le seul
+        # contrôle disponible sur les compteurs ne s'exécutait jamais.
+        a_dater = [r for r in besoins
+                   if r["read_marker_event_id"] and (r["unread"] or r["highlights"])
+                   ][:budget]
+        if a_dater:
+            dates = await asyncio.gather(*[
+                _event_timestamp(r["room_id"], r["read_marker_event_id"])
+                for r in a_dater
+            ], return_exceptions=True)
+            for salon, date in zip(a_dater, dates):
+                if isinstance(date, str):
+                    salon["read_marker_at"] = date
+        budget -= len(a_dater)
+
+        a_chercher = [r for r in besoins if not r["last_message"]][:max(0, budget)]
+        if a_chercher:
+            trouves = await asyncio.gather(*[
+                _fetch_last_message(r["room_id"], r["room_name"] or "")
+                for r in a_chercher
+            ], return_exceptions=True)
+            for salon, trouve in zip(a_chercher, trouves):
+                if isinstance(trouve, dict):
+                    salon["last_message"] = trouve
+
+        suspects = 0
+        for salon in capped:
+            marque = salon.get("read_marker_at")
+            dernier = (salon.get("last_message") or {}).get("timestamp")
+            # Un compteur qui annonce du non-lu alors que le dernier MESSAGE
+            # du salon précède le repère de lecture n'a rien à compter après la
+            # marque. Réserve faite d'un événement notifiant qui ne soit pas un
+            # message — assez rare pour que le signalement vaille mieux qu'un
+            # total gonflé en silence, et c'est un drapeau, pas un effacement.
+            if (salon["unread"] or salon["highlights"]) and marque and dernier \
+                    and dernier <= marque:
+                salon["counter_suspect"] = True
+                suspects += 1
+
+        suspects_ids = {r["room_id"] for r in capped if r.get("counter_suspect")}
+        rendus = [
+            {k: v for k, v in r.items() if v not in (None, "")} for r in capped
+        ]
         return _compact({
-            "count": len(capped),
+            "count": len(rendus),
+            "total_rooms": len(rooms),
             "rooms_with_unread": sum(1 for r in rooms if r.get("unread")),
             "total_unread": sum(r.get("unread", 0) for r in rooms),
             "total_highlights": sum(r.get("highlights", 0) for r in rooms),
+            "total_unread_confirmed": sum(
+                r.get("unread", 0) for r in rooms if r["room_id"] not in suspects_ids
+            ),
+            "total_highlights_confirmed": sum(
+                r.get("highlights", 0) for r in rooms if r["room_id"] not in suspects_ids
+            ),
+            "suspect_rooms": suspects,
             "only_unread": only_unread,
             "truncated": len(rooms) > len(capped),
-            "rooms": capped,
+            "lookups_budget": UNREAD_LOOKUP_MAX,
+            "lookups_spent": len(a_chercher) + len(a_dater),
+            "counters_note": _UNREAD_COUNTERS_NOTE,
+            "rooms": rendus,
         })
     except Exception as exc:
         return f"Erreur : {exc}"
@@ -1318,7 +1648,16 @@ async def matrix_mark_read(room_id: str, event_id: str = "") -> str:
     n'est donc pas une opération locale — marquer lu ici efface le badge
     partout.
 
-    Retourne le message retenu comme repère et le compteur relu après coup.
+    Retourne le message retenu comme repère (`marked_up_to`) et le compteur
+    relu après coup (`unread_after`, `highlights_after`), entiers, zéro
+    compris. La relecture interroge le SEUL salon concerné : la relire dans la
+    liste générale la faisait échouer précisément dans le cas le plus fréquent,
+    un salon qu'on vient de traiter et qui retombe donc en queue de liste.
+
+    `read_state_confirmed` dit si cette relecture a abouti. Quand elle échoue,
+    `unread_after` vaut null ET `unread_after_note` explique pourquoi : un null
+    ne se confond plus avec un salon à zéro non-lu. `success` porte sur
+    l'écriture du repère, qui a bien eu lieu dans ce cas.
     """
     try:
         if not room_id:
@@ -1345,24 +1684,33 @@ async def matrix_mark_read(room_id: str, event_id: str = "") -> str:
             "m.read": target,
         })
 
-        # Relecture : un marquage sans effet doit se voir.
-        remaining = None
+        # Relecture ciblée : un marquage sans effet doit se voir.
+        counts = None
+        echec = ""
         try:
-            state = json.loads(await matrix_list_unread(only_unread=False, limit=200))
-            for room in state.get("rooms", []):
-                if room.get("room_id") == room_id:
-                    remaining = room.get("unread", 0)
-                    break
-        except Exception:
-            pass
+            counts = await _room_unread_counts(room_id)
+            if counts is None:
+                echec = "le salon n'apparaît pas dans la synchronisation ciblée"
+        except Exception as exc:
+            echec = str(exc)
 
-        return _compact({
-            "success": remaining in (0, None),
+        payload = {
+            # L'écriture du repère, elle, a bien eu lieu : la relecture est un
+            # contrôle, pas une condition de succès.
+            "success": True,
             "room_id": room_id,
             "marked_up_to": target,
-            "unread_after": remaining,
+            "unread_after": counts["unread"] if counts else None,
+            "highlights_after": counts["highlights"] if counts else None,
+            "read_state_confirmed": counts is not None,
             "permalink": _permalink(room_id, target),
-        })
+        }
+        if counts is None:
+            payload["unread_after_note"] = (
+                f"Compteur non relu ({echec or 'cause inconnue'}) : "
+                "unread_after à null signifie « inconnu », pas « zéro »."
+            )
+        return _compact(payload)
     except Exception as exc:
         return f"Erreur : {exc}"
 

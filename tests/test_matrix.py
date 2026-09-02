@@ -1000,3 +1000,326 @@ class TestListFiles:
         assert f["content_uri"] == "mxc://x/y"
         assert f["size"] == 393
         assert f["permalink"].startswith("https://matrix.to/#/")
+
+
+# ---------------------------------------------------------------------------
+# Défauts relevés en recette les 01 et 02/09/2026 (quatre passes contre
+# matrix.inno3.fr). Les trois premiers sont des PERTES SILENCIEUSES : rien à
+# l'usage ne distingue « il n'y a rien » de « j'ai tout filtré ».
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestContextWidensPastBodylessEvents:
+    """`before` rendait [] sur un salon qui compte des centaines de messages.
+
+    Mesuré le 02/09/2026 sur !rFXlRmcajFsvyRAjij : trois messages consécutifs
+    du même lot donnaient before = 3, puis 2, puis 0, selon la quantité
+    d'événements sans corps que le serveur plaçait dans sa fenêtre. La même
+    mécanique de ré-interrogation que matrix_get_room_messages manquait ici.
+    """
+
+    @staticmethod
+    def _api(before_pages, after_pages=None):
+        """Fenêtre de contexte saturée de suppressions, puis des pages réelles."""
+        b_it = iter(before_pages)
+        a_it = iter(after_pages or [{"chunk": [], "end": None}])
+
+        async def fake_get(path, params=None):
+            if "/context/" in path:
+                return {
+                    "events_before": [
+                        {"type": "m.room.redaction", "event_id": "$red1", "content": {}},
+                        {"type": "m.room.redaction", "event_id": "$red2", "content": {}},
+                    ],
+                    "event": {"event_id": "$cible", "sender": "@a:b",
+                              "content": {"body": "le message cherché"}},
+                    "events_after": [
+                        {"type": "m.room.message", "event_id": "$ap1", "sender": "@a:b",
+                         "content": {"body": "après"}},
+                    ],
+                    "start": "s0",
+                    "end": "e0",
+                }
+            if "/messages" in path:
+                return next(b_it) if (params or {}).get("dir") == "b" else next(a_it)
+            return {"name": "salon"}
+
+        return fake_get
+
+    async def test_the_window_is_widened_until_the_count_is_met(self) -> None:
+        pages = [
+            {"chunk": [{"type": "m.room.redaction", "event_id": f"$r{i}", "content": {}}
+                       for i in range(4)], "end": "s1"},
+            {"chunk": [{"type": "m.room.message", "event_id": f"$m{i}", "sender": "@a:b",
+                        "origin_server_ts": 1787011200000, "content": {"body": f"réel {i}"}}
+                       for i in range(4)], "end": "s2"},
+        ]
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=self._api(pages))):
+            data = json.loads(await matrix_get_event_context(
+                "!r:b", "$cible", before=3, after=2))
+
+        assert len(data["before"]) == 3
+        assert data["complete"]["before"] is True
+        assert data["pages_fetched"]["before"] >= 2
+        assert data["events_scanned"]["before"] >= 8
+
+    async def test_an_amputated_side_says_so(self) -> None:
+        """Budget épuisé : mieux vaut une amputation annoncée qu'un [] muet."""
+        pages = [{"chunk": [{"type": "m.room.redaction", "event_id": f"$r{i}",
+                             "content": {}} for i in range(4)], "end": f"s{i}"}
+                 for i in range(mx.CONTEXT_FETCH_MAX_PAGES + 2)]
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=self._api(pages))):
+            data = json.loads(await matrix_get_event_context(
+                "!r:b", "$cible", before=3, after=0))
+
+        assert data["before"] == []
+        assert data["complete"]["before"] is False
+        assert "truncation_note" in data
+        assert data["max_pages"] == mx.CONTEXT_FETCH_MAX_PAGES
+
+    async def test_a_sufficient_first_window_costs_no_extra_page(self) -> None:
+        async def fake_get(path, params=None):
+            if "/context/" in path:
+                return {
+                    "events_before": [
+                        {"type": "m.room.message", "event_id": f"$b{i}", "sender": "@a:b",
+                         "content": {"body": f"avant {i}"}} for i in range(4)],
+                    "event": {"event_id": "$cible", "content": {"body": "cible"}},
+                    "events_after": [
+                        {"type": "m.room.message", "event_id": f"$a{i}", "sender": "@a:b",
+                         "content": {"body": f"après {i}"}} for i in range(4)],
+                    "start": "s0", "end": "e0",
+                }
+            if "/messages" in path:
+                raise AssertionError("aucune page supplémentaire ne doit être demandée")
+            return {"name": "salon"}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)):
+            data = json.loads(await matrix_get_event_context(
+                "!r:b", "$cible", before=3, after=3))
+
+        assert data["pages_fetched"] == {"before": 1, "after": 1}
+        assert data["complete"] == {"before": True, "after": True}
+
+
+@pytest.mark.asyncio
+class TestUnreadCountersAreAuditable:
+    """Compteurs divergents de l'état de lecture réel (02/09/2026).
+
+    Le salon « os-like » sortait à 42 non-lus et 3 mentions avec un dernier
+    message du 15/08/2022, soit près de la moitié du total annoncé, alors
+    qu'Element affichait 0/0. Un compteur de notifications qui pointe après un
+    repère de lecture POSTÉRIEUR au dernier message du salon est arithmétique-
+    ment impossible : il doit être signalé, pas additionné en silence.
+    """
+
+    @staticmethod
+    def _sync() -> dict:
+        return {"rooms": {"join": {
+            # Compteur périmé : repère de lecture 2023, dernier message 2022.
+            "!vieux:b": {
+                "unread_notifications": {"notification_count": 42, "highlight_count": 3},
+                "state": {"events": [{"type": "m.room.name",
+                                      "content": {"name": "os-like"}}]},
+                "account_data": {"events": [{"type": "m.fully_read",
+                                             "content": {"event_id": "$marque"}}]},
+                "timeline": {"events": [
+                    {"type": "m.room.message", "event_id": "$vieux", "sender": "@a:b",
+                     "origin_server_ts": 1660556242000,
+                     "content": {"body": "message de 2022"}}]}},
+            # Compteur cohérent.
+            "!vif:b": {
+                "unread_notifications": {"notification_count": 7, "highlight_count": 2},
+                "state": {"events": [{"type": "m.room.name",
+                                      "content": {"name": "veille"}}]},
+                "account_data": {"events": []},
+                "timeline": {"events": [
+                    {"type": "m.room.message", "event_id": "$frais", "sender": "@a:b",
+                     "origin_server_ts": 1787011200000,
+                     "content": {"body": "message du jour"}}]}},
+        }}}
+
+    async def test_an_impossible_counter_is_flagged_and_not_confirmed(self) -> None:
+        async def fake_get(path, params=None):
+            if path == "sync":
+                return self._sync()
+            if "/event/" in path:
+                # Le repère de lecture est POSTÉRIEUR au dernier message.
+                return {"event_id": "$marque", "origin_server_ts": 1690000000000,
+                        "content": {"body": "lu"}}
+            return {"name": ""}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)):
+            data = json.loads(await matrix_list_unread())
+
+        vieux = [r for r in data["rooms"] if r["room_id"] == "!vieux:b"][0]
+        assert vieux["counter_suspect"] is True
+        assert vieux["read_marker_at"] == "2023-07-22T04:26:40Z"
+        # Le total brut reste rendu tel quel, mais il n'est plus le seul chiffre.
+        assert data["total_unread"] == 49
+        assert data["total_unread_confirmed"] == 7
+        assert data["total_highlights_confirmed"] == 2
+        assert "counters_note" in data
+
+    async def test_the_sync_filter_asks_for_what_the_tool_renders(self) -> None:
+        with patch("matrix_mcp.server._get", new_callable=AsyncMock) as get:
+            get.return_value = {"rooms": {"join": {}}}
+            await matrix_list_unread()
+
+        f = json.loads(get.call_args[0][1]["filter"])
+        # Le repère de lecture vit dans l'account data DU SALON.
+        assert "m.fully_read" in f["room"]["account_data"]["types"]
+        # Les noms des conversations directes se lisent sur les membres mis en
+        # avant par le serveur (« heroes »), pas sur m.room.name qui est absent.
+        assert "m.room.member" in f["room"]["state"]["types"]
+
+    async def test_the_room_cap_no_longer_hides_rooms(self) -> None:
+        big = {"rooms": {"join": {
+            f"!r{i}:b": {"unread_notifications": {"notification_count": 0,
+                                                  "highlight_count": 0},
+                         "state": {"events": []}, "timeline": {"events": []}}
+            for i in range(260)
+        }}}
+        with patch("matrix_mcp.server._get", new_callable=AsyncMock) as get:
+            get.return_value = big
+            data = json.loads(await matrix_list_unread(only_unread=False, limit=300))
+
+        assert data["total_rooms"] == 260
+        assert data["count"] == 260
+        assert data["truncated"] is False
+
+
+@pytest.mark.asyncio
+class TestUnreadRendersWhatItPromises:
+    """last_message absent sur 150 salons sur 200, DM sans nom (02/09/2026)."""
+
+    async def test_a_missing_last_message_is_fetched(self) -> None:
+        calls: list[str] = []
+
+        async def fake_get(path, params=None):
+            calls.append(path)
+            if path == "sync":
+                return {"rooms": {"join": {"!muet:b": {
+                    "unread_notifications": {"notification_count": 11,
+                                             "highlight_count": 2},
+                    "state": {"events": [{"type": "m.room.name",
+                                          "content": {"name": "veille"}}]},
+                    # La fenêtre de timeline ne contient qu'une réaction.
+                    "timeline": {"events": [
+                        {"type": "m.reaction", "event_id": "$r", "content": {}}]},
+                }}}}
+            if "/messages" in path:
+                return {"chunk": [
+                    {"type": "m.room.message", "event_id": "$dernier", "sender": "@a:b",
+                     "origin_server_ts": 1787011200000,
+                     "content": {"body": "le vrai dernier message"}}], "end": None}
+            return {"name": "veille"}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)):
+            data = json.loads(await matrix_list_unread())
+
+        salon = data["rooms"][0]
+        assert salon["last_message"]["body"] == "le vrai dernier message"
+        assert any("/messages" in c for c in calls)
+
+    async def test_a_direct_room_is_named_after_the_other_member(self) -> None:
+        async def fake_get(path, params=None):
+            if path == "sync":
+                return {"rooms": {"join": {"!dm:b": {
+                    "unread_notifications": {"notification_count": 2,
+                                             "highlight_count": 0},
+                    "summary": {"m.heroes": ["@karine:b"], "m.joined_member_count": 2},
+                    "state": {"events": [
+                        {"type": "m.room.member", "state_key": "@karine:b",
+                         "content": {"displayname": "Karine Salazar",
+                                     "membership": "join"}}]},
+                    "timeline": {"events": [
+                        {"type": "m.room.message", "event_id": "$m", "sender": "@karine:b",
+                         "origin_server_ts": 1787011200000,
+                         "content": {"body": "coucou"}}]},
+                }}}}
+            return {"name": ""}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)):
+            data = json.loads(await matrix_list_unread())
+
+        salon = data["rooms"][0]
+        assert salon["room_name"] == "Karine Salazar"
+        assert salon["direct"] is True
+
+
+@pytest.mark.asyncio
+class TestMarkReadReReadsTheRoomItJustMarked:
+    """unread_after rendait null : indistinguable d'un salon à zéro non-lu."""
+
+    async def test_the_re_read_targets_the_single_room(self) -> None:
+        seen_filters: list[dict] = []
+
+        async def fake_get(path, params=None):
+            if path == "sync":
+                seen_filters.append(json.loads((params or {})["filter"]))
+                return {"rooms": {"join": {"!r:b": {
+                    "unread_notifications": {"notification_count": 0,
+                                             "highlight_count": 0},
+                    "state": {"events": []}, "timeline": {"events": []}}}}}
+            return {"chunk": [{"type": "m.room.message", "event_id": "$d",
+                               "content": {"body": "x"}}]}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)), \
+             patch("matrix_mcp.server._post", new_callable=AsyncMock):
+            data = json.loads(await matrix_mark_read("!r:b"))
+
+        # Relire les 200 premiers salons d'un compte qui en compte davantage
+        # laissait `unread_after` à null dès que le salon retombait à zéro et
+        # sortait donc de la tête de liste.
+        assert seen_filters[0]["room"]["rooms"] == ["!r:b"]
+        assert data["unread_after"] == 0
+        assert data["read_state_confirmed"] is True
+
+    async def test_a_failed_re_read_is_named_not_nulled(self) -> None:
+        async def fake_get(path, params=None):
+            if path == "sync":
+                raise RuntimeError("sync indisponible")
+            return {"chunk": [{"type": "m.room.message", "event_id": "$d",
+                               "content": {"body": "x"}}]}
+
+        with patch("matrix_mcp.server._get", new=AsyncMock(side_effect=fake_get)), \
+             patch("matrix_mcp.server._post", new_callable=AsyncMock):
+            data = json.loads(await matrix_mark_read("!r:b"))
+
+        assert data["success"] is True          # l'écriture, elle, a bien eu lieu
+        assert data["read_state_confirmed"] is False
+        assert "unread_after_note" in data
+
+
+@pytest.mark.asyncio
+class TestFinition:
+    async def test_the_index_note_carries_no_dated_figures(self) -> None:
+        with patch("matrix_mcp.server._post", new_callable=AsyncMock) as post:
+            post.return_value = {"search_categories": {"room_events": {
+                "results": [], "count": 2615}}}
+            data = json.loads(await matrix_search_messages("test"))
+
+        # Un repère chiffré renvoyé à chaque appel vieillit mal : mesuré 2613
+        # le 01/09/2026, 2615 le lendemain.
+        assert not any(c.isdigit() for c in data["index_matches_note"])
+
+    async def test_list_files_harmonises_its_pagination(self) -> None:
+        with patch("matrix_mcp.server._get", new_callable=AsyncMock) as get:
+            get.return_value = {"chunk": [], "end": "t1"}
+            data = json.loads(await matrix_list_files("!r:b"))
+
+        assert data["count"] == 0
+        assert data["has_more"] is False
+        assert data["next_token"] is None
+
+    async def test_the_page_budget_of_get_room_messages_is_stated(self) -> None:
+        with patch("matrix_mcp.server._get", new_callable=AsyncMock) as get:
+            get.return_value = {"chunk": [
+                {"type": "m.room.message", "event_id": "$s", "content": {}}
+            ], "end": "t1"}
+            data = json.loads(await matrix_get_room_messages("!r:b", limit=3))
+
+        assert data["max_pages"] == mx.MESSAGE_FETCH_MAX_PAGES
+        assert data["budget_exhausted"] is True

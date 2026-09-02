@@ -12,7 +12,7 @@ environment variables — no host, login or secret is baked into the code.
 | `MATRIX_HOMESERVER_URL` | yes | Base URL of the Matrix homeserver, e.g. `https://matrix.example.com`. |
 | `MATRIX_ACCESS_TOKEN` | yes | Access token of the bot/user account (sent as a Bearer token). |
 
-## Tools (18)
+## Tools (22)
 
 - `matrix_whoami` — Retourne les informations du compte Matrix authentifié (user_id, device_id, server)
 - `matrix_list_rooms` — Liste tous les salons Matrix rejoints avec leur nom et sujet
@@ -33,6 +33,10 @@ environment variables — no host, login or secret is baked into the code.
 - `matrix_send_file` — Envoie un fichier local dans un salon
 - `matrix_get_event_context` — Lit les messages autour d'un message
 - `matrix_get_permalink` — Construit un lien matrix.to
+- `matrix_get_reactions` — Relit les réactions posées sur un message
+- `matrix_list_files` — Liste les fichiers et images partagés dans un salon
+- `matrix_list_unread` — Salons ayant du non-lu, avec leur compteur
+- `matrix_mark_read` — Marque un salon comme lu jusqu'à un message
 
 ## Search was returning one page and not saying so
 
@@ -69,6 +73,62 @@ history. To make a message actually go away, use `matrix_redact_message`, which
 verifies the removal by re-reading the event — an emptied content is the proof.
 And a **reaction returns its own event id**: that is the id needed to remove it,
 not the id of the message it annotates.
+
+## Counting messages, not events (v1.4.0)
+
+Matrix paginates **events**, not messages. Redactions, reactions, edits and
+state changes fill the server's window, then vanish when the connector filters
+them out. Every tool that takes a count of messages has to widen its window
+until the count is met — otherwise it silently returns less than asked, or
+nothing at all, with no way to tell that apart from an empty room.
+
+`matrix_get_room_messages` already did this. `matrix_get_event_context` did
+not: on a room where a batch of redactions sat just before the target event,
+`before` came back **empty** while hundreds of messages preceded it. Measured
+on 2026-09-02 across three consecutive messages of the same batch: `before`
+returned 3, then 2, then 0, purely as a function of how many bodyless events
+the server happened to place in its window.
+
+It now paginates from the `start` / `end` tokens `/context` returns, per side,
+and reports `pages_fetched`, `events_scanned` and `complete` for each — plus a
+`truncation_note` when the page budget runs out before the count is met. An
+announced amputation, never a silent empty list. The budget of
+`matrix_get_room_messages` is likewise surfaced (`max_pages`,
+`budget_exhausted`): reading 3 messages after a redaction spree took 6 pages
+and 72 scanned events, against 1 page and 12 normally.
+
+## Unread counters: auditable rather than falsely aligned
+
+`matrix_list_unread` reads the homeserver's own `unread_notifications`. Those
+counters are **not** what a Matrix client shows: a client recomputes locally,
+counts threads separately and decrements as you scroll. Measured on
+2026-09-02, seven rooms out of seventeen diverged from Element, in both
+directions — including a room dormant since 2022 that claimed 42 unread and 3
+highlights, close to half the reported total.
+
+That gap cannot be closed from a connector, so the tool stops pretending and
+makes the counters checkable instead:
+
+- `read_marker_event_id` / `read_marker_at` — how far you have actually read,
+  read from the room's `m.fully_read` account data;
+- `counter_suspect` — set when the room's last message **predates** the read
+  marker. There is then nothing left to read after the marker, so a non-zero
+  counter is arithmetically impossible, not merely surprising;
+- `total_unread_confirmed` / `total_highlights_confirmed` — totals without
+  those rooms. `total_unread` still reports the raw figure.
+
+Two related fixes: `last_message` is now filled for every rendered room (the
+one-event sync window often held a reaction or a state change, leaving 150
+rooms out of 200 unlabelled), and direct chats are named after the person on
+the other side, from the server's `m.heroes`, instead of an opaque id. Both
+lookups are budgeted (`lookups_budget`, `lookups_spent`).
+
+`matrix_mark_read` re-reads the room it just marked through a **single-room**
+sync. Re-reading it through the general list failed exactly in the common
+case — a room you just handled drops to zero, so to the tail of the list, past
+the cap — and `unread_after` came back `null`, indistinguishable from a room
+genuinely at zero. It is now an integer, zero included; when the re-read does
+fail, `read_state_confirmed` is false and `unread_after_note` says why.
 
 ## License
 
