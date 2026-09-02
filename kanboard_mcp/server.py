@@ -737,6 +737,7 @@ async def kanboard_list_tasks(
     project_id: int = 0,
     status: int = 1,
     limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
 ) -> str:
     """Liste les taches d'un projet Kanboard.
 
@@ -744,17 +745,55 @@ async def kanboard_list_tasks(
     - project_id : ID du projet (obligatoire)
     - status : 1=actives (defaut), 0=fermees
     - limit : nombre max de resultats (defaut 20, max 100)
+    - offset : nombre de taches a sauter avant de decouper (pagination)
 
-    Retourne : id, titre, colonne, assignee, priorite, date d'echeance.
+    Retourne : total_available (avant pagination), offset, count, has_more,
+    next_offset (present seulement quand has_more vaut true), et tasks (id,
+    titre, projet, colonne, swimlane, categorie, porteur, priorite, echeance).
+
+    La reponse etait auparavant une liste JSON nue, coupee a `limit` sans rien
+    en dire : un projet de 109 taches fermees interroge a limit=100 se lisait
+    comme un projet de 100 taches, et les 9 restantes n'etaient atteignables par
+    aucun parametre. `total_available` compte AVANT le decoupage, `has_more` dit
+    qu'il en reste, et `next_offset` donne la valeur d'`offset` a passer au
+    prochain appel.
+
+    Deux limites viennent de Kanboard et ne sont pas levables ici :
+    - `getAllTasks` ne pagine pas cote serveur. Le connecteur recoit toujours
+      toutes les taches du projet et decoupe ensuite : `offset` epargne la
+      resolution des libelles, pas l'appel JSON-RPC ni son volume.
+    - l'ordre est celui rendu par Kanboard (colonne, puis position dans la
+      colonne), pas un tri stable garanti. Une carte deplacee entre deux appels
+      change de rang : paginer un projet en cours de remaniement peut sauter ou
+      repeter une ligne.
     """
     if not project_id:
         return "Erreur : project_id est obligatoire."
     try:
-        tasks = await kb_call("getAllTasks", {"project_id": project_id, "status_id": status})
-        if not tasks:
-            return _dumps([])
-        results = [await _task_summary(t) for t in tasks[:_clamp_limit(limit)]]
-        return _dumps(results)
+        tasks = list(await kb_call(
+            "getAllTasks", {"project_id": project_id, "status_id": status}
+        ) or [])
+
+        # total_available et has_more sont mesures AVANT le decoupage : sans eux,
+        # un projet coupe a `limit` se lit comme un projet complet.
+        total = len(tasks)
+        start = max(0, offset)
+        # Les libelles ne sont resolus que sur la fenetre rendue : `_task_summary`
+        # peut declencher un appel par tache (colonne, swimlane, projet,
+        # categorie, porteur).
+        window = tasks[start:start + _clamp_limit(limit)]
+        results = [await _task_summary(t) for t in window]
+
+        payload: dict[str, Any] = {
+            "total_available": total,
+            "offset": start,
+            "count": len(results),
+            "has_more": start + len(results) < total,
+            "tasks": results,
+        }
+        if payload["has_more"]:
+            payload["next_offset"] = start + len(results)
+        return _dumps(payload)
     except Exception as exc:
         return _format_error(exc)
 

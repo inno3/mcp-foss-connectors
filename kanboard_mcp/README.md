@@ -72,6 +72,29 @@ environment variables — no host, login or secret is baked into the code.
 - `kanboard_who_am_i` — Diagnostic : affiche l'identite de l'utilisateur authentifie pour un compte
 - `kanboard_list_accounts` — Liste les comptes Kanboard configures sur ce MCP (multi-compte)
 
+## A page that did not say it was a page
+
+`kanboard_list_tasks` returned a bare JSON list, cut at `limit` with nothing
+saying it had been cut. Measured on the inno³ instance on 02/09/2026: project 29
+holds 109 closed cards; `status=0, limit=100` returned 100 of them, and the
+response was indistinguishable from a project that holds exactly 100. The 9
+others were reachable by no parameter at all — the tool had no `offset`.
+
+The response is now the same envelope as `kanboard_list_projects`:
+`total_available` counted *before* the cut, `offset`, `count`, `has_more`, and
+`next_offset` — the value to pass next — present only when there is a next page.
+An empty project returns that envelope too, rather than `[]`.
+
+Two limits stay, and are stated in the docstring:
+
+- **`getAllTasks` does not paginate server-side.** The connector always receives
+  every task of the project and slices afterwards. `offset` saves the label
+  resolution — one call per rendered task, for column, swimlane, project,
+  category and assignee — not the JSON-RPC call itself.
+- **The order is Kanboard's**, by column then position, not a guaranteed stable
+  sort. A card moved between two calls changes rank, so paginating a board that
+  is being reshuffled can skip or repeat a line.
+
 ## A sweep that stopped early, and did not push back
 
 Kanboard has no global search in JSON-RPC, so the connector walks projects one

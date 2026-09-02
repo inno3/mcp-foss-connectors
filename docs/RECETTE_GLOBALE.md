@@ -10,7 +10,7 @@ avant d'engager une recette longue.
 | dolibarr-erp-inno3-v2 | 1.7.0 | 107 | `dolibarr_mcp/RECETTE_COWORK.md` |
 | n8n-inno3 | 1.2.1 | 22 | `n8n_mcp/RECETTE_COWORK.md` |
 | matrix-inno3 | 1.3.0 | 22 | `matrix_mcp/RECETTE_COWORK.md` |
-| kanboard-inno3-v7 | 0.13.2 | 53 | `kanboard_mcp/RECETTE_COWORK.md` |
+| kanboard-inno3-v7 | 0.14.2 | 53 | `kanboard_mcp/RECETTE_COWORK.md` |
 | wordpress-inno3 | 1.4.0 | 33 | — |
 
 ## Prompt à copier

@@ -39,6 +39,7 @@ from kanboard_mcp.server import (  # noqa: E402
     kanboard_list_link_types,
     kanboard_list_projects,
     kanboard_list_task_links,
+    kanboard_list_tasks,
     kanboard_move_task,
     kanboard_my_dashboard,
     kanboard_my_overdue,
@@ -68,6 +69,33 @@ def _projects(count: int) -> list[dict]:
             "description": "",
             "is_active": "1",
             "nb_open_tasks": 0,
+        }
+        for i in range(1, count + 1)
+    ]
+
+
+def _raw_tasks(count: int, project_id: int = 29) -> list[dict]:
+    """Fabrique `count` taches brutes telles que les renvoie getAllTasks.
+
+    Les libelles (projet, colonne, swimlane, categorie, porteur) sont donnes
+    directement : `_task_summary` n'a alors aucun identifiant a resoudre, et le
+    seul appel JSON-RPC observe reste `getAllTasks`.
+    """
+    return [
+        {
+            "id": str(i),
+            "title": f"Carte {i}",
+            "project_id": str(project_id),
+            "project_name": "Refonte",
+            "column_name": "Termine",
+            "swimlane_name": "Default",
+            "category_name": "Support",
+            "assignee_name": "Alice",
+            "priority": 1,
+            "date_due": "1609459200",
+            "is_active": "0",
+            "color_id": "green",
+            "secret": "drop",
         }
         for i in range(1, count + 1)
     ]
@@ -273,6 +301,145 @@ class TestListProjects:
             data = json.loads(await kanboard_list_projects(name_filter="introuvable"))
         assert data["total_available"] == 0
         assert data["projects"] == []
+
+
+@pytest.mark.asyncio
+class TestListTasks:
+    """Pagination des taches d'un projet.
+
+    Constate en production le 02/09/2026 sur le projet 29 : un appel
+    `status=0, limit=100` rendait 100 cartes fermees sur 109, sous la forme
+    d'une liste JSON nue. Rien dans la reponse ne distinguait « 100 cartes,
+    c'est tout » de « 100 cartes, et 9 que tu ne verras jamais » — et aucun
+    parametre ne permettait d'atteindre les 9 restantes.
+    """
+
+    async def test_requires_project_id(self) -> None:
+        assert "project_id" in await kanboard_list_tasks()
+
+    async def test_reports_total_before_pagination(self) -> None:
+        """Reproduction : 109 cartes fermees, 100 rendues, la coupe doit se voir."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(109),
+        ) as mock_call:
+            data = json.loads(await kanboard_list_tasks(project_id=29, status=0, limit=100))
+        assert mock_call.call_args[0][0] == "getAllTasks"
+        assert mock_call.call_args[0][1] == {"project_id": 29, "status_id": 0}
+        assert data["total_available"] == 109
+        assert data["count"] == 100
+        assert data["offset"] == 0
+        assert data["has_more"] is True
+        assert data["next_offset"] == 100
+
+    async def test_offset_reaches_the_tail_of_the_project(self) -> None:
+        """Les 9 cartes au-dela de MAX_LIMIT etaient inatteignables sans offset."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(109),
+        ):
+            data = json.loads(
+                await kanboard_list_tasks(project_id=29, status=0, limit=100, offset=100)
+            )
+        assert data["offset"] == 100
+        assert data["count"] == 9
+        assert [t["id"] for t in data["tasks"]] == [str(i) for i in range(101, 110)]
+        assert data["has_more"] is False
+        assert "next_offset" not in data
+
+    async def test_complete_page_is_not_flagged_as_truncated(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(3),
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29, limit=20))
+        assert data["total_available"] == 3
+        assert data["count"] == 3
+        assert data["has_more"] is False
+        assert "next_offset" not in data
+
+    async def test_empty_project_returns_an_empty_page(self) -> None:
+        """Une liste vide rendait `[]` : meme forme qu'une page, sans les compteurs."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29))
+        assert data["tasks"] == []
+        assert data["total_available"] == 0
+        assert data["count"] == 0
+        assert data["has_more"] is False
+
+    async def test_offset_past_the_end_is_an_empty_last_page(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(109),
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29, offset=500))
+        assert data["tasks"] == []
+        assert data["total_available"] == 109
+        assert data["offset"] == 500
+        assert data["has_more"] is False
+
+    async def test_negative_offset_starts_at_the_beginning(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(10),
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29, offset=-5))
+        assert data["offset"] == 0
+        assert [t["id"] for t in data["tasks"]] == [str(i) for i in range(1, 11)]
+
+    async def test_limit_above_the_ceiling_is_clamped_and_says_so(self) -> None:
+        """limit=500 rend 100 lignes : sans has_more, ce plafond passait inapercu."""
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(109),
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29, limit=500))
+        assert data["count"] == 100
+        assert data["has_more"] is True
+        assert data["next_offset"] == 100
+
+    async def test_only_the_window_is_resolved(self) -> None:
+        """La resolution des libelles coute des appels : elle ne vaut que pour la page.
+
+        `_task_summary` resout colonne, swimlane, projet, categorie et porteur.
+        L'appliquer aux 109 taches pour n'en rendre que 20 multiplierait les
+        appels JSON-RPC sans qu'aucun ne serve.
+        """
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(109),
+        ), patch(
+            "kanboard_mcp.server._task_summary",
+            new=AsyncMock(side_effect=lambda t: {"id": t["id"]}),
+        ) as mock_summary:
+            data = json.loads(await kanboard_list_tasks(project_id=29, limit=20, offset=40))
+        assert mock_summary.await_count == 20
+        assert [t["id"] for t in data["tasks"]] == [str(i) for i in range(41, 61)]
+
+    async def test_fields_are_filtered(self) -> None:
+        with patch(
+            "kanboard_mcp.server.kb_call",
+            new_callable=AsyncMock,
+            return_value=_raw_tasks(1),
+        ):
+            data = json.loads(await kanboard_list_tasks(project_id=29))
+        task = data["tasks"][0]
+        assert task["title"] == "Carte 1"
+        assert task["column_name"] == "Termine"
+        assert task["category_name"] == "Support"
+        assert task["due_date"] == _ts_to_date("1609459200")
+        assert "secret" not in task
 
 
 @pytest.mark.asyncio
