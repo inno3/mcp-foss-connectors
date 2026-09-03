@@ -19,7 +19,7 @@ environment variables — no host, login or secret is baked into the code.
 | `WP_TEST_SERVER_AUTH_PASS` | no | HTTP Basic-Auth password for the staging proxy. |
 | `WP_TEST_VERIFY_SSL` | no | Set to `0` to skip TLS verification on the test site (self-signed certs). Default verifies. |
 
-## Tools (33)
+## Tools (34)
 
 - `wordpress_list_pages` — Liste les pages WordPress
 - `wordpress_get_page` — Lit le contenu complet d'une page WordPress (titre, HTML, ACF, métadonnées)
@@ -32,11 +32,11 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_create_post` — Crée un article natif WordPress (rest_base="posts")
 - `wordpress_delete_post` — Met un article natif à la corbeille, ou le supprime définitivement
 - `wordpress_search` — Recherche globale dans WordPress (pages, articles, types custom)
-- `wordpress_list_post_types` — Liste tous les types de contenu disponibles sur le site (pages, posts, CPT...)
+- `wordpress_list_post_types` — Liste les types de contenu du site et, pour chacun, ses taxonomies (avec le `rest_base` à écrire)
 - `wordpress_list_custom_posts` — Liste les publications d'un type de contenu personnalisé (CPT)
-- `wordpress_update_custom_post` — Met à jour un contenu de type personnalisé (CPT) avec ses champs ACF
+- `wordpress_update_custom_post` — Met à jour un CPT : champs, ACF et taxonomies du type
 - `wordpress_get_custom_post` — Récupère un contenu de type personnalisé (CPT) avec ses champs ACF complets
-- `wordpress_create_custom_post` — Crée une nouvelle publication d'un type personnalisé (CPT)
+- `wordpress_create_custom_post` — Crée une publication d'un type personnalisé (CPT), taxonomies comprises
 - `wordpress_delete_custom_post` — Supprime ou met à la corbeille une publication d'un type personnalisé (CPT)
 - `wordpress_list_revisions` — Liste les révisions d'une publication, de la plus récente à la plus ancienne
 - `wordpress_get_revision` — Lit une révision précise, contenu source compris
@@ -50,8 +50,9 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_create_redirection` — Crée une redirection 301/302 via le plugin Redirection
 - `wordpress_delete_redirection` — Supprime une redirection par son ID
 - `wordpress_site_info` — Informations générales sur le site WordPress (nom, URL, version, multisite...)
-- `wordpress_list_categories` — Liste les catégories WordPress
-- `wordpress_list_tags` — Liste les étiquettes (tags) WordPress
+- `wordpress_list_categories` — Liste les termes de la taxonomie native `category`
+- `wordpress_list_tags` — Liste les termes de la taxonomie native `post_tag`
+- `wordpress_list_terms` — Liste les termes de n'importe quelle taxonomie, personnalisée comprise
 - `wordpress_list_users` — Liste les utilisateurs WordPress
 - `wordpress_check_connection` — Teste la connexion et l'authentification à un serveur WordPress
 
@@ -71,6 +72,17 @@ environment variables — no host, login or secret is baked into the code.
 - `wordpress_check_content` is a read-only lint (empty paragraphs, missing
   block delimiters, images without alt text, duplicate `h1`). Run it after
   any content write.
+- **Custom taxonomies.** The REST API silently drops any field a post type
+  does not declare, so writing `tags` on a type without `post_tag` used to
+  return a success with no effect. `wordpress_create_custom_post` and
+  `wordpress_update_custom_post` now validate taxonomies against the target
+  type *before* writing, take any taxonomy through
+  `taxonomies='{"blog-type": [3], "global_tags": [368]}'`, and report the terms
+  actually recorded (`taxonomies`, `taxonomies_ignored`, `taxonomies_warning`).
+  Discovery: `wordpress_list_post_types` lists each type's taxonomies with the
+  `rest_base` to write, and `wordpress_list_terms` lists the terms of any of
+  them. Terms are addressed by ID only — no name resolution, no term creation —
+  and only taxonomies registered with `show_in_rest` are reachable at all.
 - Multisite: tools accept a `subsite` argument (e.g. `fr`/`en`) where relevant.
 - ACF and the *Redirection* plugin are optional; their tools degrade gracefully
   when the plugin is absent.
