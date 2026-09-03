@@ -894,6 +894,12 @@ async def wordpress_update_post(
 ) -> str:
     """Met à jour un article WordPress.
 
+    Limite : seules les deux taxonomies natives sont adressables ici, via
+    `categories` et `tags`. Pour une taxonomie personnalisée attachée aux
+    articles, passer par wordpress_update_custom_post(post_type="posts",
+    taxonomies='{"<taxonomie>": [<ids>]}'), qui vérifie la taxonomie avant
+    d'écrire.
+
     Args:
         post_id: ID de l'article
         server: "prod" ou "test"
@@ -1004,6 +1010,245 @@ async def wordpress_search(
 
 
 # ---------------------------------------------------------------------------
+# Taxonomies — découverte et garde-fous d'écriture
+# ---------------------------------------------------------------------------
+#
+# L'API REST de WordPress ignore en silence tout champ absent du type visé :
+# écrire `tags` sur un type qui ne déclare pas post_tag renvoie 200 sans rien
+# poser. Les outils d'écriture valident donc les taxonomies avant l'appel, puis
+# comparent le résultat à ce qui a été demandé.
+
+
+async def _rest_taxonomies_for_type(
+    server: str, post_type: str, subsite: str = ""
+) -> tuple[dict[str, dict], str]:
+    """Taxonomies REST d'un type de contenu, indexées par nom de taxonomie.
+
+    `post_type` est accepté sous sa forme rest_base (celle qu'attendent les
+    outils CPT) ou sous son slug interne. Un dictionnaire vide avec une raison
+    non vide signale une découverte impossible ; vide avec une raison vide
+    signale un type sans aucune taxonomie exposée en REST.
+    """
+    try:
+        types = await _wp_get(server, "types", subsite=subsite)
+    except Exception as exc:
+        return {}, f"lecture de /types impossible ({exc})"
+    if not isinstance(types, dict):
+        return {}, "réponse inattendue de /types"
+
+    slug = ""
+    for key, info in types.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("rest_base") == post_type:
+            slug = key
+            break
+        if key == post_type and not slug:
+            slug = key
+    if not slug:
+        return {}, f"type de contenu inconnu : {post_type}"
+
+    try:
+        taxos = await _wp_get(server, "taxonomies", {"type": slug}, subsite=subsite)
+    except Exception as exc:
+        return {}, f"lecture de /taxonomies impossible ({exc})"
+    if not isinstance(taxos, dict):
+        return {}, "réponse inattendue de /taxonomies"
+    return _normalize_taxonomies(taxos), ""
+
+
+def _normalize_taxonomies(raw: dict) -> dict[str, dict]:
+    """Retient, par nom de taxonomie, le slug, le champ REST et la hiérarchie."""
+    return {
+        name: {
+            "slug": info.get("slug", name),
+            "rest_base": info.get("rest_base") or name,
+            "hierarchical": bool(info.get("hierarchical", False)),
+        }
+        for name, info in raw.items()
+        if isinstance(info, dict)
+    }
+
+
+def _taxonomy_index(known: dict[str, dict]) -> dict[str, str]:
+    """Alias (nom, slug, champ REST) -> nom canonique de la taxonomie."""
+    index: dict[str, str] = {}
+    for name, info in known.items():
+        for alias in (name, info["slug"], info["rest_base"]):
+            index.setdefault(alias, name)
+    return index
+
+
+def _describe_taxonomies(known: dict[str, dict]) -> str:
+    if not known:
+        return "(aucune)"
+    parts = []
+    for name in sorted(known):
+        base = known[name]["rest_base"]
+        parts.append(name if base == name else f"{name} (champ REST : {base})")
+    return ", ".join(parts)
+
+
+def _taxonomy_absent_message(
+    label: str, scope: str, known: dict[str, dict], hint: str = ""
+) -> str:
+    return (
+        f"Taxonomie {label} absente du {scope}. "
+        f"Taxonomies disponibles : {_describe_taxonomies(known)}."
+        + (f" {hint}" if hint else "")
+    )
+
+
+def _term_ids_error(key: str, item: Any) -> str:
+    return (
+        f"taxonomies.{key} : seuls des IDs de termes (entiers) sont acceptés, "
+        f"reçu {item!r}. Résoudre le nom en ID avec "
+        f'wordpress_list_terms(taxonomy="{key}", search=…) — cet outil ne crée '
+        "aucun terme."
+    )
+
+
+def _coerce_term_ids(key: str, value: Any) -> tuple[list[int], str]:
+    """Normalise 3 | [3, 9] | "3, 9" | [] en liste d'IDs. [] = retirer tout."""
+    if isinstance(value, str):
+        items: list = [p for p in re.split(r"[,\s]+", value.strip()) if p]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    ids: list[int] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (int, str)):
+            return [], _term_ids_error(key, item)
+        if isinstance(item, str):
+            if not item.strip().lstrip("+").isdigit():
+                return [], _term_ids_error(key, item)
+            ids.append(int(item))
+        else:
+            ids.append(item)
+    return ids, ""
+
+
+def _parse_taxonomies_arg(raw: str) -> tuple[list[tuple[str, list[int]]], str]:
+    """'{"blog-type": [3], "global_tags": "368"}' -> [("blog-type", [3]), ...]."""
+    if not raw:
+        return [], ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [], f"taxonomies : JSON invalide ({exc})."
+    if not isinstance(parsed, dict):
+        return [], (
+            'taxonomies attend un objet JSON {"<taxonomie>": [<ids>]}, reçu : '
+            f"{type(parsed).__name__}."
+        )
+    out: list[tuple[str, list[int]]] = []
+    for key, value in parsed.items():
+        ids, err = _coerce_term_ids(str(key), value)
+        if err:
+            return [], err
+        out.append((str(key), ids))
+    return out, ""
+
+
+async def _taxonomy_fields_for_write(
+    server: str,
+    post_type: str,
+    subsite: str,
+    categories: str,
+    tags: str,
+    taxonomies: str,
+) -> tuple[dict[str, list[int]], str, str]:
+    """Champs REST de taxonomie à écrire pour un type donné.
+
+    Renvoie (champs, avertissement, erreur bloquante). Aucun appel réseau si
+    aucune taxonomie n'est demandée. Une erreur bloquante doit interrompre
+    l'écriture : c'est le cas d'une taxonomie que le type ne porte pas, qui
+    serait sinon acceptée puis jetée par WordPress.
+    """
+    requested: list[tuple[str, str, list[int]]] = []
+    cat_ids = _parse_id_list(categories)
+    if cat_ids:
+        requested.append(("category", "categories", cat_ids))
+    tag_ids = _parse_id_list(tags)
+    if tag_ids:
+        requested.append(("post_tag", "tags", tag_ids))
+    generic, err = _parse_taxonomies_arg(taxonomies)
+    if err:
+        return {}, "", err
+    requested.extend((key, key, ids) for key, ids in generic)
+    if not requested:
+        return {}, "", ""
+
+    known, reason = await _rest_taxonomies_for_type(server, post_type, subsite)
+    if reason:
+        # Découverte indisponible : ne pas casser une écriture qui fonctionnait.
+        # Le contrôle après écriture dira ce qui a réellement été enregistré.
+        return (
+            {key: ids for _, key, ids in requested},
+            f"Taxonomies non validées avant écriture ({reason}) : "
+            "se fier au champ `taxonomies` du retour.",
+            "",
+        )
+
+    index = _taxonomy_index(known)
+    fields: dict[str, list[int]] = {}
+    for label, key, ids in requested:
+        name = index.get(key)
+        if not name:
+            return {}, "", _taxonomy_absent_message(
+                label,
+                f"type {post_type}",
+                known,
+                "Écrire une taxonomie du type avec "
+                "taxonomies='{\"<taxonomie>\": [<ids>]}', après avoir relevé ses "
+                "IDs de termes avec wordpress_list_terms.",
+            )
+        fields[known[name]["rest_base"]] = ids
+    return fields, "", ""
+
+
+def _taxonomy_report(payload: Any, sent: dict[str, list[int]], warning: str = "") -> dict:
+    """Compare les taxonomies demandées à celles que WordPress a enregistrées."""
+    if not sent:
+        return {"taxonomies_warning": warning} if warning else {}
+    recorded: dict[str, list[int]] = {}
+    ignored: list[str] = []
+    diverged: list[str] = []
+    for field, ids in sent.items():
+        if not isinstance(payload, dict) or field not in payload:
+            ignored.append(field)
+            continue
+        got = payload.get(field)
+        got = [t for t in got if isinstance(t, int)] if isinstance(got, list) else []
+        recorded[field] = got
+        if sorted(got) != sorted(ids):
+            diverged.append(field)
+
+    report: dict = {}
+    if recorded:
+        report["taxonomies"] = recorded
+    if ignored:
+        report["taxonomies_ignored"] = ignored
+    messages = [warning] if warning else []
+    if ignored:
+        messages.append(
+            "WordPress a ignoré ces champs, absents du type : "
+            + ", ".join(ignored)
+            + " — rien n'y a été écrit."
+        )
+    if diverged:
+        messages.append(
+            "Termes enregistrés différents de ceux demandés pour : "
+            + ", ".join(diverged)
+            + "."
+        )
+    if messages:
+        report["taxonomies_warning"] = " ".join(messages)
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Tools — Types de contenu & taxonomies
 # ---------------------------------------------------------------------------
 
@@ -1013,7 +1258,21 @@ async def wordpress_list_post_types(
     server: str = "prod",
     subsite: str = "",
 ) -> str:
-    """Liste tous les types de contenu disponibles sur le site (pages, posts, CPT...).
+    """Liste les types de contenu du site (pages, posts, CPT) et leurs taxonomies.
+
+    Chaque type porte `taxonomies` : la liste des taxonomies qui lui sont
+    attachées, avec leur `rest_base`, c'est-à-dire le nom du champ à écrire sur
+    une publication de ce type (post_tag s'écrit dans `tags`, category dans
+    `categories`, une taxonomie dédiée le plus souvent sous son propre nom).
+    C'est cette liste qui dit ce que wordpress_create_custom_post et
+    wordpress_update_custom_post peuvent écrire via leur paramètre `taxonomies`.
+
+    Limite non contournable : WordPress n'expose ici que les taxonomies
+    déclarées avec show_in_rest. Une taxonomie absente de cette liste n'est pas
+    lisible ni modifiable par l'API REST, donc pas par ce connecteur — il faut
+    la déclarer côté WordPress (argument show_in_rest de register_taxonomy).
+    Si /taxonomies est injoignable, `rest_base` est omis et `taxonomies_note`
+    l'explique.
 
     Args:
         server: "prod" ou "test"
@@ -1023,19 +1282,46 @@ async def wordpress_list_post_types(
         types = await _wp_get(server, "types", subsite=subsite)
         if not isinstance(types, dict):
             return f"Réponse inattendue : {types}"
+
+        taxonomies: dict[str, dict] = {}
+        note = ""
+        try:
+            raw = await _wp_get(server, "taxonomies", subsite=subsite)
+            if isinstance(raw, dict):
+                taxonomies = _normalize_taxonomies(raw)
+            else:
+                note = "réponse inattendue de /taxonomies : rest_base non résolu"
+        except Exception as exc:
+            note = f"rest_base des taxonomies non résolu ({exc})"
+
         result = []
         for slug, info in types.items():
+            attached = []
+            for name in info.get("taxonomies", []) or []:
+                known = taxonomies.get(name)
+                if known:
+                    attached.append({
+                        "slug": name,
+                        "rest_base": known["rest_base"],
+                        "hierarchical": known["hierarchical"],
+                    })
+                else:
+                    attached.append({"slug": name})
             result.append({
                 "slug": slug,
                 "name": info.get("name", ""),
                 "rest_base": info.get("rest_base", ""),
                 "hierarchical": info.get("hierarchical", False),
+                "taxonomies": attached,
             })
-        return json.dumps({
+        payload = {
             "server": server,
             "count": len(result),
             "types": result,
-        }, ensure_ascii=False, separators=(",", ":"))
+        }
+        if note:
+            payload["taxonomies_note"] = note
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -1121,8 +1407,28 @@ async def wordpress_update_custom_post(
     featured_media: int = 0,
     date: str = "",
     acf_fields: str = "",
+    taxonomies: str = "",
 ) -> str:
-    """Met à jour un contenu de type personnalisé (CPT) avec ses champs ACF.
+    """Met à jour un contenu de type personnalisé (CPT) : champs, ACF, taxonomies.
+
+    Toute taxonomie du type s'écrit avec `taxonomies`, y compris celles qui ne
+    sont ni category ni post_tag. Les taxonomies demandées sont vérifiées
+    contre celles du type AVANT l'écriture : une taxonomie que le type ne porte
+    pas fait échouer l'appel avec la liste de celles qui existent, au lieu
+    d'être acceptée puis jetée en silence par WordPress. Après l'écriture, le
+    retour porte `taxonomies` (ce qui est réellement enregistré) et, en cas
+    d'écart, `taxonomies_ignored` et `taxonomies_warning`.
+
+    `categories` et `tags` restent acceptés : ce sont les raccourcis des
+    taxonomies natives category et post_tag, refusés désormais si le type ne
+    les déclare pas. Ils visent les mêmes champs REST que
+    taxonomies='{"category": [...], "post_tag": [...]}'; en cas de doublon,
+    c'est `taxonomies` qui l'emporte.
+
+    Limites non contournables : les termes s'adressent par ID (aucune
+    résolution de nom ni création de terme ici — passer par
+    wordpress_list_terms), et seules les taxonomies déclarées avec show_in_rest
+    sont accessibles.
 
     Args:
         post_type: rest_base du type (ex: "produit", "membre")
@@ -1134,11 +1440,17 @@ async def wordpress_update_custom_post(
         status: "publish" | "draft" | "private" (ignoré si vide)
         slug: nouvel identifiant URL (ignoré si vide)
         excerpt: nouveau chapeau / extrait (ignoré si vide)
-        categories: IDs de catégories séparés par des virgules (ignoré si vide)
-        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide)
+        categories: IDs de catégories séparés par des virgules (ignoré si vide) — refusé si le type ne porte pas la taxonomie category
+        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide) — refusé si le type ne porte pas la taxonomie post_tag
         featured_media: ID du média mis en avant (ignoré si 0)
         date: date de publication ISO 8601 (ignoré si vide)
         acf_fields: JSON des champs ACF (ex: '{"nom": "valeur", "date": "2025-01-01"}')
+        taxonomies: JSON taxonomie -> IDs de termes, pour toute taxonomie du type
+            (ex: '{"blog-type": [3], "global_tags": [368, 12]}'). Clé acceptée
+            sous son nom de taxonomie ou son rest_base ; valeur acceptée en
+            liste, en entier seul ou en "3, 9". Liste vide = retirer tous les
+            termes. Découvrir les taxonomies avec wordpress_list_post_types et
+            les IDs avec wordpress_list_terms.
     """
     data: dict = {}
     if title:
@@ -1151,10 +1463,6 @@ async def wordpress_update_custom_post(
         data["slug"] = slug
     if excerpt:
         data["excerpt"] = excerpt
-    if _parse_id_list(categories):
-        data["categories"] = _parse_id_list(categories)
-    if _parse_id_list(tags):
-        data["tags"] = _parse_id_list(tags)
     if featured_media:
         data["featured_media"] = featured_media
     if date:
@@ -1164,19 +1472,28 @@ async def wordpress_update_custom_post(
             data["acf"] = json.loads(acf_fields)
         except json.JSONDecodeError as e:
             return f"acf_fields JSON invalide : {e}"
+
+    tax_fields, tax_warning, tax_error = await _taxonomy_fields_for_write(
+        server, post_type, subsite, categories, tags, taxonomies
+    )
+    if tax_error:
+        return tax_error
+    data.update(tax_fields)
     if not data:
         return "Aucun champ à modifier."
 
     warning = await _gutenberg_downgrade_warning(server, f"{post_type}/{post_id}", content, subsite)
     try:
         p = await _wp_put(server, f"{post_type}/{post_id}", data, subsite=subsite)
-        return json.dumps(_with_warning({
+        result = _with_warning({
             "updated": True,
             "id": p.get("id"),
             "title": p.get("title", {}).get("rendered", "") if isinstance(p.get("title"), dict) else str(p.get("title", "")),
             "status": p.get("status"),
             "link": p.get("link", ""),
-        }, warning), ensure_ascii=False, separators=(",", ":"))
+        }, warning)
+        result.update(_taxonomy_report(p, tax_fields, tax_warning))
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -1246,11 +1563,21 @@ async def wordpress_create_custom_post(
     acf_fields: str = "",
     server: str = "prod",
     subsite: str = "",
+    taxonomies: str = "",
 ) -> str:
     """Crée une nouvelle publication d'un type personnalisé (CPT).
 
     Le rest_base du type dépend du site : le découvrir via
     wordpress_list_post_types. Pour viser un sous-site, passer sa clé en `subsite`.
+
+    Mêmes règles de taxonomie que wordpress_update_custom_post : `taxonomies`
+    écrit n'importe quelle taxonomie du type, une taxonomie que le type ne
+    porte pas fait échouer l'appel avant écriture plutôt que d'être ignorée en
+    silence, et le retour porte les termes réellement enregistrés.
+
+    Limites non contournables : termes adressés par ID uniquement (pas de
+    résolution de nom ni de création de terme), et seules les taxonomies
+    déclarées avec show_in_rest sont accessibles.
 
     Args:
         post_type: rest_base du type (découvert via wordpress_list_post_types)
@@ -1259,13 +1586,17 @@ async def wordpress_create_custom_post(
         status: "draft" (défaut) | "publish" | "private" | "pending"
         slug: identifiant URL (généré automatiquement si vide)
         excerpt: chapeau / extrait (ignoré si vide)
-        categories: IDs de catégories séparés par des virgules (ignoré si vide)
-        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide)
+        categories: IDs de catégories séparés par des virgules (ignoré si vide) — refusé si le type ne porte pas la taxonomie category
+        tags: IDs d'étiquettes séparés par des virgules (ignoré si vide) — refusé si le type ne porte pas la taxonomie post_tag
         featured_media: ID du média mis en avant (ignoré si 0)
         date: date de publication ISO 8601 (ignoré si vide)
         acf_fields: JSON des champs ACF (ex: '{"chapeau": "..."}')
         server: "prod" ou "test"
         subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        taxonomies: JSON taxonomie -> IDs de termes
+            (ex: '{"blog-type": [3], "global_tags": [368]}'). Liste vide = aucun
+            terme. Découvrir les taxonomies avec wordpress_list_post_types et
+            les IDs avec wordpress_list_terms.
     """
     data: dict = {
         "title": title,
@@ -1276,10 +1607,6 @@ async def wordpress_create_custom_post(
         data["slug"] = slug
     if excerpt:
         data["excerpt"] = excerpt
-    if _parse_id_list(categories):
-        data["categories"] = _parse_id_list(categories)
-    if _parse_id_list(tags):
-        data["tags"] = _parse_id_list(tags)
     if featured_media:
         data["featured_media"] = featured_media
     if date:
@@ -1290,15 +1617,24 @@ async def wordpress_create_custom_post(
         except json.JSONDecodeError as e:
             return f"acf_fields JSON invalide : {e}"
 
+    tax_fields, tax_warning, tax_error = await _taxonomy_fields_for_write(
+        server, post_type, subsite, categories, tags, taxonomies
+    )
+    if tax_error:
+        return tax_error
+    data.update(tax_fields)
+
     try:
         p = await _wp_post(server, post_type, data, subsite=subsite)
-        return json.dumps({
+        result = {
             "created": True,
             "id": p.get("id"),
             "link": p.get("link"),
             "status": p.get("status"),
             "title": p.get("title", {}).get("rendered", "") if isinstance(p.get("title"), dict) else str(p.get("title", "")),
-        }, ensure_ascii=False, separators=(",", ":"))
+        }
+        result.update(_taxonomy_report(p, tax_fields, tax_warning))
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:
         return _format_error(exc)
 
@@ -1894,7 +2230,13 @@ async def wordpress_list_categories(
     per_page: int = 100,
     hide_empty: bool = False,
 ) -> str:
-    """Liste les catégories WordPress.
+    """Liste les termes de la taxonomie native `category`.
+
+    Limite : cet outil n'adresse que la taxonomie native category, celle des
+    articles et des types qui la déclarent explicitement. Un type qui porte ses
+    propres taxonomies (une rubrique dédiée, un vocabulaire maison) n'apparaît
+    pas ici : passer par wordpress_list_terms, après avoir lu les taxonomies du
+    type dans wordpress_list_post_types.
 
     Args:
         server: "prod" ou "test"
@@ -2275,6 +2617,12 @@ async def wordpress_create_post(
     Attention : certains sites n'utilisent pas ce type natif pour leur
     blog mais un CPT dédié. Vérifier via wordpress_list_post_types.
 
+    Limite : seules les deux taxonomies natives sont adressables ici, via
+    `categories` et `tags`. Pour une taxonomie personnalisée attachée aux
+    articles, passer par wordpress_create_custom_post(post_type="posts",
+    taxonomies='{"<taxonomie>": [<ids>]}'), qui vérifie la taxonomie avant
+    d'écrire.
+
     Args:
         title: titre de l'article
         content: contenu (markup Gutenberg de préférence)
@@ -2352,7 +2700,7 @@ async def wordpress_delete_post(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Étiquettes
+# Tools — Étiquettes & termes de taxonomie
 # ---------------------------------------------------------------------------
 
 
@@ -2364,10 +2712,15 @@ async def wordpress_list_tags(
     per_page: int = 100,
     hide_empty: bool = False,
 ) -> str:
-    """Liste les étiquettes (tags) WordPress.
+    """Liste les termes de la taxonomie native `post_tag`.
 
     Pendant de wordpress_list_categories : sans lui, impossible de résoudre un
     nom d'étiquette en ID avant une écriture.
+
+    Limite : cet outil n'adresse que la taxonomie native post_tag. Beaucoup de
+    types personnalisés ne la déclarent pas et utilisent leur propre taxonomie
+    d'étiquetage — leurs termes se listent avec wordpress_list_terms, les
+    taxonomies d'un type se lisent dans wordpress_list_post_types.
 
     Args:
         server: "prod" ou "test"
@@ -2393,6 +2746,101 @@ async def wordpress_list_tags(
             "tags": [
                 {"id": t.get("id"), "name": t.get("name", ""), "slug": t.get("slug", ""), "count": t.get("count", 0)}
                 for t in tags
+            ],
+        }, ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        return _format_error(exc)
+
+
+@mcp.tool()
+async def wordpress_list_terms(
+    taxonomy: str,
+    server: str = "prod",
+    subsite: str = "",
+    post_type: str = "",
+    search: str = "",
+    per_page: int = 100,
+    page: int = 1,
+    hide_empty: bool = False,
+) -> str:
+    """Liste les termes de n'importe quelle taxonomie, native ou personnalisée.
+
+    Généralise wordpress_list_categories et wordpress_list_tags, qui ne savent
+    lire que category et post_tag. C'est l'outil qui donne les IDs attendus par
+    le paramètre `taxonomies` des écritures de CPT.
+
+    La taxonomie est résolue avant lecture : elle est acceptée sous son nom
+    (post_tag), son slug ou son rest_base (tags). Une taxonomie inconnue, ou
+    non attachée au `post_type` demandé, renvoie une erreur qui liste celles
+    qui existent.
+
+    Limites non contournables : lecture seule (aucune création, modification ni
+    suppression de terme), et seules les taxonomies déclarées avec show_in_rest
+    sont visibles de l'API REST.
+
+    Args:
+        taxonomy: nom, slug ou rest_base de la taxonomie (ex: "post_tag", "tags", "blog-type")
+        server: "prod" ou "test"
+        subsite: "" (défaut, site principal) | clé d'un sous-site déclaré dans WP_<SERVER>_SUBSITES
+        post_type: rest_base d'un type de contenu — restreint aux taxonomies de ce type et vérifie l'attachement
+        search: filtre texte sur le nom
+        per_page: limite (100 maximum)
+        page: page de pagination
+        hide_empty: True = masquer les termes sans publication
+    """
+    if post_type:
+        known, reason = await _rest_taxonomies_for_type(server, post_type, subsite)
+        if reason:
+            return f"Découverte des taxonomies impossible : {reason}"
+        scope = f"type {post_type}"
+    else:
+        try:
+            raw = await _wp_get(server, "taxonomies", subsite=subsite)
+        except Exception as exc:
+            return _format_error(exc)
+        if not isinstance(raw, dict):
+            return f"Réponse inattendue : {raw}"
+        known = _normalize_taxonomies(raw)
+        scope = "site"
+
+    name = _taxonomy_index(known).get(taxonomy)
+    if not name:
+        return _taxonomy_absent_message(
+            taxonomy,
+            scope,
+            known,
+            "Les taxonomies attachées à chaque type de contenu sont listées par "
+            "wordpress_list_post_types.",
+        )
+    info = known[name]
+
+    params: dict = {
+        "per_page": min(per_page, MAX_PER_PAGE),
+        "page": page,
+        "hide_empty": "true" if hide_empty else "false",
+        "_fields": "id,name,slug,parent,count",
+    }
+    if search:
+        params["search"] = search
+    try:
+        terms = await _wp_get(server, info["rest_base"], params, subsite=subsite)
+        if not isinstance(terms, list):
+            return f"Réponse inattendue : {terms}"
+        return json.dumps({
+            "server": server,
+            "taxonomy": name,
+            "rest_base": info["rest_base"],
+            "hierarchical": info["hierarchical"],
+            "count": len(terms),
+            "terms": [
+                {
+                    "id": t.get("id"),
+                    "name": t.get("name", ""),
+                    "slug": t.get("slug", ""),
+                    "count": t.get("count", 0),
+                    **({"parent": t.get("parent")} if t.get("parent") else {}),
+                }
+                for t in terms
             ],
         }, ensure_ascii=False, separators=(",", ":"))
     except Exception as exc:

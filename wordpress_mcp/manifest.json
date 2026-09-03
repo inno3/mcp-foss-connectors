@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "wordpress-mcp",
   "display_name": "WordPress",
-  "version": "1.4.0",
-  "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, médias, redirections, révisions et contrôle de contenu. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
+  "version": "1.5.0",
+  "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, taxonomies personnalisées, médias, redirections, révisions et contrôle de contenu. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -172,7 +172,7 @@
     },
     {
       "name": "wordpress_list_post_types",
-      "description": "Liste les types de contenu"
+      "description": "Liste les types de contenu et les taxonomies de chacun"
     },
     {
       "name": "wordpress_list_custom_posts",
@@ -184,11 +184,11 @@
     },
     {
       "name": "wordpress_create_custom_post",
-      "description": "Crée un CPT (ex: nouvel article de blog news)"
+      "description": "Crée un CPT (taxonomies du type comprises)"
     },
     {
       "name": "wordpress_update_custom_post",
-      "description": "Met à jour un CPT avec ACF (alerte si les blocs Gutenberg disparaissent)"
+      "description": "Met à jour un CPT avec ACF et taxonomies (alerte si les blocs Gutenberg disparaissent)"
     },
     {
       "name": "wordpress_delete_custom_post",
@@ -240,11 +240,15 @@
     },
     {
       "name": "wordpress_list_categories",
-      "description": "Liste les catégories"
+      "description": "Liste les termes de la taxonomie native category"
     },
     {
       "name": "wordpress_list_tags",
-      "description": "Liste les étiquettes"
+      "description": "Liste les termes de la taxonomie native post_tag"
+    },
+    {
+      "name": "wordpress_list_terms",
+      "description": "Liste les termes de n'importe quelle taxonomie, personnalisée comprise"
     },
     {
       "name": "wordpress_list_users",

@@ -805,3 +805,366 @@ class TestListTags:
         assert mock_get.call_args[0][1] == "tags"
         assert mock_get.call_args[0][2]["search"] == "sbom"
         assert data["tags"][0]["name"] == "SBOM"
+
+
+# ---------------------------------------------------------------------------
+# Taxonomies personnalisées
+#
+# Défauts constatés en production le 03/09/2026 (brouillon news 10535) :
+#   1. wordpress_update_custom_post(post_type="news", tags="391,393") renvoyait
+#      {"updated": true} alors que le type news ne porte pas post_tag : rien
+#      n'était écrit, et l'appelant croyait avoir posé les étiquettes.
+#   2. aucun outil ne permettait de découvrir les taxonomies d'un type, ni de
+#      lister les termes d'une taxonomie autre que category / post_tag.
+# ---------------------------------------------------------------------------
+
+# /wp/v2/types — `taxonomies` ne liste que les taxonomies show_in_rest.
+TYPES_PAYLOAD = {
+    "post": {
+        "name": "Articles", "slug": "post", "rest_base": "posts",
+        "hierarchical": False, "taxonomies": ["category", "post_tag"],
+    },
+    "news": {
+        "name": "Actualités", "slug": "news", "rest_base": "news",
+        "hierarchical": False, "taxonomies": ["blog-type", "global_tags"],
+    },
+    "wp_block": {
+        "name": "Compositions", "slug": "wp_block", "rest_base": "blocks",
+        "hierarchical": False, "taxonomies": [],
+    },
+}
+
+# /wp/v2/taxonomies — indexé par nom de taxonomie ; `rest_base` est le nom du
+# champ à écrire sur la publication (post_tag -> "tags", category -> "categories").
+TAXONOMIES_PAYLOAD = {
+    "category": {
+        "name": "Catégories", "slug": "category", "rest_base": "categories",
+        "hierarchical": True, "types": ["post"],
+    },
+    "post_tag": {
+        "name": "Étiquettes", "slug": "post_tag", "rest_base": "tags",
+        "hierarchical": False, "types": ["post"],
+    },
+    "blog-type": {
+        "name": "Type de contenu", "slug": "blog-type", "rest_base": "blog-type",
+        "hierarchical": True, "types": ["news"],
+    },
+    "global_tags": {
+        "name": "Mots-clés", "slug": "global_tags", "rest_base": "global_tags",
+        "hierarchical": False, "types": ["news", "realisations"],
+    },
+}
+
+
+def _rest_get(terms: list | None = None, current: dict | None = None):
+    """Faux _wp_get routé par endpoint (types / taxonomies / termes / lecture)."""
+
+    async def _get(server, endpoint, params=None, subsite=""):
+        if endpoint == "types":
+            return TYPES_PAYLOAD
+        if endpoint == "taxonomies":
+            wanted = (params or {}).get("type")
+            if wanted:
+                return {
+                    k: v for k, v in TAXONOMIES_PAYLOAD.items()
+                    if wanted in v["types"]
+                }
+            return TAXONOMIES_PAYLOAD
+        if terms is not None and endpoint in {
+            t["rest_base"] for t in TAXONOMIES_PAYLOAD.values()
+        }:
+            return terms
+        return current if current is not None else {}
+
+    return AsyncMock(side_effect=_get)
+
+
+def _written(post_type: str = "news", **fields) -> dict:
+    """Réponse d'écriture WordPress : l'objet complet, taxonomies comprises."""
+    payload = {
+        "id": 10535,
+        "title": {"rendered": "Linux serveur"},
+        "status": "draft",
+        "link": "https://example.test/?post_type=%s&p=10535" % post_type,
+    }
+    payload.update(fields)
+    return payload
+
+
+@pytest.mark.asyncio
+class TestEcritureTaxonomiesCPT:
+    """Défaut 1 — une taxonomie absente du type ne doit plus passer en silence."""
+
+    async def test_tags_sur_un_type_sans_post_tag_est_une_erreur_explicite(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(),
+        ) as mock_put:
+            out = await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, tags="391,393"
+            )
+        mock_put.assert_not_called()
+        assert "post_tag" in out
+        assert "news" in out
+        # L'erreur doit dire quoi faire : les taxonomies réellement disponibles.
+        assert "blog-type" in out and "global_tags" in out
+
+    async def test_categories_sur_un_type_sans_category_est_une_erreur(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put", new_callable=AsyncMock
+        ) as mock_put:
+            out = await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, categories="12"
+            )
+        mock_put.assert_not_called()
+        assert "category" in out
+
+    async def test_taxonomies_generiques_sont_ecrites(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(**{"blog-type": [3], "global_tags": [368]}),
+        ) as mock_put:
+            data = json.loads(await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535,
+                taxonomies='{"blog-type":[3],"global_tags":[368]}',
+            ))
+        sent = mock_put.call_args[0][2]
+        assert sent["blog-type"] == [3]
+        assert sent["global_tags"] == [368]
+        # Le retour mesure ce qui a réellement été enregistré.
+        assert data["taxonomies"] == {"blog-type": [3], "global_tags": [368]}
+
+    async def test_taxonomie_acceptee_par_son_slug_est_traduite_en_rest_base(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written("posts", tags=[12]),
+        ) as mock_put:
+            await wp.wordpress_update_custom_post(
+                post_type="posts", post_id=5, taxonomies='{"post_tag": "12"}',
+            )
+        sent = mock_put.call_args[0][2]
+        assert sent == {"tags": [12]}
+
+    async def test_taxonomie_inconnue_du_type_est_refusee(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put", new_callable=AsyncMock
+        ) as mock_put:
+            out = await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, taxonomies='{"inexistante":[1]}',
+            )
+        mock_put.assert_not_called()
+        assert "inexistante" in out
+        assert "global_tags" in out
+
+    async def test_liste_vide_retire_tous_les_termes(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(**{"blog-type": []}),
+        ) as mock_put:
+            await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, taxonomies='{"blog-type":[]}',
+            )
+        assert mock_put.call_args[0][2] == {"blog-type": []}
+
+    async def test_taxonomies_json_invalide_est_signale(self) -> None:
+        with patch("wordpress_mcp.server._wp_put", new_callable=AsyncMock) as mock_put:
+            out = await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, taxonomies="pas du json",
+            )
+        mock_put.assert_not_called()
+        assert "taxonomies" in out and "JSON" in out
+
+    async def test_taxonomies_refuse_autre_chose_que_des_ids(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put", new_callable=AsyncMock
+        ) as mock_put:
+            out = await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535,
+                taxonomies='{"global_tags":["open source"]}',
+            )
+        mock_put.assert_not_called()
+        assert "global_tags" in out
+        assert "wordpress_list_terms" in out
+
+    async def test_tags_restent_acceptes_quand_le_type_porte_post_tag(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written("posts", tags=[12], categories=[4]),
+        ) as mock_put:
+            data = json.loads(await wp.wordpress_update_custom_post(
+                post_type="posts", post_id=5, categories="4", tags="12",
+            ))
+        sent = mock_put.call_args[0][2]
+        assert sent["categories"] == [4]
+        assert sent["tags"] == [12]
+        assert data["updated"] is True
+
+    async def test_ecriture_sans_taxonomie_ne_declenche_aucune_decouverte(self) -> None:
+        get = _rest_get()
+        with patch("wordpress_mcp.server._wp_get", new=get), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(),
+        ):
+            await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, title="Nouveau titre",
+            )
+        assert [c[0][1] for c in get.call_args_list] == []
+
+    async def test_champ_ignore_par_wordpress_est_signale(self) -> None:
+        """Garde-fou ultime : la découverte dit oui, WordPress n'écrit rien."""
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(),  # aucune clé de taxonomie dans la réponse
+        ):
+            data = json.loads(await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, taxonomies='{"blog-type":[3]}',
+            ))
+        assert data["taxonomies_ignored"] == ["blog-type"]
+        assert "ignor" in data["taxonomies_warning"].lower()
+
+    async def test_ecart_entre_demande_et_enregistre_est_signale(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written(**{"blog-type": [3]}),
+        ):
+            data = json.loads(await wp.wordpress_update_custom_post(
+                post_type="news", post_id=10535, taxonomies='{"blog-type":[3, 9]}',
+            ))
+        assert data["taxonomies"] == {"blog-type": [3]}
+        assert "blog-type" in data["taxonomies_warning"]
+
+    async def test_decouverte_indisponible_ecrit_quand_meme_et_previent(self) -> None:
+        """Un /wp/v2/types en échec ne doit pas casser une écriture qui marchait."""
+        with patch(
+            "wordpress_mcp.server._wp_get",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("types indisponible"),
+        ), patch(
+            "wordpress_mcp.server._wp_put",
+            new_callable=AsyncMock,
+            return_value=_written("posts", tags=[12]),
+        ) as mock_put:
+            data = json.loads(await wp.wordpress_update_custom_post(
+                post_type="posts", post_id=5, tags="12",
+            ))
+        assert mock_put.call_args[0][2]["tags"] == [12]
+        assert "valid" in data["taxonomies_warning"].lower()
+
+    async def test_create_custom_post_ecrit_les_taxonomies(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_post",
+            new_callable=AsyncMock,
+            return_value=_written(**{"blog-type": [3]}),
+        ) as mock_post:
+            data = json.loads(await wp.wordpress_create_custom_post(
+                post_type="news", title="Linux serveur",
+                taxonomies='{"blog-type":[3]}',
+            ))
+        assert mock_post.call_args[0][2]["blog-type"] == [3]
+        assert data["created"] is True
+        assert data["taxonomies"] == {"blog-type": [3]}
+
+    async def test_create_custom_post_refuse_une_taxonomie_absente(self) -> None:
+        with patch(
+            "wordpress_mcp.server._wp_get", new=_rest_get()
+        ), patch(
+            "wordpress_mcp.server._wp_post", new_callable=AsyncMock
+        ) as mock_post:
+            out = await wp.wordpress_create_custom_post(
+                post_type="news", title="Linux serveur", tags="391",
+            )
+        mock_post.assert_not_called()
+        assert "post_tag" in out
+
+
+@pytest.mark.asyncio
+class TestDecouverteTaxonomies:
+    """Défaut 2 — découvrir les taxonomies d'un type et lister leurs termes."""
+
+    async def test_list_post_types_expose_les_taxonomies(self) -> None:
+        with patch("wordpress_mcp.server._wp_get", new=_rest_get()):
+            data = json.loads(await wp.wordpress_list_post_types())
+        news = next(t for t in data["types"] if t["slug"] == "news")
+        assert news["taxonomies"] == [
+            {"slug": "blog-type", "rest_base": "blog-type", "hierarchical": True},
+            {"slug": "global_tags", "rest_base": "global_tags", "hierarchical": False},
+        ]
+        post = next(t for t in data["types"] if t["slug"] == "post")
+        # post_tag s'écrit dans le champ "tags" : c'est le rest_base qui compte.
+        assert {"slug": "post_tag", "rest_base": "tags", "hierarchical": False} in post["taxonomies"]
+
+    async def test_list_post_types_degrade_si_taxonomies_indisponibles(self) -> None:
+        async def _get(server, endpoint, params=None, subsite=""):
+            if endpoint == "types":
+                return TYPES_PAYLOAD
+            raise RuntimeError("taxonomies indisponible")
+
+        with patch(
+            "wordpress_mcp.server._wp_get", new=AsyncMock(side_effect=_get)
+        ):
+            data = json.loads(await wp.wordpress_list_post_types())
+        news = next(t for t in data["types"] if t["slug"] == "news")
+        assert news["taxonomies"] == [{"slug": "blog-type"}, {"slug": "global_tags"}]
+        assert "taxonomies_note" in data
+
+    async def test_list_terms_liste_une_taxonomie_personnalisee(self) -> None:
+        get = _rest_get(terms=[
+            {"id": 368, "name": "Open source", "slug": "open-source", "count": 12},
+        ])
+        with patch("wordpress_mcp.server._wp_get", new=get):
+            data = json.loads(await wp.wordpress_list_terms(
+                taxonomy="global_tags", search="open",
+            ))
+        endpoints = [c[0][1] for c in get.call_args_list]
+        assert "global_tags" in endpoints
+        assert data["taxonomy"] == "global_tags"
+        assert data["terms"][0]["id"] == 368
+
+    async def test_list_terms_traduit_le_slug_en_rest_base(self) -> None:
+        get = _rest_get(terms=[{"id": 8, "name": "SBOM", "slug": "sbom", "count": 3}])
+        with patch("wordpress_mcp.server._wp_get", new=get):
+            data = json.loads(await wp.wordpress_list_terms(taxonomy="post_tag"))
+        assert "tags" in [c[0][1] for c in get.call_args_list]
+        assert data["rest_base"] == "tags"
+
+    async def test_list_terms_taxonomie_inconnue_est_explicite(self) -> None:
+        with patch("wordpress_mcp.server._wp_get", new=_rest_get(terms=[])):
+            out = await wp.wordpress_list_terms(taxonomy="inexistante")
+        assert "inexistante" in out
+        assert "global_tags" in out
+
+    async def test_list_terms_filtre_par_type_de_contenu(self) -> None:
+        get = _rest_get(terms=[])
+        with patch("wordpress_mcp.server._wp_get", new=get):
+            out = await wp.wordpress_list_terms(taxonomy="post_tag", post_type="news")
+        assert "post_tag" in out and "news" in out
