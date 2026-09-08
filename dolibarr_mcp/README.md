@@ -317,6 +317,19 @@ looked it up:
 
 `null` means "not verified", never "false".
 
+### Transport errors are named, and reads are replayed
+
+A dropped connection or a read timeout used to reach the caller as a bare
+`Erreur : ` — `httpx.ReadError` and `ReadTimeout` carry no message — so a
+`dolibarr_get_meetingnote` failing on a busy server read like a missing note
+(08/09/2026, three notes, all found on replay). Every transport failure is now
+retried on reads (`GET`), and on any method when the request never left
+(`ConnectError`, `ConnectTimeout`). Writes are never replayed once the request
+was sent: Dolibarr may have created the object before the response was lost.
+What still fails is rendered as
+`Erreur réseau ReadError sur GET meetingnotesapi/251 (…) après 3 tentatives`,
+naming the route and whether a replay is safe.
+
 ## Creating a task: three fields the API validates before anything else
 
 `POST tasks` runs `_validate()` first, and it demands **`ref`, `label` and

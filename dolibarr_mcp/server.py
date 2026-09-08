@@ -74,6 +74,49 @@ class DolibarrAPIError(RuntimeError):
         super().__init__(message)
 
 
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur :  » suivi de rien était tout ce que
+#: l'appelant recevait.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+}
+
+
+class DolibarrTransportError(DolibarrAPIError):
+    """Échec réseau définitif d'un appel, une fois les rejeux épuisés.
+
+    Porte le type d'exception httpx d'origine, la route, le nombre de tentatives
+    et si l'appel a été rejoué. Sans elle, un `httpx.ReadError` vide ou un
+    `ReadTimeout` sans message se rendaient à l'appelant en « Erreur : » nu, et
+    rien ne distinguait un compte rendu absent d'une connexion coupée : constaté
+    le 08/09/2026 sur trois `dolibarr_get_meetingnote` rejoués avec succès à
+    l'identique.
+    """
+
+    def __init__(self, kind: str, method: str, endpoint: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.method = method
+        self.endpoint = endpoint
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail or _TRANSPORT_DEFAULT_DETAIL.get(kind, "sans message")
+        if replayable:
+            tail = (f" après {attempts} tentatives : rejouer l'appel plus tard, et "
+                    "vérifier la disponibilité de Dolibarr si l'erreur persiste.")
+        else:
+            tail = (" : écriture non rejouée automatiquement, Dolibarr a pu la traiter "
+                    "avant de perdre la réponse ; relire l'objet avant de rejouer.")
+        super().__init__(0, f"{kind} sur {method} {endpoint} ({self.detail}){tail}")
+
+
 def _parse_json_or_raise(resp: "httpx.Response", method: str, url: str) -> Any:
     """Parse un body en JSON, lève DolibarrAPIError lisible si échec."""
     try:
@@ -139,25 +182,32 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
 
                 resp.raise_for_status()
 
-        except httpx.ConnectError as exc:
-            # La requête n'a jamais atteint Dolibarr : rejouable même en écriture.
+        except httpx.TransportError as exc:
+            # Deux règles pour toutes les erreurs réseau :
+            # - la requête n'est jamais partie (ConnectError, ConnectTimeout) :
+            #   rejouable même en écriture ;
+            # - la requête est partie et la réponse s'est perdue (ReadTimeout,
+            #   ReadError, RemoteProtocolError, PoolTimeout…) : rejouable en
+            #   lecture seulement, Dolibarr a peut-être déjà créé l'objet et un
+            #   rejeu ferait un doublon.
+            # Avant, seuls ConnectError et Read/WriteTimeout étaient traités : un
+            # ReadError (connexion coupée par le serveur, message vide) remontait
+            # tel quel, et l'appelant lisait « Erreur : » sans rien derrière
+            # (dolibarr_get_meetingnote, 08/09/2026, trois CR distincts, tous
+            # rejoués avec succès à l'identique).
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or idempotent
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry %s %s in %.1fs: %s", method, url, delay, exc)
+                logger.warning("Retry %s %s in %.1fs (%s: %s)", method, url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
-        except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
-            # La requête est partie : côté écriture, Dolibarr a peut-être déjà
-            # créé l'objet → rejouer ferait un doublon. On remonte l'erreur.
-            last_exc = exc
-            if idempotent and attempt < _MAX_RETRIES:
-                delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry %s %s in %.1fs: %s", method, url, delay, exc)
-                await asyncio.sleep(delay)
-            else:
-                raise
+                raise DolibarrTransportError(
+                    type(exc).__name__, method.upper(), endpoint, attempt + 1,
+                    replayable, str(exc).strip(),
+                ) from exc
         except httpx.HTTPStatusError as exc:
             if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
@@ -360,7 +410,14 @@ def _error_body(exc: httpx.HTTPStatusError) -> str:
 
 
 def _format_error(exc: Exception) -> str:
-    """Formate une erreur HTTP en message lisible."""
+    """Formate une erreur HTTP en message lisible.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, asyncio.TimeoutError) est rendue avec son type, et une erreur
+    réseau dit sur quelle route, si l'appel a été rejoué et s'il peut l'être.
+    """
+    if isinstance(exc, DolibarrTransportError):
+        return f"Erreur réseau {exc}"
     if isinstance(exc, DolibarrAPIError):
         return f"Erreur Dolibarr : {exc}"
     if isinstance(exc, httpx.HTTPStatusError):
@@ -384,7 +441,14 @@ def _format_error(exc: Exception) -> str:
     if isinstance(exc, json.JSONDecodeError):
         # Filet de sécurité : ne devrait plus se produire grâce à _parse_json_or_raise
         return f"Erreur JSON Dolibarr : {exc}"
-    return f"Erreur : {exc}"
+    if isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(kind, "sans message")
+        return f"Erreur réseau {kind} : {detail}. Rejouer l'appel."
+    text = str(exc).strip()
+    if not text:
+        return f"Erreur {type(exc).__name__} : sans message."
+    return f"Erreur : {text}"
 
 
 def _dumps(data: Any) -> str:
