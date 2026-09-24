@@ -253,17 +253,26 @@ a bad id.
 
 | Route | Verb | Status |
 |---|---|---|
-| `tasks/{id}/addtimespent` | `POST` | the only add route, **fatally broken on Dolibarr 23.0.x**; see below |
+| `tasks/{id}/addtimespent` | `POST` | the only add route; works, but **fatally broken on some Dolibarr 23.0.x builds**; see below |
 | `tasks/{id}/timespent` | `GET` only | works; a `POST` here returns `404` |
 | `tasks/{id}/timespent/{entry_id}` | `PUT` / `DELETE` | work (Dolibarr 23+) |
 | `tasks/{id}/getTimeSpent/{entry_id}` | `GET` | works (Dolibarr 23+) |
 | `projects/tasks/{id}/…` | — | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
 
-### Known upstream bug: adding time is impossible on Dolibarr 23.0.x
+### Known upstream bug: adding time fails on some Dolibarr 23.0.x builds
 
-`POST tasks/{id}/addtimespent` returns **HTTP 500 with a zero-byte body** for
-every request, whatever it contains. It is a PHP fatal, not an application
-error:
+**Not every 23.0.x is affected, and this section used to say otherwise.**
+Verified on 18/09/2026 against the inno³ production instance (Dolibarr 23):
+17 entries written through `dolibarr_log_time` and read back with
+`dolibarr_list_time_entries`. Which patch level or vendored Restler makes the
+difference was not established — what is established is that the blanket
+"every call fails" claim was stale, and that it cost a browser workaround
+nobody needed. Treat what follows as a signature to recognise, not as a
+verdict on the route.
+
+On an affected build, `POST tasks/{id}/addtimespent` returns **HTTP 500 with a
+zero-byte body** for every request, whatever it contains. It is a PHP fatal,
+not an application error:
 
 ```
 PHP Fatal error: Uncaught TypeError: Cannot access offset of type array
@@ -284,8 +293,9 @@ regression introduced in 23, of the same family as
 [Dolibarr#35373](https://github.com/Dolibarr/dolibarr/issues/35373) on
 `/products/{id}/purchase_prices`.
 
-Until the instance is patched, **time entry goes through the web UI**
-(`projet/tasks/time.php`). Reading and correcting time are unaffected:
+On an affected instance, and until it is patched, **time entry goes through
+the web UI** (`projet/tasks/time.php`). Reading and correcting time are
+unaffected:
 `dolibarr_list_time_entries`, `dolibarr_update_time_entry` and
 `dolibarr_delete_time_entry` all work on 23.0.x, so a mis-keyed entry can be
 repaired without reopening the interface.
@@ -344,6 +354,51 @@ characters). Beyond that they are cut at the ceiling and the cut is announced:
 `<field>_truncated` is `true` and `<field>_length` carries the real length of
 the text. Both companions are always present, so a caller can compare what it
 wrote with what it reads.
+
+## Creating a ticket can write somewhere else, and says so
+
+`POST /tickets` fires Dolibarr's `TICKET_CREATE` trigger, and any installed
+module may write on the back of it. The connector cannot prevent that — it is
+server-side code, triggered by the write itself — so it reports it instead.
+
+`dolibarr_create_ticket` returns two extra fields:
+
+- `side_effects_checked` — whether the connector was *able* to look. It is
+  `false` on a vanilla install, where nothing teaches it which module writes
+  what. "I did not look" is not "nothing happened", and the two must not read
+  alike.
+- `side_effects` — one entry per module that wrote, each naming what it wrote.
+  An entry carrying `error` means an observer failed: the ticket exists, but
+  that side effect could not be verified.
+
+An extension registers an observer through the public core API:
+
+```python
+from dolibarr_mcp import server
+
+async def my_observer(ticket_id: int, thirdparty_id: int) -> dict | None:
+    ...  # read back what the module wrote; None means nothing to report
+
+server.register_ticket_create_observer(my_observer)
+```
+
+The observer returns a dict (added to `side_effects`, its `message` key
+appended to the tool's human-readable message) or `None`. An exception it
+raises never fails the ticket creation.
+
+One consequence worth spelling out: on an instance that debits automatically,
+the `severity` argument also **prices** the ticket. The module maps `low` to
+one unit and `high` / `critical` to five; `normal` is not in its dictionary at
+all, so it falls back to one unit and logs a warning. A ticket raised as
+`critical` costs the client five times one raised as `low`, and nothing in the
+parameter's name says so — hence the note in the tool's docstring.
+
+What prompted this: on 18/09/2026, eleven tickets created through this tool
+each debited one unit from the client's support notebooks (inno³'s in-house
+`supportcredits` module, which debits the oldest active notebook on
+`TICKET_CREATE`). Nothing in the answers said so; the writes only surfaced when
+the next explicit debit was refused with `statut=2, restant=0`. The observer
+for that module ships in the [inno³ extension package](#inno3-extension-package).
 
 ## Creating a task: three fields the API validates before anything else
 
@@ -529,6 +584,10 @@ my_org = "my_org_pkg.extension:register"
 def register(mcp):
     mcp.tool()(my_extra_tool)
 ```
+
+An extension can also observe what a write triggers server-side, through
+`server.register_ticket_create_observer()` — see
+[Creating a ticket can write somewhere else](#creating-a-ticket-can-write-somewhere-else-and-says-so).
 
 A bad extension can never break the core: load failures are caught and logged
 to stderr, and the server keeps running with its 48 generic tools.
