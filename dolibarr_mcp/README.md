@@ -330,6 +330,21 @@ What still fails is rendered as
 `Erreur réseau ReadError sur GET meetingnotesapi/251 (…) après 3 tentatives`,
 naming the route and whether a replay is safe.
 
+### Notes on a detail read are rendered whole, or say they were cut
+
+`dolibarr_get_proposal` used to cut `note_public` at 300 characters, with no
+marker and no length: a note written through `dolibarr_update_proposal` could
+not be read back for checking, and the cut read like a loss in the database
+(14/09/2026, proposal 172, before and after a successful update). The same
+silent cut sat in `dolibarr_get_invoice`, `dolibarr_get_supplier_invoice` and
+`dolibarr_get_thirdparty` (300 characters), and in the `description` and
+`note_public` of `dolibarr_get_project` (500). Those fields are now rendered
+whole, notes with their HTML cleaned, up to `DETAIL_NOTE_MAX_CHARS` (20 000
+characters). Beyond that they are cut at the ceiling and the cut is announced:
+`<field>_truncated` is `true` and `<field>_length` carries the real length of
+the text. Both companions are always present, so a caller can compare what it
+wrote with what it reads.
+
 ## Creating a task: three fields the API validates before anything else
 
 `POST tasks` runs `_validate()` first, and it demands **`ref`, `label` and

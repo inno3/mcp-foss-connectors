@@ -51,6 +51,16 @@ MAX_LIMIT = 100
 # résultats manquent silencieusement.
 CLIENT_FILTER_SCAN_LIMIT = 500
 
+# Plafond de sûreté sur les notes d'une lecture de détail (get_proposal,
+# get_invoice, get_supplier_invoice, get_thirdparty, get_project). En deçà, la
+# note est rendue entière ; au-delà, la coupe est ANNONCÉE par
+# `<champ>_truncated` et `<champ>_length`, jamais muette. Les `[:300]` et
+# `[:500]` historiques coupaient sans le dire : constaté le 14/09/2026 sur la
+# propale 172, dont la note publique revenait à 300 caractères exactement,
+# avant comme après un update_proposal réussi, ce qui se lisait comme une
+# perte en base.
+DETAIL_NOTE_MAX_CHARS = 20_000
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -698,6 +708,13 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
     Fournir soit project_id, soit ref. Retourne toutes les infos du projet
     incluant tâches et contacts associés.
+
+    Description et note publique : `description` (texte brut) et `note_public`
+    (HTML nettoyé) sont rendues entières jusqu'à DETAIL_NOTE_MAX_CHARS (20 000)
+    caractères. Au-delà, le champ est coupé à ce plafond et la coupe est
+    annoncée : `<champ>_truncated` passe à true et `<champ>_length` donne la
+    longueur réelle. Ces champs sont toujours présents. Les deux étaient
+    coupés à 500 caractères sans le dire.
     """
     try:
         if ref and not project_id:
@@ -712,6 +729,8 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
         p = await api_get(f"projects/{project_id}")
         # Filtrer les champs utiles
+        desc_text, desc_truncated, desc_length = _bounded_text(p.get("description"))
+        note_text, note_truncated, note_length = _bounded_note(p.get("note_public"))
         result = {
             "id": p.get("id"),
             "ref": p.get("ref"),
@@ -721,8 +740,12 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
             "date_start": _ts_to_date(p.get("date_start")),
             "date_end": _ts_to_date(p.get("date_end")),
             "budget": p.get("budget_amount"),
-            "description": (p.get("description") or "")[:500],
-            "note_public": _strip_html(p.get("note_public"))[:500],
+            "description": desc_text,
+            "description_length": desc_length,
+            "description_truncated": desc_truncated,
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "usage_bill_time": p.get("usage_bill_time"),
         }
         return _dumps(result)
@@ -2158,10 +2181,18 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
 
     Retourne toutes les informations : coordonnées, catégories, contacts,
     conditions de paiement, etc.
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         tp = await api_get(f"thirdparties/{thirdparty_id}")
         # Filtrer les champs utiles pour économiser les tokens
+        note_text, note_truncated, note_length = _bounded_note(tp.get("note_public"))
         result = {
             "id": tp.get("id"),
             "name": tp.get("name"),
@@ -2181,7 +2212,9 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
             "siret": tp.get("idprof2"),
             "tva_intra": tp.get("tva_intra"),
             "status": tp.get("status"),
-            "note_public": _strip_html(tp.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
         }
         return _dumps(result)
     except Exception as exc:
@@ -4268,6 +4301,25 @@ def _strip_html(text: Any) -> str:
     return s.strip()
 
 
+def _bounded_text(text: Any, limit: int = DETAIL_NOTE_MAX_CHARS) -> "tuple[str, bool, int]":
+    """Borne un texte brut sans jamais le couper en silence. Retourne
+    (texte, truncated, length) : `length` est la longueur du texte entier,
+    `truncated` vaut True si `texte` en est une coupe. None devient "".
+
+    Une lecture de détail rend ainsi le texte entier jusqu'à `limit`, et dit
+    quand elle a coupé : l'appelant peut comparer ce qu'il a écrit à ce qu'il
+    relit, au lieu de conclure à une perte en base.
+    """
+    s = "" if text is None else str(text)
+    return s[:limit], len(s) > limit, len(s)
+
+
+def _bounded_note(text: Any, limit: int = DETAIL_NOTE_MAX_CHARS) -> "tuple[str, bool, int]":
+    """Nettoie une note HTML (cf. _strip_html) puis la borne comme _bounded_text :
+    la longueur annoncée est celle du texte nettoyé, pas celle du HTML brut."""
+    return _bounded_text(_strip_html(text), limit)
+
+
 def _num(value: Any) -> Any:
     """Convertit une valeur numérique Dolibarr (ex '1500.00000000') en int/float
     compact. Renvoie None si vide, ou la valeur d'origine si non numérique."""
@@ -4335,6 +4387,13 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
     Paramètres :
     - invoice_id : ID de la facture
     - ref : référence (ex: FA2605-0001, ou (PROV1234) pour un brouillon)
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         if ref and not invoice_id:
@@ -4354,6 +4413,8 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
         lines_raw = inv.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
 
+        note_text, note_truncated, note_length = _bounded_note(inv.get("note_public"))
+
         result = {
             "id": inv.get("id"),
             "ref": inv.get("ref"),
@@ -4370,7 +4431,9 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
             "date_due": _ts_to_date(inv.get("date_lim_reglement")),
             "fk_project": inv.get("fk_project"),
             "ref_customer": inv.get("ref_client"),
-            "note_public": _strip_html(inv.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": inv.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
@@ -4386,8 +4449,17 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
     """Détail d'une proposition commerciale par ID numérique ou par référence.
 
     Fournir soit proposal_id, soit ref. Retourne ref, tiers, montants, statut,
-    date de validité, et TOUTES les lignes détaillées (id, type produit/service,
-    produit lié, libellé, quantité, prix, remise %, TVA, totaux, dates).
+    date de validité, la note publique, et TOUTES les lignes détaillées (id,
+    type produit/service, produit lié, libellé, quantité, prix, remise %, TVA,
+    totaux, dates).
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents : une note écrite par dolibarr_update_proposal
+    se vérifie en la relisant. Elle était coupée à 300 caractères sans le dire
+    (constat du 14/09/2026 sur la propale 172).
 
     Paramètres :
     - proposal_id : ID de la propal
@@ -4409,6 +4481,7 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
 
         lines_raw = p.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
+        note_text, note_truncated, note_length = _bounded_note(p.get("note_public"))
 
         result = {
             "id": p.get("id"),
@@ -4424,7 +4497,9 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
             "date_validity": _ts_to_date(p.get("fin_validite") or p.get("date_validity")),
             "fk_project": p.get("fk_project"),
             "ref_customer": p.get("ref_client"),
-            "note_public": _strip_html(p.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": p.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
@@ -4447,6 +4522,13 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
     Paramètres :
     - invoice_id : ID de la facture fournisseur
     - ref : référence interne Dolibarr (ex: SI2602-0084)
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         if ref and not invoice_id:
@@ -4468,6 +4550,8 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
         lines_raw = inv.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
 
+        note_text, note_truncated, note_length = _bounded_note(inv.get("note_public"))
+
         result = {
             "id": inv.get("id"),
             "ref": inv.get("ref"),
@@ -4488,7 +4572,9 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
                 inv.get("date_echeance") or inv.get("date_lim_reglement")
             ),
             "fk_project": inv.get("fk_project"),
-            "note_public": _strip_html(inv.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": inv.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
