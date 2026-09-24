@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import unicodedata
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
 
@@ -124,20 +125,175 @@ def _get_credentials(as_user: str) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 
+# Sans message, les exceptions httpx masquaient jusqu'à la famille du défaut :
+# une connexion coupée et un objet absent se lisaient tous deux « Erreur : ».
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+_JSONRPC_ERROR_DETAIL = {
+    -32700: "JSON de la requête invalide",
+    -32600: "requête JSON-RPC invalide",
+    -32601: "méthode introuvable",
+    -32602: "paramètres invalides",
+    -32603: "erreur interne Kanboard",
+}
+_JSONRPC_REJECTED_CODES = {-32700, -32600, -32601, -32602}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar[tuple[asyncio.Task[Any], list[str]] | None] = ContextVar(
+    "kanboard_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+def _is_mutating_method(method: str) -> bool:
+    """Une méthode inconnue peut écrire : perdre un rejeu vaut mieux qu'un doublon."""
+    return not method.startswith(("get", "search"))
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaine deux phrases sans les souder : un detail Kanboard finit rarement
+    par un point, et « Internal error Etat de l'ecriture » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, method: str) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {method} non appliquée : rejouer cette requête est sans "
+                "risque de doublon.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {method} inconnu : écriture non rejouée "
+                "automatiquement, Kanboard a pu la traiter avant de perdre la réponse ; "
+                "relire l'objet avant de rejouer.")
+    return ""
+
+
+class KanboardAPIError(RuntimeError):
+    """Erreur JSON-RPC ou réponse illisible, avec l'état de l'écriture concernée."""
+
+    def __init__(self, code: int | None, message: str, method: str,
+                 body_excerpt: str | None = None):
+        self.code = code
+        self.method = method
+        self.body_excerpt = body_excerpt
+        self.write_state = (
+            "sans_objet" if not _is_mutating_method(method)
+            else "non_appliquee" if code in _JSONRPC_REJECTED_CODES else "inconnu"
+        )
+        label = _JSONRPC_ERROR_DETAIL.get(code, "erreur JSON-RPC")
+        self.detail = message.strip() or (
+            "sans message de Kanboard" if code is not None else "sans message")
+        code_label = f" {code} ({label})" if code is not None else ""
+        # Les replis de permission lisent encore le texte : conserver le préfixe
+        # et le message Kanboard, notamment ses marqueurs « Forbidden ».
+        super().__init__(_append_sentence(
+            f"Kanboard{code_label} sur {method} : {self.detail}",
+            _write_state_message(self.write_state, method),
+        ))
+
+
+class KanboardTransportError(RuntimeError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide."""
+
+    def __init__(self, kind: str, method: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.method = method
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP",
+        )
+        self.write_state = (
+            "sans_objet" if not _is_mutating_method(method)
+            else "non_appliquee" if replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, method)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité de "
+                    "Kanboard si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        super().__init__(
+            f"{kind} sur {method} ({self.detail}) après {attempts} {count}.{tail}"
+        )
+
+
+def _parse_json_or_raise(resp: httpx.Response, method: str) -> Any:
+    """Une page de proxy en HTTP 200 doit rester diagnostiquable et rejouable en lecture."""
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        body = resp.text or ""
+        ct = resp.headers.get("content-type", "?")
+        excerpt = body[:200] if body else "(corps vide)"
+        logger.error(
+            "Réponse non-JSON pour RPC %s : HTTP=%d content-type=%s body_len=%d "
+            "first_bytes=%r", method, resp.status_code, ct, len(body), excerpt,
+        )
+        raise KanboardAPIError(
+            None,
+            f"Réponse non-JSON depuis Kanboard (HTTP {resp.status_code}, "
+            f"content-type={ct}, body={len(body)}o). Extrait : {excerpt!r}",
+            method, body_excerpt=excerpt,
+        ) from exc
+
+
 async def kb_call(method: str, params: dict | None = None, as_user: str = "") -> Any:
-    """Appel JSON-RPC 2.0 a l'API Kanboard avec retry et backoff exponentiel.
+    """Appel JSON-RPC 2.0 à l'API Kanboard avec rejeu et backoff exponentiel.
 
-    Parametres :
-    - method : nom de la methode JSON-RPC Kanboard
-    - params : parametres de la methode (dict)
-    - as_user : compte a utiliser ("primary" | "agent" | "" pour defaut)
+    Paramètres :
+    - method : nom de la méthode JSON-RPC Kanboard
+    - params : paramètres de la méthode (dict)
+    - as_user : compte à utiliser ("primary" | "agent" | "" pour défaut)
 
-    Retente automatiquement sur les erreurs réseau (ConnectError, ReadTimeout)
-    et les erreurs HTTP 5xx. N'effectue pas de retry sur les erreurs 4xx.
+    Les lectures sont rejouées après toute erreur de transport, un HTTP 5xx ou
+    un corps non-JSON. Une écriture n'est rejouée que si la connexion n'a jamais
+    abouti (ConnectError, ConnectTimeout). Aucun rejeu sur les erreurs HTTP 4xx
+    ou les refus JSON-RPC.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état
+    indécidable côté client. Il faut relire l'objet avant de rejouer ; le
+    journal rappelle aussi les écritures déjà réussies dans cet appel d'outil.
     """
     global _request_id
     _request_id += 1
 
+    journal = _write_journal()
+    mutating = _is_mutating_method(method)
     user, token, account = _get_credentials(as_user)
     auth = base64.b64encode(f"{user}:{token}".encode()).decode()
     payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": _request_id}
@@ -162,27 +318,54 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _parse_json_or_raise(resp, method)
 
             if "error" in data and data["error"] is not None:
                 err = data["error"]
-                msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                raise Exception(f"Kanboard API error: {msg}")
-            return data.get("result")
+                code = err.get("code") if isinstance(err, dict) else None
+                msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
+                raise KanboardAPIError(code, msg, method)
+            result = data.get("result")
+            # Kanboard signale aussi l'échec d'une écriture par un résultat faux,
+            # sans erreur JSON-RPC : ne pas l'annoncer comme déjà appliquée.
+            if mutating and result:
+                journal.append(method)
+            return result
 
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        except httpx.TransportError as exc:
+            # Seul un échec de connexion prouve que Kanboard n'a rien reçu.
+            # Après l'envoi, rejouer une écriture peut créer un doublon.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or not mutating
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry RPC %s dans %.1fs : %s", method, delay, exc)
+                logger.warning("Retry RPC %s dans %.1fs (%s : %s)", method, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise KanboardTransportError(
+                    type(exc).__name__, method, attempt + 1, replayable, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            # Les outils inspectent le statut HTTP : garder l'exception httpx
+            # d'origine tout en donnant au formateur le contexte de l'écriture.
+            exc.kb_method = method
+            exc.kb_mutating = mutating
+            if not mutating and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2 ** attempt)
                 logger.warning("Retry RPC %s (HTTP %d) dans %.1fs", method, exc.response.status_code, delay)
+                await asyncio.sleep(delay)
+            else:
+                raise
+        except KanboardAPIError as exc:
+            # Un corps illisible peut venir d'un proxy. Un refus JSON-RPC, lui,
+            # ne se résout pas par le rejeu automatique des mêmes paramètres.
+            last_exc = exc
+            if exc.body_excerpt is not None and not mutating and attempt < _MAX_RETRIES:
+                delay = _RETRY_DELAY * (2 ** attempt)
+                logger.warning("Retry RPC %s (corps non-JSON) dans %.1fs", method, delay)
                 await asyncio.sleep(delay)
             else:
                 raise
@@ -190,17 +373,55 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
 
 
 def _format_error(exc: Exception) -> str:
-    """Formate une erreur en message lisible."""
-    if isinstance(exc, httpx.HTTPStatusError):
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Une exception vide garde son type et un libellé : l'appelant doit pouvoir
+    distinguer une défaillance réseau d'un refus et décider quoi relire.
+    """
+    if isinstance(exc, KanboardTransportError):
+        message = f"Erreur réseau {exc}"
+    elif isinstance(exc, KanboardAPIError):
+        message = f"Erreur {exc}"
+    elif isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 401:
-            return "Erreur 401 : authentification Kanboard invalide."
-        if status == 403:
-            return "Erreur 403 : permissions insuffisantes."
-        if status == 404:
-            return "Erreur 404 : endpoint Kanboard introuvable. Verifier KANBOARD_URL."
-        return f"Erreur HTTP {status} : {exc.response.text[:500]}"
-    return f"Erreur : {exc}"
+            message = "Erreur 401 : authentification Kanboard invalide."
+        elif status == 403:
+            message = "Erreur 403 : permissions insuffisantes."
+        elif status == 404:
+            message = "Erreur 404 : endpoint Kanboard introuvable. Verifier KANBOARD_URL."
+        else:
+            detail = exc.response.text[:500].strip() or "sans message."
+            message = f"Erreur HTTP {status} : {detail}"
+        if getattr(exc, "kb_mutating", False):
+            method_name = getattr(exc, "kb_method", "inconnue")
+            if status >= 500:
+                message = _append_sentence(
+                    message, _write_state_message("inconnu", method_name))
+            elif status >= 400 and status not in (401, 403, 404):
+                # 401, 403 et 404 gardent leur message exact : une auth refusee
+                # n'ecrit rien et n'a pas besoin qu'on en discute. Le reste
+                # (413 sur un commentaire trop long, 400 d'un proxy) est refuse
+                # avant execution : le dire evite une relecture inutile, et un
+                # rejeu a l'identique echouerait pareil.
+                message = _append_sentence(
+                    message,
+                    f" Écriture {method_name} non appliquée : la requête a été "
+                    "refusée avant exécution, corriger l'appel avant de rejouer.")
+    elif isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(kind, "échec du transport HTTP")
+        message = f"Erreur réseau {kind} : {detail}."
+    else:
+        text = str(exc)
+        message = f"Erreur : {text}" if text.strip() else f"Erreur {type(exc).__name__} : sans message."
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
 
 
 # Marqueurs textuels d'un refus Kanboard. Un refus ne remonte pas toujours un

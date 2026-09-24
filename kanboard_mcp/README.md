@@ -251,6 +251,49 @@ one you asked about. `kanboard_list_task_links` re-exposes it as
 last one is what `kanboard_remove_task_link` expects. Passing a task id there
 would target an unrelated link.
 
+## When a call fails, what the message tells you
+
+On 24/09/2026 the connector answered `Erreur : ` — nothing else — twice in one
+session, once on `kanboard_add_comment` and once on `kanboard_get_task`; both
+calls succeeded when replayed unchanged. An empty string separates nothing: a
+refused authentication, a missing object, an oversized payload and a passing
+network fault all read alike, and the caller cannot tell whether to replay, fix
+the call or stop. Four things now hold.
+
+**No message is ever bare.** An httpx exception carrying no text (`ReadError`,
+a naked `ReadTimeout`, `RemoteProtocolError`) is rendered with its type and what
+that family means — `Erreur réseau ReadError : connexion coupée par le serveur
+avant la réponse.` Any other empty exception keeps at least its class name. A
+non-JSON body served with HTTP 200, which is how a proxy error page arrives, is
+reported as such with an excerpt instead of a parser message.
+
+**The JSON-RPC error code is no longer dropped.** Kanboard's `code` used to be
+discarded in favour of `message` alone; it is now rendered with its meaning —
+`Kanboard API error -32602 (paramètres invalides) sur getProjectActivity`.
+
+**A write is never replayed once the request has left.** Reads are replayed on
+any transport error, on 5xx and on an unreadable body. Writes are replayed only
+when the connection never succeeded (`ConnectError`, `ConnectTimeout`), which is
+the only proof Kanboard received nothing. Before this, a `createComment` losing
+its response was replayed twice and could post the comment three times.
+
+**The error says what became of the write.** `write_state` is `sans_objet` for a
+read, `non_appliquee` when the request never reached Kanboard or Kanboard refused
+it before executing it (JSON-RPC -32700/-32600/-32601/-32602) — replaying is then
+free of any duplicate risk — and `inconnu` when the request left and the answer
+was lost (read timeout, 5xx, -32603): the message then asks you to re-read the
+object before replaying. A 401 or 403 writes nothing and keeps its usual message.
+
+**Writes already applied earlier in the same tool call are named.** Several tools
+chain writes — create then categorise, add then move. When one of them has
+succeeded before the failure, the message lists it, so a caller knows what to
+re-read rather than guessing which half of the tool ran.
+
+The limit that remains: a write whose response is lost leaves a state the client
+cannot decide. Kanboard exposes neither an idempotency key nor a request id to
+check against, so `inconnu` means exactly that — re-read the object, do not
+replay blind.
+
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
