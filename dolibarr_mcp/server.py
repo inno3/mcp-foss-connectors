@@ -857,15 +857,17 @@ TASK_ROLE_MANAGER = "TASKEXECUTIVE"        # libellé standard : « Responsable 
 # Dolibarr 22 déclarait « @param datetime $date » sans union et sans $progress :
 # la route y fonctionne. C'est donc une régression de la 23.
 _UPSTREAM_BUG_ADDTIMESPENT = (
-    "Bug amont Dolibarr 23.0.x, pas un problème de configuration : "
-    "POST tasks/{id}/addtimespent lève une fatale PHP "
-    "(TypeError « Cannot access offset of type array in isset or empty », "
+    "Signature du bug amont connu sur CERTAINS builds Dolibarr 23.0.x, pas un "
+    "problème de configuration : POST tasks/{id}/addtimespent lève une fatale "
+    "PHP (TypeError « Cannot access offset of type array in isset or empty », "
     "includes/restler/framework/Luracast/Restler/Data/Validator.php ligne 427) "
-    "pendant la validation des paramètres, avant toute lecture de la tâche. "
-    "Aucun contenu de requête ne contourne la fatale. L'imputation doit passer "
-    "par l'interface web (projet/tasks/time.php) tant que l'instance n'est pas "
-    "corrigée. Les routes de LECTURE et de CORRECTION du temps, elles, "
-    "fonctionnent : dolibarr_list_time_entries, dolibarr_update_time_entry, "
+    "pendant la validation des paramètres, avant toute lecture de la tâche. Sur "
+    "une instance atteinte, aucun contenu de requête ne contourne la fatale et "
+    "l'imputation doit passer par l'interface web (projet/tasks/time.php). "
+    "Toutes les 23.0.x ne le sont PAS : la production inno³ écrit par cette "
+    "route (vérifié le 18/09/2026, 17 imputations écrites puis relues). Les "
+    "routes de LECTURE et de CORRECTION du temps, elles, fonctionnent dans les "
+    "deux cas : dolibarr_list_time_entries, dolibarr_update_time_entry, "
     "dolibarr_delete_time_entry."
 )
 
@@ -1079,16 +1081,23 @@ async def dolibarr_log_time(
 ) -> str:
     """Saisir du temps passé sur une tâche Dolibarr.
 
-    ATTENTION : sur Dolibarr 23.0.x cette route est CASSÉE EN AMONT et tout
-    appel échoue, quel qu'en soit le contenu : POST tasks/{id}/addtimespent
-    lève une fatale PHP dans le validateur de Restler avant même de lire la
-    tâche. Ce n'est pas un problème de configuration, d'affectation ni de
-    droits, et le connecteur ne peut pas le contourner. Sur ces instances,
-    l'imputation se fait par l'interface web (projet/tasks/time.php) ; la
-    LECTURE et la CORRECTION du temps, elles, restent disponibles par l'API
+    La route POST tasks/{id}/addtimespent fonctionne : vérifié le 18/09/2026
+    sur la production inno³ (Dolibarr 23), 17 imputations écrites puis relues
+    par dolibarr_list_time_entries. Cette docstring la donnait jusqu'ici pour
+    morte sur toute Dolibarr 23.0.x : c'est vrai de certains builds, pas de la
+    version en service, et la limite périmée a fait envisager un contournement
+    navigateur pour rien.
+
+    Limite qui subsiste, et que le connecteur ne peut pas lever : sur les
+    builds atteints, l'appel meurt dans une fatale PHP du validateur de Restler
+    avant même de lire la tâche, et rend un HTTP 500 au corps vide quel qu'en
+    soit le contenu. Le connecteur reconnaît cette signature et la NOMME
+    (`cause` = `bug_dolibarr_addtimespent`) au lieu d'inventer un diagnostic ;
+    le détail est dans le champ `hint` de l'erreur retournée. Sur une instance
+    atteinte, l'imputation passe par l'interface web (projet/tasks/time.php) ;
+    la LECTURE et la CORRECTION du temps restent disponibles par l'API
     (dolibarr_list_time_entries, dolibarr_update_time_entry,
-    dolibarr_delete_time_entry). Détail complet dans le champ `hint` de
-    l'erreur retournée.
+    dolibarr_delete_time_entry).
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
@@ -2902,6 +2911,68 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
         return _format_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# Effets de bord d'une création de ticket
+# ---------------------------------------------------------------------------
+
+
+#: Observateurs appelés après une création de ticket réussie.
+#:
+#: Créer un ticket n'est pas une écriture isolée : un module branché sur le
+#: trigger Dolibarr TICKET_CREATE peut écrire ailleurs dans la foulée, et aucun
+#: connecteur générique ne peut deviner lesquels ni où. Une extension qui, elle,
+#: connaît le module s'inscrit ici pour aller relire ce qui a été écrit et le
+#: faire dire à l'outil. Constaté le 18/09/2026 sur la production inno³ : onze
+#: tickets créés par dolibarr_create_ticket ont débité onze unités sur les
+#: carnets de support du client (module maison `supportcredits`) sans que le
+#: retour de l'outil en souffle mot ; l'écriture ne s'est vue qu'au refus de
+#: l'imputation suivante, « statut=2, restant=0 ».
+#:
+#: Signature attendue :
+#:     async def observer(ticket_id: int, thirdparty_id: int) -> dict | None
+#: Le dict rendu est ajouté à `side_effects` ; sa clé `message`, si elle existe,
+#: est concaténée au message lisible du retour. None veut dire « rien à
+#: signaler » et n'ajoute aucune ligne.
+TICKET_CREATE_OBSERVERS: list = []
+
+
+def register_ticket_create_observer(observer) -> None:
+    """Inscrit un observateur d'effets de bord de création de ticket.
+
+    Idempotent : une extension dont le `register()` serait appelé deux fois ne
+    doit pas faire compter le débit deux fois.
+    """
+    if observer not in TICKET_CREATE_OBSERVERS:
+        TICKET_CREATE_OBSERVERS.append(observer)
+
+
+async def _ticket_create_side_effects(ticket_id: int, thirdparty_id: int) -> list:
+    """Collecte ce que les observateurs ont trouvé, sans jamais faire échouer.
+
+    Le ticket, lui, est créé : une panne d'observateur ne doit pas se lire comme
+    un échec de création. Elle est rendue telle quelle dans la liste, parce
+    qu'un observateur qui n'a rien vu et un observateur cassé ne disent pas la
+    même chose.
+    """
+    found: list = []
+    for observer in TICKET_CREATE_OBSERVERS:
+        try:
+            result = await observer(ticket_id, thirdparty_id)
+        except Exception as exc:
+            found.append({
+                "observer": getattr(observer, "__name__", repr(observer)),
+                "error": f"{type(exc).__name__}: {exc}",
+                "message": (
+                    "Un observateur d'effets de bord a échoué : ce que ce module "
+                    "a pu écrire au passage n'a PAS été vérifié."
+                ),
+            })
+            continue
+        if result:
+            found.append(result)
+    return found
+
+
 @mcp.tool()
 async def dolibarr_create_ticket(
     subject: str,
@@ -2915,15 +2986,47 @@ async def dolibarr_create_ticket(
 
     Confirmation utilisateur requise avant exécution.
 
+    ATTENTION — la création d'un ticket n'est pas forcément une écriture
+    isolée. Un module branché sur le trigger Dolibarr TICKET_CREATE peut
+    écrire ailleurs dans la foulée, et le connecteur ne peut pas l'en
+    empêcher : c'est du code serveur, déclenché par l'écriture elle-même.
+    Cas connu sur les instances inno³ (module maison `supportcredits`) :
+    créer un ticket rattaché à un tiers DÉBITE un carnet de support de ce
+    client — le plus ancien carnet actif, non périmé, ayant assez de solde.
+    Le comportement dépend de deux réglages du module, côté serveur :
+    SUPPORTCREDITS_CONSUME_MODE (`auto` débite, `suggest` et `manual` non) et
+    SUPPORTCREDITS_CONSUME_TIMING (`create` débite ici, `close` à la clôture).
+    Aucun paramètre de cet outil ne les surcharge. Constaté le 18/09/2026 :
+    onze tickets, onze unités débitées sur deux carnets, sans un mot dans le
+    retour.
+
     Paramètres :
     - subject       : sujet du ticket (obligatoire)
     - message       : message / description du problème (obligatoire)
     - thirdparty_id : ID du tiers concerné (optionnel)
     - project_id    : ID du projet associé (optionnel)
-    - severity      : 'low', 'normal', 'high', 'critical' (défaut: 'normal')
+    - severity      : 'low', 'normal', 'high', 'critical' (défaut: 'normal').
+      Sur une instance `supportcredits` en débit automatique, ce paramètre
+      décide AUSSI du nombre d'unités prélevées au client, sans que rien ne le
+      dise dans l'interface : 'low' → 1 unité, 'high' et 'critical' → 5
+      unités, 'normal' → 1 unité par défaut de correspondance (le module ne
+      connaît pas le code NORMAL et retombe sur « simple », en journalisant un
+      avertissement). Un ticket créé en 'critical' coûte donc cinq fois un
+      ticket créé en 'low'.
     - type_code     : 'QUESTION', 'INCIDENT', 'REQUEST', 'SUPPORT' (défaut: 'QUESTION')
 
-    Retourne l'ID et la référence du ticket créé.
+    Retourne l'ID et la référence du ticket créé, plus :
+    - `side_effects_checked` : le connecteur a-t-il su REGARDER les effets de
+      bord. Faux quand aucune extension ne lui apprend à les lire — « je n'ai
+      pas regardé » n'est pas « il ne s'est rien passé » ;
+    - `side_effects` : ce qui a été écrit au passage, une entrée par module.
+      Sur une instance `supportcredits`, l'entrée nomme le carnet débité, les
+      unités et le solde restant. Une entrée portant `error` signale un
+      observateur en panne : le ticket est créé, mais l'effet de bord n'a pas
+      pu être vérifié.
+
+    Annuler une imputation non voulue ne se fait pas d'ici : passer par
+    l'onglet « Crédit support » du ticket dans Dolibarr.
     """
     try:
         if not subject:
@@ -2950,13 +3053,30 @@ async def dolibarr_create_ticket(
 
         result = await api_post("tickets", data)
 
+        try:
+            new_ticket_id = int(result)
+        except (TypeError, ValueError):
+            # L'API rend normalement l'id nu ; si elle rend autre chose, on
+            # préfère un 0 explicite à une exception qui masquerait la création.
+            new_ticket_id = 0
+
+        side_effects = await _ticket_create_side_effects(new_ticket_id, thirdparty_id)
+        message = f"Ticket créé avec succès (ID {result})."
+        reported = " ".join(
+            str(effect["message"]) for effect in side_effects if effect.get("message")
+        )
+        if reported:
+            message = f"{message} {reported}"
+
         return _dumps({
             "success": True,
             "ticket_id": result,
             "subject": subject,
             "severity": severity_code,
             "type": type_code,
-            "message": f"Ticket créé avec succès (ID {result}).",
+            "side_effects_checked": bool(TICKET_CREATE_OBSERVERS),
+            "side_effects": side_effects,
+            "message": message,
         })
 
     except Exception as exc:

@@ -46,6 +46,7 @@ from dolibarr_mcp.server import (
     dolibarr_create_project,
     dolibarr_create_supplier_invoice,
     dolibarr_create_task,
+    dolibarr_create_ticket,
     dolibarr_dashboard,
     dolibarr_delete_bank_entry,
     dolibarr_delete_invoice,
@@ -5089,3 +5090,212 @@ class TestDeleteTicket:
     async def test_no_identifier_is_refused(self) -> None:
         out = await dolibarr_delete_ticket()
         assert "ticket_id ou ref" in out
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _observer(fn):
+    """Installe un observateur de création de ticket, et le retire après.
+
+    Les observateurs sont un état de module : sans retrait, un test en
+    contaminerait un autre.
+    """
+    server.TICKET_CREATE_OBSERVERS.append(fn)
+    try:
+        yield fn
+    finally:
+        server.TICKET_CREATE_OBSERVERS.remove(fn)
+
+
+@pytest.mark.asyncio
+class TestCreateTicketReportsSideEffects:
+    """dolibarr_create_ticket — ce qu'un module tiers écrit au passage est dit.
+
+    Reproduction du défaut du 18/09/2026 : sur l'instance inno³, le module
+    maison `supportcredits` débite un carnet client sur TICKET_CREATE. Onze
+    tickets créés par cet outil ont débité onze unités sur deux carnets, et le
+    retour de l'outil n'en disait rien : l'écriture ne s'est vue qu'au refus du
+    `consume` suivant (« statut=2, restant=0 »). Le connecteur ne peut pas
+    empêcher ce débit — il est gouverné côté serveur — mais il doit le NOMMER.
+    """
+
+    async def test_the_answer_says_whether_side_effects_were_looked_for(self) -> None:
+        # Sans observateur installé, le connecteur n'a rien regardé. Le dire est
+        # autre chose que d'affirmer qu'il ne s'est rien passé.
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            data = json.loads(
+                await dolibarr_create_ticket(
+                    subject="s", message="m", thirdparty_id=37, project_id=73,
+                    type_code="SUPPORT",
+                )
+            )
+
+        assert data["side_effects_checked"] is False
+        assert data["side_effects"] == []
+
+    async def test_an_observed_debit_is_named_in_the_answer(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            return {
+                "module": "supportcredits",
+                "debited": True,
+                "carnet_ref": "CARNET-2026-00045",
+                "units": 1,
+                "message": "1 unité débitée sur le carnet CARNET-2026-00045.",
+            }
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(
+                        subject="s", message="m", thirdparty_id=37,
+                    )
+                )
+
+        assert data["side_effects_checked"] is True
+        assert data["side_effects"][0]["carnet_ref"] == "CARNET-2026-00045"
+        assert "CARNET-2026-00045" in data["message"]
+
+    async def test_the_docstring_documents_the_supportcredits_debit(self) -> None:
+        doc = dolibarr_create_ticket.__doc__ or ""
+        assert "supportcredits" in doc
+        assert "side_effects" in doc
+
+    async def test_the_docstring_prices_the_severity_parameter(self) -> None:
+        # `severity` ne choisit pas qu'un libellé : sur une instance en débit
+        # automatique il fixe le nombre d'unités prélevées au client, et rien
+        # dans son nom ne le laisse deviner.
+        doc = dolibarr_create_ticket.__doc__ or ""
+        assert "5" in doc and "unités" in doc
+        assert "SUPPORTCREDITS_CONSUME_MODE" in doc
+
+    async def test_a_broken_observer_never_fails_the_creation(self) -> None:
+        # Le ticket est créé : une panne d'observateur ne doit pas se lire
+        # comme un échec d'écriture. Mais elle doit se voir.
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            raise RuntimeError("boom")
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        assert data["success"] is True
+        assert data["ticket_id"] == 512
+        assert data["side_effects"][0]["error"].startswith("RuntimeError")
+        assert "n'a PAS été vérifié" in data["side_effects"][0]["message"]
+
+    async def test_an_observer_with_nothing_to_say_adds_no_line(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        # Regardé, et rien trouvé : ce n'est pas la même chose que pas regardé.
+        assert data["side_effects_checked"] is True
+        assert data["side_effects"] == []
+        assert data["message"] == "Ticket créé avec succès (ID 512)."
+
+    async def test_the_observer_receives_the_new_ticket_id_and_the_thirdparty(self) -> None:
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append((ticket_id, thirdparty_id))
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = "512"
+            with _observer(observer):
+                await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+
+        # L'API rend l'id comme une chaîne sur certaines instances : un
+        # observateur doit recevoir un entier, pas à le deviner.
+        assert seen == [(512, 37)]
+
+    async def test_a_ticket_without_thirdparty_still_calls_the_observer(self) -> None:
+        # thirdparty_id = 0 : c'est à l'observateur de décider qu'il n'a rien à
+        # chercher, pas au coeur de le supposer.
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append((ticket_id, thirdparty_id))
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                await dolibarr_create_ticket(subject="s", message="m")
+
+        assert seen == [(512, 0)]
+
+    async def test_registering_twice_reports_the_debit_once(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            return {"module": "supportcredits", "units": 1, "message": "1 unité débitée."}
+
+        server.register_ticket_create_observer(observer)
+        server.register_ticket_create_observer(observer)
+        try:
+            with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+                post.return_value = 512
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+        finally:
+            server.TICKET_CREATE_OBSERVERS.remove(observer)
+
+        assert len(data["side_effects"]) == 1
+        assert data["message"].count("1 unité débitée.") == 1
+
+    async def test_an_unparsable_id_does_not_break_the_creation(self) -> None:
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append(ticket_id)
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = {"unexpected": "shape"}
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        assert data["success"] is True
+        assert seen == [0]
+
+
+@pytest.mark.asyncio
+class TestLogTimeDocstringMatchesReality:
+    """dolibarr_log_time — la docstring ne doit pas annoncer une route morte.
+
+    Reproduction du défaut du 18/09/2026 : la docstring affirmait « sur
+    Dolibarr 23.0.x cette route est CASSÉE EN AMONT et tout appel échoue ».
+    Dix-sept imputations ont pourtant été écrites et relues ce jour-là. Une
+    limite périmée coûte autant qu'une limite tue : elle a fait envisager un
+    contournement navigateur pour rien.
+    """
+
+    async def test_the_docstring_does_not_claim_every_call_fails(self) -> None:
+        doc = dolibarr_log_time.__doc__ or ""
+        assert "tout appel échoue" not in doc
+        assert "CASSÉE EN AMONT" not in doc
+        # Et elle dit l'état réel, pas seulement l'absence de l'ancien
+        # verdict : une docstring qui se tait laisse le doute intact.
+        assert "fonctionne" in doc
+
+    async def test_the_docstring_still_names_the_known_upstream_bug(self) -> None:
+        # La fatale existe sur certaines 23.0.x : la supprimer serait retomber
+        # dans l'erreur inverse.
+        doc = dolibarr_log_time.__doc__ or ""
+        assert "addtimespent" in doc
+        assert "23" in doc
