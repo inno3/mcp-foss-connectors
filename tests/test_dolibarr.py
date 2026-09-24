@@ -54,9 +54,11 @@ from dolibarr_mcp.server import (
     dolibarr_delete_time_entry,
     dolibarr_get_bank_balance,
     dolibarr_get_invoice,
+    dolibarr_get_project,
     dolibarr_get_proposal,
     dolibarr_get_revenue_summary,
     dolibarr_get_supplier_invoice,
+    dolibarr_get_thirdparty,
     dolibarr_get_ticket,
     dolibarr_list_bank_accounts,
     dolibarr_list_bank_entries,
@@ -1031,6 +1033,247 @@ class TestGetDocumentLines:
         assert "<br>" not in data["note_public"]
         assert "&nbsp;" not in data["note_public"]
         assert "Commande n°655969" in data["note_public"]
+
+
+@pytest.mark.asyncio
+class TestGetProposalNotePublic:
+    """dolibarr_get_proposal : la note publique est rendue entière, ou dit qu'elle est coupée.
+
+    Constat du 14/09/2026 sur la propale 172 : `note_public` revenait coupée à
+    exactement 300 caractères, sans marqueur de coupe ni longueur totale, avant
+    comme après un `dolibarr_update_proposal` réussi. Une note écrite pour être
+    relue était donc invérifiable, et la coupe se lisait comme une perte en base.
+    """
+
+    @staticmethod
+    def _proposal(note: object) -> dict:
+        return {
+            "id": "172", "ref": "PR2609-0172", "socid": "10", "fk_statut": "1",
+            "total_ht": "1000", "total_tva": "200", "total_ttc": "1200",
+            "note_public": note, "lines": [],
+        }
+
+    @staticmethod
+    def _long_note(lines: int) -> str:
+        # Une phrase par ligne, sans HTML ni espaces doubles : le texte nettoyé
+        # par _strip_html est identique au texte fourni, d'où une égalité exacte.
+        return "\n".join(
+            f"Clause {i + 1} : acompte de trente pour cent à la commande, solde à réception."
+            for i in range(lines)
+        )
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_a_note_longer_than_300_chars_comes_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        note = self._long_note(12)
+        assert len(note) > 300
+        mock_api.return_value = self._proposal(note)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert len(data["note_public"]) == len(note), (
+            f"note coupée à {len(data['note_public'])} caractères sur {len(note)}"
+        )
+        assert data["note_public"] == note
+        assert data["note_public_length"] == len(note)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_a_note_written_by_update_proposal_reads_back_identical(
+        self, mock_get: AsyncMock, mock_put: AsyncMock
+    ) -> None:
+        # Le scénario du constat : écrire la note, puis la relire pour vérifier.
+        from dolibarr_mcp.server import dolibarr_update_proposal
+
+        note = self._long_note(15)
+        stored = self._proposal("")
+
+        async def put(endpoint, data=None):
+            stored.update(data or {})
+            return 172
+
+        mock_put.side_effect = put
+        mock_get.return_value = stored
+
+        await dolibarr_update_proposal(172, note_public=note)
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert mock_put.call_args.args == ("proposals/172", {"note_public": note})
+        assert data["note_public"] == note
+        assert data["note_public_length"] == len(note)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_length_is_that_of_the_cleaned_text_not_of_the_html(
+        self, mock_api: AsyncMock
+    ) -> None:
+        # Dolibarr stocke la note en HTML ; la longueur annoncée est celle du
+        # texte rendu, pas celle du HTML brut.
+        html = "<p>Conditions&nbsp;:</p>" + "".join(
+            f"<p>Lot {i + 1}&nbsp;: livraison sous <b>quinze</b> jours ouvr&eacute;s.</p>"
+            for i in range(10)
+        )
+        expected = _strip_html(html)
+        assert 300 < len(expected) < len(html)
+        mock_api.return_value = self._proposal(html)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert data["note_public"] == expected
+        assert "<p>" not in data["note_public"]
+        assert data["note_public_length"] == len(expected)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_beyond_the_ceiling_the_cut_is_announced(
+        self, mock_api: AsyncMock
+    ) -> None:
+        ceiling = server.DETAIL_NOTE_MAX_CHARS
+        note = self._long_note(ceiling // 40)
+        assert len(note) > ceiling
+        mock_api.return_value = self._proposal(note)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert data["note_public_truncated"] is True
+        assert data["note_public_length"] == len(note)
+        assert len(data["note_public"]) == ceiling
+        assert data["note_public"] == note[:ceiling]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_an_empty_note_is_empty_and_not_truncated(
+        self, mock_api: AsyncMock
+    ) -> None:
+        for raw in ("", None):
+            mock_api.return_value = self._proposal(raw)
+
+            data = json.loads(await dolibarr_get_proposal(172))
+
+            assert data["note_public"] == ""
+            assert data["note_public_length"] == 0
+            assert data["note_public_truncated"] is False
+
+
+@pytest.mark.asyncio
+class TestDetailNotesRenderedWhole:
+    """Les autres lectures de détail rendent leurs notes entières, ou disent qu'elles coupent.
+
+    Même défaut que sur dolibarr_get_proposal : `[:300]` muet sur get_invoice,
+    get_supplier_invoice et get_thirdparty, `[:500]` muet sur la description et
+    la note publique de get_project.
+    """
+
+    @staticmethod
+    def _note(lines: int) -> str:
+        return "\n".join(
+            f"Clause {i + 1} : acompte de trente pour cent à la commande, solde à réception."
+            for i in range(lines)
+        )
+
+    @staticmethod
+    def _assert_whole(data: dict, field: str, expected: str) -> None:
+        assert len(data[field]) == len(expected), (
+            f"{field} coupé à {len(data[field])} caractères sur {len(expected)}"
+        )
+        assert data[field] == expected
+        assert data[f"{field}_length"] == len(expected)
+        assert data[f"{field}_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_invoice_note_public_comes_back_whole(self, mock_api: AsyncMock) -> None:
+        note = self._note(12)
+        mock_api.return_value = {
+            "id": "430", "ref": "FA2609-0430", "socid": "1", "fk_statut": "1", "paye": "0",
+            "note_public": note, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_invoice(430))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_supplier_invoice_note_public_comes_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        note = self._note(12)
+        mock_api.return_value = {
+            "id": "88", "ref": "SI2609-0088", "ref_supplier": "2026-89", "socid": "194",
+            "fk_statut": "1", "paye": "0", "note_public": note, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_supplier_invoice(88))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_thirdparty_note_public_comes_back_whole(self, mock_api: AsyncMock) -> None:
+        note = self._note(12)
+        mock_api.return_value = {"id": "120", "name": "Tiers", "note_public": note}
+        data = json.loads(await dolibarr_get_thirdparty(120))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_project_description_and_note_come_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        description = self._note(9)
+        note = self._note(9)
+        assert len(description) > 500 and len(note) > 500
+        mock_api.return_value = {
+            "id": "258", "ref": "PJ2609-0258", "title": "Projet", "fk_statut": "1",
+            "description": description, "note_public": note,
+        }
+        data = json.loads(await dolibarr_get_project(258))
+        self._assert_whole(data, "description", description)
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_thirdparty_html_note_length_is_the_cleaned_one(
+        self, mock_api: AsyncMock
+    ) -> None:
+        html = "<p>Conditions&nbsp;:</p>" + "".join(
+            f"<p>Lot {i + 1}&nbsp;: livraison sous <b>quinze</b> jours ouvr&eacute;s.</p>"
+            for i in range(10)
+        )
+        expected = _strip_html(html)
+        assert 300 < len(expected) < len(html)
+        mock_api.return_value = {"id": "120", "name": "Tiers", "note_public": html}
+        data = json.loads(await dolibarr_get_thirdparty(120))
+        self._assert_whole(data, "note_public", expected)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_project_beyond_the_ceiling_the_cut_is_announced(
+        self, mock_api: AsyncMock
+    ) -> None:
+        ceiling = server.DETAIL_NOTE_MAX_CHARS
+        long_text = self._note(ceiling // 40)
+        assert len(long_text) > ceiling
+        mock_api.return_value = {
+            "id": "258", "ref": "PJ2609-0258", "title": "Projet",
+            "description": long_text, "note_public": long_text,
+        }
+        data = json.loads(await dolibarr_get_project(258))
+        for field in ("description", "note_public"):
+            assert data[f"{field}_truncated"] is True
+            assert data[f"{field}_length"] == len(long_text)
+            assert len(data[field]) == ceiling
+            assert data[field] == long_text[:ceiling]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_empty_notes_are_empty_and_not_truncated(self, mock_api: AsyncMock) -> None:
+        mock_api.return_value = {
+            "id": "430", "ref": "FA1", "socid": "1", "fk_statut": "1", "paye": "0",
+            "note_public": None, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_invoice(430))
+        assert data["note_public"] == ""
+        assert data["note_public_length"] == 0
+        assert data["note_public_truncated"] is False
+
+        mock_api.return_value = {"id": "258", "ref": "PJ1", "title": "Projet"}
+        data = json.loads(await dolibarr_get_project(258))
+        for field in ("description", "note_public"):
+            assert data[field] == ""
+            assert data[f"{field}_length"] == 0
+            assert data[f"{field}_truncated"] is False
 
 
 def _http_error(status: int, body: object | None = None) -> httpx.HTTPStatusError:
