@@ -16,8 +16,9 @@ import json
 import logging
 import os
 import uuid
+from contextvars import ContextVar
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -77,6 +78,250 @@ UNREAD_ROOMS_MAX = 1000
 
 _RETRY_DELAY = 1.0
 
+# ---------------------------------------------------------------------------
+# Contrat d'erreur
+# ---------------------------------------------------------------------------
+
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur : » suivi de rien était tout ce que
+#: l'appelant recevait — onze fois, une par outil.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar["tuple[asyncio.Task[Any], list[str]] | None"] = ContextVar(
+    "matrix_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+def _route(url: str) -> str:
+    """Route sans l'hôte ni le préfixe d'API, pour nommer une requête.
+
+    Un message d'erreur n'a pas à citer le homeserver, et la route seule reste
+    lisible quand plusieurs écritures sont listées côte à côte.
+    """
+    path = urlparse(url).path
+    for prefix in ("/_matrix/client/v3/", "/_matrix/client/v1/", "/_matrix/"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path.lstrip("/")
+
+
+def _is_read(method: str, url: str) -> bool:
+    """`POST /search` interroge, il n'écrit pas.
+
+    C'est la seule exception : `createRoom`, `invite` et `read_markers` passent
+    aussi par POST et modifient bien quelque chose.
+    """
+    if method.upper() in _READ_METHODS:
+        return True
+    return method.upper() == "POST" and _route(url).split("?", 1)[0] == "search"
+
+
+def _is_deduplicated_write(method: str, url: str) -> bool:
+    """Un PUT Matrix peut être rejoué à l'identique sans rien dupliquer.
+
+    Deux cas, et ils couvrent tous les PUT du connecteur :
+
+    - envoi, correction et suppression portent un identifiant de transaction
+      dans l'URL, fixé par l'appelant AVANT `_request`. La spécification
+      Client-Server demande au homeserver de dédupliquer dessus, donc un rejeu
+      interne réutilise le même identifiant et ne produit pas de second
+      message ;
+    - un événement d'état (`rooms/{id}/state/m.room.topic`) pose une valeur.
+      L'appliquer deux fois laisse le même état.
+
+    Attention : cela vaut pour un rejeu *interne*. Un nouvel appel d'outil tire
+    un identifiant de transaction neuf, et là le doublon redevient possible.
+    """
+    return method.upper() == "PUT"
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaîne deux phrases sans les souder : un message Matrix finit rarement
+    par un point, et « You are not invited Etat de l'ecriture » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, label: str, deduplicated: bool = False) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {label} non appliquée : rejouer cette requête est sans "
+                "risque de doublon.")
+    if write_state == "inconnu" and deduplicated:
+        return (f" État de l'écriture {label} inconnu : les tentatives ont gardé le "
+                "même identifiant de transaction, donc rien n'a été dupliqué ici, "
+                "mais un nouvel appel d'outil en tirerait un neuf ; relire le salon "
+                "avant de rejouer.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {label} inconnu : écriture non rejouée "
+                "automatiquement, le homeserver a pu la traiter avant de perdre la "
+                "réponse ; relire le salon avant de rejouer.")
+    return ""
+
+
+class MatrixAPIError(RuntimeError):
+    """Refus ou panne côté homeserver, avec l'état de l'écriture concernée.
+
+    Reste une `RuntimeError` et garde le préfixe « Erreur Matrix {status} — » :
+    onze outils n'ont pas de gestionnaire propre et laissent l'exception
+    remonter telle quelle.
+    """
+
+    def __init__(self, status: int, method: str, url: str, body: str,
+                 errcode: str = "", write_state: str = "sans_objet"):
+        self.status = status
+        self.method = method.upper()
+        self.label = f"{self.method} {_route(url)}"
+        self.errcode = errcode
+        self.body = body
+        self.write_state = write_state
+        detail = body.strip() or "sans message du homeserver"
+        super().__init__(f"Erreur Matrix {status} — {method} {url} : {detail}")
+
+
+class MatrixTransportError(RuntimeError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide.
+
+    Sans elle, un `httpx.ReadError` vide ou un `ReadTimeout` sans message se
+    rendaient à l'appelant en « Erreur : » nu, et rien ne distinguait un jeton
+    d'accès révoqué d'une connexion coupée.
+    """
+
+    def __init__(self, kind: str, label: str, attempts: int, replayable: bool,
+                 is_read: bool, deduplicated: bool, detail: str = ""):
+        self.kind = kind
+        self.label = label
+        self.attempts = attempts
+        self.replayable = replayable
+        self.deduplicated = deduplicated
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        self.write_state = (
+            "sans_objet" if is_read
+            else "non_appliquee" if not deduplicated and replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, label, deduplicated)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité du "
+                    "homeserver si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        super().__init__(
+            f"{kind} sur {label} ({self.detail}) après {attempts} {count}.{tail}")
+
+
+def _errcode_and_body(resp: "httpx.Response") -> tuple[str, str]:
+    """Extrait le `errcode` Matrix et un corps lisible.
+
+    Le errcode — M_FORBIDDEN, M_LIMIT_EXCEEDED, M_UNKNOWN_TOKEN — dit
+    précisément ce qui est refusé, là où le champ `error` se contente souvent
+    d'une phrase. Le jeter coûtait un aller-retour de diagnostic.
+    """
+    raw = (resp.text or "")[:500]
+    try:
+        body = resp.json()
+    except Exception:
+        return "", raw
+    if not isinstance(body, dict):
+        return "", raw
+    errcode = str(body.get("errcode") or "")
+    error = str(body.get("error") or "")
+    if errcode and error:
+        return errcode, f"{errcode} — {error}"
+    return errcode, errcode or error or raw
+
+
+def _format_error(exc: Exception) -> str:
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, RemoteProtocolError) garde son type et le sens de sa famille,
+    et l'appelant doit pouvoir distinguer une défaillance réseau d'un refus,
+    puis décider quoi relire.
+    """
+    message = _format_error_body(exc)
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
+
+
+def _format_error_body(exc: Exception) -> str:
+    """Corps du message, sans le rappel des écritures déjà appliquées."""
+    if isinstance(exc, MatrixTransportError):
+        return f"Erreur réseau {exc}"
+    if isinstance(exc, MatrixAPIError):
+        # Le message porte déjà son propre préfixe « Erreur Matrix {status} — ».
+        message = str(exc)
+        if exc.write_state == "inconnu":
+            message = _append_sentence(
+                message, _write_state_message("inconnu", exc.label))
+        elif exc.write_state == "non_appliquee":
+            # 401, 403 et 404 gardent leur message exact : une auth refusée
+            # n'écrit rien et n'a pas besoin qu'on en discute. Le reste
+            # (400 sur un alias invalide, 413 sur un média trop lourd) est
+            # refusé avant exécution : le dire évite une relecture inutile,
+            # et un rejeu à l'identique échouerait pareil.
+            message = _append_sentence(
+                message,
+                f" Écriture {exc.label} non appliquée : la requête a été refusée "
+                "avant exécution, corriger l'appel avant de rejouer.")
+        return message
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        _, body = _errcode_and_body(exc.response)
+        return f"Erreur HTTP {status} : {body.strip() or 'sans message.'}"
+    if isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        return f"Erreur réseau {kind} : {detail}."
+    if isinstance(exc, json.JSONDecodeError):
+        return f"Erreur JSON Matrix : {exc}"
+    text = str(exc)
+    return (f"Erreur : {text}" if text.strip()
+            else f"Erreur {type(exc).__name__} : sans message.")
+
 
 def _matrix_url(path: str) -> str:
     """Construit l'URL complète d'un endpoint Matrix.
@@ -104,7 +349,33 @@ def _headers() -> dict:
 
 
 async def _request(method: str, url: str, **kwargs: Any) -> Any:
-    """Appel HTTP Matrix avec retry et backoff exponentiel."""
+    """Appel HTTP Matrix avec rejeu et backoff exponentiel.
+
+    Ce qui est rejouable tient à deux propriétés du protocole, pas au verbe
+    HTTP seul :
+
+    - `POST /search` interroge, il n'écrit pas, et se rejoue comme une lecture.
+      Les autres POST — `createRoom`, `invite`, `read_markers` — écrivent ;
+    - un `PUT` porte un identifiant de transaction fixé avant l'appel, que le
+      homeserver déduplique, ou pose un état à une valeur. Le rejeu interne
+      réutilise donc le même identifiant et ne produit pas de second message.
+
+    Tout le reste n'est rejoué que si la connexion n'a jamais abouti
+    (ConnectError, ConnectTimeout) : une fois la requête partie, le homeserver
+    a pu la traiter avant de perdre la réponse, et rejouer `createRoom`
+    laisserait un salon en double, qui ne se rattrape qu'à la main.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état que
+    le client ne peut pas trancher, et la déduplication par identifiant de
+    transaction ne couvre PAS un nouvel appel d'outil, qui en tire un neuf. Il
+    faut relire le salon avant de rejouer, et c'est exactement ce que veut dire
+    « inconnu ». Le journal rappelle en outre les écritures déjà réussies dans
+    le même appel d'outil.
+    """
+    is_read = _is_read(method, url)
+    deduplicated = not is_read and _is_deduplicated_write(method, url)
+    label = f"{method.upper()} {_route(url)}"
+    journal = _write_journal()
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -113,26 +384,50 @@ async def _request(method: str, url: str, **kwargs: Any) -> Any:
                 resp = await client.request(method, url, headers=_headers(), **kwargs)
                 resp.raise_for_status()
                 if resp.status_code == 204 or not resp.content:
-                    return {}
-                return resp.json()
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+                    data: Any = {}
+                else:
+                    data = resp.json()
+            if not is_read:
+                journal.append(label)
+            return data
+        except httpx.TransportError as exc:
+            # Toute la famille est traitée : un ReadError, un PoolTimeout ou un
+            # RemoteProtocolError traversaient sans rejeu ni habillage, et
+            # sortaient de l'outil en « Erreur : » nu.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or is_read or deduplicated
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry %s %s in %.1fs: %s", method, url, delay, exc)
+                logger.warning("Retry %s %s in %.1fs (%s: %s)", method, url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise MatrixTransportError(
+                    type(exc).__name__, label, attempt + 1, never_sent,
+                    is_read, deduplicated, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            status = exc.response.status_code
+            if (is_read or deduplicated) and status >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry %s (HTTP %d) in %.1fs", url, exc.response.status_code, delay)
+                logger.warning("Retry %s (HTTP %d) in %.1fs", url, status, delay)
                 await asyncio.sleep(delay)
             else:
-                body = exc.response.text[:500] if exc.response.content else ""
-                raise RuntimeError(
-                    f"Erreur Matrix {exc.response.status_code} — {method} {url} : {body}"
+                errcode, body = _errcode_and_body(exc.response)
+                if is_read:
+                    write_state = "sans_objet"
+                elif status >= 500:
+                    write_state = "inconnu"
+                elif status in (401, 403, 404):
+                    # Une auth refusée n'écrit rien et n'a pas besoin qu'on en
+                    # discute : le message garde sa forme habituelle.
+                    write_state = "sans_objet"
+                else:
+                    write_state = "non_appliquee"
+                raise MatrixAPIError(
+                    status, method, url, body, errcode, write_state,
                 ) from exc
     raise last_exc  # type: ignore[misc]
 
@@ -794,7 +1089,7 @@ async def matrix_reply_in_thread(
             "permalink": _permalink(room_id, event_id),
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -841,7 +1136,7 @@ async def matrix_get_thread(room_id: str, thread_root_event_id: str, limit: int 
             "next_batch": (data or {}).get("next_batch"),
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -880,7 +1175,7 @@ async def matrix_react(room_id: str, event_id: str, emoji: str = "👍") -> str:
             "emoji": emoji,
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -941,7 +1236,7 @@ async def matrix_edit_message(
             "note": "L'original reste dans l'historique ; les clients affichent la version corrigée.",
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -1020,7 +1315,7 @@ async def matrix_redact_message(
             payload["edits_redacted"] = edits_removed
         return _compact(payload)
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -1106,7 +1401,7 @@ async def matrix_send_file(
             "permalink": _permalink(room_id, event_id),
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 def _fill_side(
@@ -1252,7 +1547,7 @@ async def matrix_list_files(room_id: str, limit: int = 20, from_token: str = "")
             "has_more": has_more,
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -1346,7 +1641,7 @@ async def matrix_get_event_context(
             )
         return _compact(payload)
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 #: Filtre de synchronisation réduit au strict nécessaire pour un état de
@@ -1629,7 +1924,7 @@ async def matrix_list_unread(only_unread: bool = True, limit: int = 50) -> str:
             "rooms": rendus,
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -1692,7 +1987,9 @@ async def matrix_mark_read(room_id: str, event_id: str = "") -> str:
             if counts is None:
                 echec = "le salon n'apparaît pas dans la synchronisation ciblée"
         except Exception as exc:
-            echec = str(exc)
+            # Sans le formateur, une exception httpx vide laissait « cause
+            # inconnue » là où le type et la famille du défaut sont connus.
+            echec = _format_error_body(exc)
 
         payload = {
             # L'écriture du repère, elle, a bien eu lieu : la relecture est un
@@ -1712,7 +2009,7 @@ async def matrix_mark_read(room_id: str, event_id: str = "") -> str:
             )
         return _compact(payload)
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
@@ -1766,7 +2063,7 @@ async def matrix_get_reactions(room_id: str, event_id: str) -> str:
             "next_batch": (data or {}).get("next_batch"),
         })
     except Exception as exc:
-        return f"Erreur : {exc}"
+        return _format_error(exc)
 
 
 @mcp.tool()
