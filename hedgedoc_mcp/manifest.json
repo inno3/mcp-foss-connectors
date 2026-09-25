@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "hedgedoc-mcp",
   "display_name": "HedgeDoc",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Connecteur HedgeDoc : lecture, création, mise à jour de notes collaboratives Markdown, historique et recherche.",
   "author": {
     "name": "inno³",
