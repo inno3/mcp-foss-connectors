@@ -20,7 +20,9 @@ import logging
 import mimetypes
 import os
 import re
+import urllib.parse
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +103,120 @@ MAX_PER_PAGE = 100
 
 _MAX_RETRIES = 2
 _RETRY_DELAY = 1.0
+
+# Méthodes rejouables une fois la requête émise. Rejouer une écriture après un
+# timeout de lecture ou un 5xx PUBLIE en double : WordPress a pu traiter la
+# requête avant de perdre la réponse, et le second article est visible du public.
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur : » suivi de rien était tout ce que
+#: l'appelant recevait.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar["tuple[asyncio.Task[Any], list[str]] | None"] = ContextVar(
+    "wordpress_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+def _request_label(method: str, url: str) -> str:
+    """Nomme la requête par sa route, sans l'hôte.
+
+    Un message d'erreur n'a pas à citer le domaine — il est déjà connu de
+    l'appelant par le paramètre `server` — et la route seule reste lisible
+    quand plusieurs écritures sont listées côte à côte.
+    """
+    path = urllib.parse.urlparse(url).path
+    for marker in ("/wp-json/", "/xmlrpc.php"):
+        if marker in path:
+            path = path.split(marker, 1)[1] if marker == "/wp-json/" else "xmlrpc.php"
+            break
+    return f"{method.upper()} {path.strip('/') or '/'}"
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaîne deux phrases sans les souder : un message WordPress finit
+    rarement par un point, et « Paramètre invalide Etat de l'ecriture » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, label: str) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {label} non appliquée : rejouer cette requête est sans "
+                "risque de doublon.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {label} inconnu : écriture non rejouée "
+                "automatiquement, WordPress a pu la traiter avant de perdre la "
+                "réponse ; relire l'objet avant de rejouer.")
+    return ""
+
+
+class WordPressTransportError(RuntimeError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide.
+
+    Sans elle, un `httpx.ReadError` vide ou un `ReadTimeout` sans message se
+    rendaient à l'appelant en « Erreur : » nu, et rien ne distinguait un mot de
+    passe d'application refusé d'une connexion coupée.
+    """
+
+    def __init__(self, kind: str, label: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.label = label
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        idempotent = label.split(" ", 1)[0] in _IDEMPOTENT_METHODS
+        self.write_state = (
+            "sans_objet" if idempotent
+            else "non_appliquee" if replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, label)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité du "
+                    "site si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        super().__init__(
+            f"{kind} sur {label} ({self.detail}) après {attempts} {count}.{tail}")
 
 
 def _get_auth_header(server: str) -> str:
@@ -186,9 +302,26 @@ async def _request(
     method: str,
     url: str,
     extra_headers: dict | None = None,
+    timeout: float = 30,
     **kwargs: Any,
 ) -> Any:
-    """Appel HTTP avec retry et backoff."""
+    """Appel HTTP avec rejeu et backoff exponentiel.
+
+    Les lectures sont rejouées après toute erreur de transport et sur un HTTP
+    5xx. Une écriture n'est rejouée que si la connexion n'a jamais abouti
+    (ConnectError, ConnectTimeout) : une fois la requête partie, WordPress a pu
+    la traiter avant de perdre la réponse, et un rejeu publierait l'article, le
+    média ou la redirection en double — visible du public.
+
+    Un corps non-JSON sur une réponse 2xx est rendu en texte, comme avant :
+    `wordpress_check_content` lit du HTML par cette voie.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état que
+    le client ne peut pas trancher. L'API REST n'expose ni clef d'idempotence ni
+    identifiant de requête à vérifier ; il faut relire l'objet avant de rejouer,
+    et c'est exactement ce que veut dire « inconnu ». Le journal rappelle en
+    outre les écritures déjà réussies dans le même appel d'outil.
+    """
     auth = _get_auth_header(server)
     headers = {
         "Authorization": auth,
@@ -197,31 +330,52 @@ async def _request(
     if extra_headers:
         headers.update(extra_headers)
 
+    label = _request_label(method, url)
+    idempotent = method.upper() in _IDEMPOTENT_METHODS
+    journal = _write_journal()
     verify_ssl = _SERVER_CONFIGS.get(server, {}).get("verify_ssl", True)
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(verify=verify_ssl, timeout=30) as client:
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
                 logger.info("%s %s (attempt %d)", method, url, attempt + 1)
                 resp = await client.request(method, url, headers=headers, **kwargs)
                 resp.raise_for_status()
                 # Certaines réponses (DELETE) peuvent être vides
                 if resp.content:
                     try:
-                        return resp.json()
+                        data: Any = resp.json()
                     except Exception:
-                        return resp.text
-                return {}
-        except (httpx.ConnectError, httpx.ReadTimeout) as exc:
+                        data = resp.text
+                else:
+                    data = {}
+            if not idempotent:
+                journal.append(label)
+            return data
+        except httpx.TransportError as exc:
+            # Seul un échec de connexion prouve que WordPress n'a rien reçu.
+            # Après l'envoi, rejouer une écriture peut publier en double. Toute
+            # la famille est traitée : un ReadError, un WriteTimeout ou un
+            # RemoteProtocolError traversaient sans rejeu ni habillage.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or idempotent
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2**attempt)
-                logger.warning("Retry %s in %.1fs: %s", url, delay, exc)
+                logger.warning("Retry %s in %.1fs (%s: %s)", url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise WordPressTransportError(
+                    type(exc).__name__, label, attempt + 1, replayable, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            # Les outils inspectent le statut HTTP (404 sur un article absent,
+            # 401 sur un mot de passe d'application) : garder l'exception httpx
+            # d'origine tout en donnant au formateur le contexte de l'écriture.
+            exc.wp_label = label
+            exc.wp_mutating = not idempotent
+            if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2**attempt)
                 logger.warning("Retry %s (HTTP %d) in %.1fs", url, exc.response.status_code, delay)
@@ -517,15 +671,64 @@ def _parse_id_list(value: str) -> list[int] | None:
 
 
 def _format_error(exc: Exception) -> str:
-    if isinstance(exc, httpx.HTTPStatusError):
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, RemoteProtocolError) garde son type et le sens de sa famille,
+    et l'appelant doit pouvoir distinguer une défaillance réseau d'un refus,
+    puis décider quoi relire.
+    """
+    if isinstance(exc, WordPressTransportError):
+        message = f"Erreur réseau {exc}"
+    elif isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        code = ""
         try:
             body = exc.response.json()
-            msg = body.get("message", exc.response.text[:200])
+            msg = body.get("message") or exc.response.text[:200]
+            # Le `code` REST (rest_invalid_param, rest_cannot_edit…) dit
+            # précisément CE QUI est refusé, là où le message se contente
+            # souvent de le paraphraser. Le jeter coûtait un aller-retour.
+            code = str(body.get("code") or "")
         except Exception:
             msg = exc.response.text[:200]
-        return f"Erreur HTTP {status} : {msg}"
-    return f"Erreur : {exc}"
+        msg = str(msg).strip() or "sans message."
+        message = f"Erreur HTTP {status} : {msg}"
+        if code:
+            message = _append_sentence(message, f" Code REST : {code}.")
+        if getattr(exc, "wp_mutating", False):
+            label = getattr(exc, "wp_label", "inconnue")
+            if status >= 500:
+                message = _append_sentence(
+                    message, _write_state_message("inconnu", label))
+            elif status >= 400 and status not in (401, 403, 404):
+                # 401, 403 et 404 gardent leur message exact : une auth refusée
+                # n'écrit rien et n'a pas besoin qu'on en discute. Le reste
+                # (400 sur un paramètre invalide, 413 sur un média trop lourd)
+                # est refusé avant exécution : le dire évite une relecture
+                # inutile, et un rejeu à l'identique échouerait pareil.
+                message = _append_sentence(
+                    message,
+                    f" Écriture {label} non appliquée : la requête a été refusée "
+                    "avant exécution, corriger l'appel avant de rejouer.")
+    elif isinstance(exc, json.JSONDecodeError):
+        message = f"Erreur JSON WordPress : {exc}"
+    elif isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        message = f"Erreur réseau {kind} : {detail}."
+    else:
+        text = str(exc)
+        message = (f"Erreur : {text}" if text.strip()
+                   else f"Erreur {type(exc).__name__} : sans message.")
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -1744,20 +1947,23 @@ async def wordpress_upload_media(
 
     try:
         file_bytes = path.read_bytes()
-        auth = _get_auth_header(server)
         url = _api_url(server, "media", subsite)
 
-        headers = {
-            "Authorization": auth,
-            "Content-Type": mime,
-            "Content-Disposition": f'attachment; filename="{path.name}"',
-        }
-
-        verify_ssl = _SERVER_CONFIGS.get(server, {}).get("verify_ssl", True)
-        async with httpx.AsyncClient(verify=verify_ssl, timeout=60) as client:
-            resp = await client.post(url, headers=headers, content=file_bytes)
-            resp.raise_for_status()
-            media = resp.json()
+        # Le dépôt passe par _request comme toute autre écriture : sans cela,
+        # il n'était ni nommé ni journalisé, et l'échec de la mise à jour qui
+        # suit laissait croire que rien n'avait été déposé.
+        media = await _request(
+            server, "POST", url,
+            extra_headers={
+                "Content-Type": mime,
+                "Content-Disposition": f'attachment; filename="{path.name}"',
+            },
+            timeout=60,
+            content=file_bytes,
+        )
+        if not isinstance(media, dict):
+            return (f"Réponse inattendue au dépôt de {path.name} : "
+                    f"{str(media)[:200]}")
 
         media_id = media.get("id")
 
