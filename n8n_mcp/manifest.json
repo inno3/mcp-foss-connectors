@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "n8n-mcp",
   "display_name": "n8n",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Connecteur n8n : workflows, exécutions, nœuds (Code / HTTP), credentials, variables globales. API publique REST n8n.",
   "author": {
     "name": "inno³",

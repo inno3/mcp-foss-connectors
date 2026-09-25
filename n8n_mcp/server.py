@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -56,9 +57,169 @@ _SETTINGS_ALLOWED = {
 }
 
 
+# Méthodes rejouables une fois la requête émise. Rejouer une écriture après un
+# timeout de lecture ou un 5xx est destructeur ici : un PUT /workflows/{id}
+# réécrit la définition entière, et le rejouer écrase une version que l'appelant
+# croit encore en place ; un POST crée un doublon.
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur : » suivi de rien était tout ce que
+#: l'appelant recevait.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar["tuple[asyncio.Task[Any], list[str]] | None"] = ContextVar(
+    "n8n_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaîne deux phrases sans les souder : un détail n8n finit rarement par
+    un point, et « must have property nodes Etat de l'ecriture » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, label: str) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {label} non appliquée : rejouer cette requête est sans "
+                "risque d'écrasement ni de doublon.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {label} inconnu : écriture non rejouée "
+                "automatiquement, n8n a pu la traiter avant de perdre la réponse ; "
+                "relire l'objet avant de rejouer.")
+    return ""
+
+
+class N8nAPIError(RuntimeError):
+    """Réponse n8n illisible, avec l'état de l'écriture concernée."""
+
+    def __init__(self, status: int, message: str, label: str,
+                 body_excerpt: str | None = None):
+        self.status = status
+        self.label = label
+        self.body_excerpt = body_excerpt
+        self.write_state = (
+            "sans_objet" if label.split(" ", 1)[0] in _IDEMPOTENT_METHODS else "inconnu"
+        )
+        super().__init__(_append_sentence(
+            message, _write_state_message(self.write_state, label)))
+
+
+class N8nTransportError(N8nAPIError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide.
+
+    Sans elle, un `httpx.ReadError` vide ou un `ReadTimeout` sans message se
+    rendaient à l'appelant en « Erreur : » nu, et rien ne distinguait une clé
+    API refusée d'une connexion coupée.
+    """
+
+    def __init__(self, kind: str, label: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        idempotent = label.split(" ", 1)[0] in _IDEMPOTENT_METHODS
+        self.status = 0
+        self.label = label
+        self.body_excerpt = None
+        self.write_state = (
+            "sans_objet" if idempotent
+            else "non_appliquee" if replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, label)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité de "
+                    "n8n si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        RuntimeError.__init__(
+            self, f"{kind} sur {label} ({self.detail}) après {attempts} {count}.{tail}")
+
+
+def _parse_json_or_raise(resp: httpx.Response, label: str) -> Any:
+    """Une page de proxy servie en HTTP 200 doit rester diagnostiquable.
+
+    Sans ce filet, `resp.json()` remontait un `json.JSONDecodeError` dont le
+    message parle de l'analyseur et jamais du serveur qui a répondu.
+    """
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        body = resp.text or ""
+        ct = resp.headers.get("content-type", "?")
+        excerpt = body[:200] if body else "(corps vide)"
+        logger.error(
+            "Réponse non-JSON pour %s : HTTP=%d content-type=%s body_len=%d "
+            "first_bytes=%r", label, resp.status_code, ct, len(body), excerpt,
+        )
+        raise N8nAPIError(
+            resp.status_code,
+            f"Réponse non-JSON depuis n8n (HTTP {resp.status_code}, "
+            f"content-type={ct}, body={len(body)}o). Extrait : {excerpt!r}",
+            label, body_excerpt=excerpt,
+        ) from exc
+
+
 async def _api_request(method: str, path: str, **kwargs: Any) -> Any:
-    """Appel HTTP n8n avec retry et backoff exponentiel."""
+    """Appel HTTP n8n avec rejeu et backoff exponentiel.
+
+    Les lectures sont rejouées après toute erreur de transport, un HTTP 5xx ou
+    un corps non-JSON. Une écriture n'est rejouée que si la connexion n'a jamais
+    abouti (ConnectError, ConnectTimeout) : une fois la requête partie, n8n a pu
+    la traiter avant de perdre la réponse, et un rejeu écraserait une définition
+    de workflow ou créerait un doublon.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état que
+    le client ne peut pas trancher. L'API publique n8n n'expose ni clef
+    d'idempotence ni identifiant de requête à vérifier ; il faut relire le
+    workflow ou l'exécution avant de rejouer, et c'est exactement ce que veut
+    dire « inconnu ». Le journal rappelle en outre les écritures déjà réussies
+    dans le même appel d'outil — plusieurs outils enchaînent une réécriture et
+    une (dés)activation.
+    """
     url = f"{N8N_BASE_URL}/api/v1/{path}"
+    label = f"{method.upper()} {path}"
+    idempotent = method.upper() in _IDEMPOTENT_METHODS
+    journal = _write_journal()
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -68,21 +229,49 @@ async def _api_request(method: str, path: str, **kwargs: Any) -> Any:
                 resp.raise_for_status()
                 # Certains endpoints retournent un body vide (204)
                 if resp.status_code == 204 or not resp.content:
-                    return {}
-                return resp.json()
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+                    data: Any = {}
+                else:
+                    data = _parse_json_or_raise(resp, label)
+            if not idempotent:
+                journal.append(label)
+            return data
+        except httpx.TransportError as exc:
+            # Seul un échec de connexion prouve que n8n n'a rien reçu. Après
+            # l'envoi, rejouer une écriture peut écraser ou dupliquer. Toute la
+            # famille est traitée : un ReadError, un RemoteProtocolError ou un
+            # PoolTimeout traversaient sans rejeu ni habillage.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or idempotent
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2 ** attempt)
-                logger.warning("Retry %s %s in %.1fs: %s", method, url, delay, exc)
+                logger.warning("Retry %s %s in %.1fs (%s: %s)", method, url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise N8nTransportError(
+                    type(exc).__name__, label, attempt + 1, replayable, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            # Les outils inspectent le statut HTTP : garder l'exception httpx
+            # d'origine tout en donnant au formateur le contexte de l'écriture.
+            exc.n8n_label = label
+            exc.n8n_mutating = not idempotent
+            if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2 ** attempt)
                 logger.warning("Retry %s %s (HTTP %d) in %.1fs", method, url, exc.response.status_code, delay)
+                await asyncio.sleep(delay)
+            else:
+                raise
+        except N8nAPIError as exc:
+            # Corps non-JSON sur une réponse 2xx : le plus souvent une page de
+            # proxy. On rejoue comme une lecture, donc jamais une écriture, qui
+            # a pu aboutir malgré la réponse illisible.
+            last_exc = exc
+            if idempotent and attempt < _MAX_RETRIES:
+                delay = _RETRY_DELAY * (2 ** attempt)
+                logger.warning("Retry %s %s (corps non-JSON) in %.1fs", method, url, delay)
                 await asyncio.sleep(delay)
             else:
                 raise
@@ -115,21 +304,68 @@ async def api_delete(path: str) -> Any:
 
 
 def _format_error(exc: Exception) -> str:
-    """Formate une erreur HTTP en message lisible."""
-    if isinstance(exc, httpx.HTTPStatusError):
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, RemoteProtocolError) garde son type et le sens de sa famille,
+    et l'appelant doit pouvoir distinguer une défaillance réseau d'un refus,
+    puis décider quoi relire.
+    """
+    if isinstance(exc, N8nTransportError):
+        message = f"Erreur réseau {exc}"
+    elif isinstance(exc, N8nAPIError):
+        message = f"Erreur n8n : {exc}"
+    elif isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 401:
-            return "Erreur 401 : clé API n8n invalide ou manquante."
-        if status == 403:
-            return "Erreur 403 : permissions insuffisantes pour cette ressource."
-        if status == 404:
-            return "Erreur 404 : ressource non trouvée dans n8n."
-        if status == 400:
-            return f"Erreur 400 : requête invalide. Détail : {exc.response.text[:500]}"
-        if status == 500:
-            return f"Erreur 500 : erreur interne n8n. Détail : {exc.response.text[:500]}"
-        return f"Erreur HTTP {status} : {exc.response.text[:500]}"
-    return f"Erreur : {exc}"
+            message = "Erreur 401 : clé API n8n invalide ou manquante."
+        elif status == 403:
+            message = "Erreur 403 : permissions insuffisantes pour cette ressource."
+        elif status == 404:
+            message = "Erreur 404 : ressource non trouvée dans n8n."
+        elif status == 400:
+            body = exc.response.text[:500].strip() or "sans message."
+            message = f"Erreur 400 : requête invalide. Détail : {body}"
+        elif status == 500:
+            body = exc.response.text[:500].strip() or "sans message."
+            message = f"Erreur 500 : erreur interne n8n. Détail : {body}"
+        else:
+            body = exc.response.text[:500].strip() or "sans message."
+            message = f"Erreur HTTP {status} : {body}"
+        if getattr(exc, "n8n_mutating", False):
+            label = getattr(exc, "n8n_label", "inconnue")
+            if status >= 500:
+                message = _append_sentence(
+                    message, _write_state_message("inconnu", label))
+            elif status >= 400 and status not in (401, 403, 404):
+                # 401, 403 et 404 gardent leur message exact : une auth refusée
+                # n'écrit rien et n'a pas besoin qu'on en discute. Le reste
+                # (400 sur un workflow mal formé, 409 sur un workflow actif)
+                # est refusé avant exécution : le dire évite une relecture
+                # inutile, et un rejeu à l'identique échouerait pareil.
+                message = _append_sentence(
+                    message,
+                    f" Écriture {label} non appliquée : la requête a été refusée "
+                    "avant exécution, corriger l'appel avant de rejouer.")
+    elif isinstance(exc, json.JSONDecodeError):
+        # Filet de sécurité : ne devrait plus se produire grâce à _parse_json_or_raise
+        message = f"Erreur JSON n8n : {exc}"
+    elif isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        message = f"Erreur réseau {kind} : {detail}."
+    else:
+        text = str(exc)
+        message = (f"Erreur : {text}" if text.strip()
+                   else f"Erreur {type(exc).__name__} : sans message.")
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
 
 
 def _dumps(data: Any) -> str:
