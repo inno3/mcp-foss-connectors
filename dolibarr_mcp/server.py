@@ -864,8 +864,9 @@ _UPSTREAM_BUG_ADDTIMESPENT = (
     "pendant la validation des paramètres, avant toute lecture de la tâche. Sur "
     "une instance atteinte, aucun contenu de requête ne contourne la fatale et "
     "l'imputation doit passer par l'interface web (projet/tasks/time.php). "
-    "Toutes les 23.0.x ne le sont PAS : la production inno³ écrit par cette "
-    "route (vérifié le 18/09/2026, 17 imputations écrites puis relues). Les "
+    "La production inno³, elle, écrit par cette route : elle tourne en "
+    "Dolibarr 24.0.1 (relevé le 25/09/2026 sur la mire), où la régression de "
+    "la 23 n'est plus là. Les "
     "routes de LECTURE et de CORRECTION du temps, elles, fonctionnent dans les "
     "deux cas : dolibarr_list_time_entries, dolibarr_update_time_entry, "
     "dolibarr_delete_time_entry."
@@ -1081,12 +1082,12 @@ async def dolibarr_log_time(
 ) -> str:
     """Saisir du temps passé sur une tâche Dolibarr.
 
-    La route POST tasks/{id}/addtimespent fonctionne : vérifié le 18/09/2026
-    sur la production inno³ (Dolibarr 23), 17 imputations écrites puis relues
-    par dolibarr_list_time_entries. Cette docstring la donnait jusqu'ici pour
-    morte sur toute Dolibarr 23.0.x : c'est vrai de certains builds, pas de la
-    version en service, et la limite périmée a fait envisager un contournement
-    navigateur pour rien.
+    La route POST tasks/{id}/addtimespent fonctionne sur la production inno³,
+    qui tourne en Dolibarr 24.0.1 : 17 imputations écrites puis relues le
+    18/09/2026, et une écriture de contrôle écrite, relue et supprimée le
+    25/09/2026. Cette docstring la donnait pour morte sur toute Dolibarr 23 ;
+    la fatale est bien réelle, mais c'est une régression de la 23.0.x, et la
+    limite périmée a fait envisager un contournement navigateur pour rien.
 
     Limite qui subsiste, et que le connecteur ne peut pas lever : sur les
     builds atteints, l'appel meurt dans une fatale PHP du validateur de Restler

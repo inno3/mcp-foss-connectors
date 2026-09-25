@@ -261,14 +261,12 @@ a bad id.
 
 ### Known upstream bug: adding time fails on some Dolibarr 23.0.x builds
 
-**Not every 23.0.x is affected, and this section used to say otherwise.**
-Verified on 18/09/2026 against the inno³ production instance (Dolibarr 23):
-17 entries written through `dolibarr_log_time` and read back with
-`dolibarr_list_time_entries`. Which patch level or vendored Restler makes the
-difference was not established — what is established is that the blanket
-"every call fails" claim was stale, and that it cost a browser workaround
-nobody needed. Treat what follows as a signature to recognise, not as a
-verdict on the route.
+**This is a Dolibarr 23 regression, and this section used to read as a
+verdict on the route itself.** The inno³ production instance runs **Dolibarr
+24.0.1** (read off the login page on 25/09/2026) and writes through this route
+without trouble: 17 entries on 18/09/2026, plus a control entry written, read
+back and deleted on 25/09/2026. Treat what follows as a signature to
+recognise on a 23.0.x, not as the fate of the route.
 
 On an affected build, `POST tasks/{id}/addtimespent` returns **HTTP 500 with a
 zero-byte body** for every request, whatever it contains. It is a PHP fatal,
