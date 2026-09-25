@@ -21,6 +21,7 @@ import os
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -134,6 +135,129 @@ def _auth() -> tuple[str, str]:
     return (_NC_USER, _NC_PASSWORD)
 
 
+# Méthodes rejouables une fois la requête émise. PROPFIND en fait partie : il
+# porte un corps de requête, mais c'est la lecture de WebDAV. Les autres verbes
+# WebDAV ne se rejouent pas — un MOVE, un DELETE ou un MKCOL rejoué après une
+# réponse perdue répond 404 ou 405 sur une opération qui avait pourtant abouti,
+# et un POST de partage crée un SECOND lien public, avec son propre jeton.
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS", "PROPFIND"}
+
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur : » suivi de rien était tout ce que
+#: l'appelant recevait.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar["tuple[asyncio.Task[Any], list[str]] | None"] = ContextVar(
+    "nextcloud_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+#: Racine WebDAV d'un compte. Le nom d'utilisateur est reconnu par sa position
+#: et non comparé à `_NC_USER` : les deux sont les mêmes en pratique, mais le
+#: module lit la configuration une seule fois, à l'import, et faire dépendre
+#: un libellé de cette lecture le rend faux dès qu'elle change.
+_DAV_ROOT_RE = re.compile(r"^/remote\.php/dav/files/[^/]+")
+
+
+def _request_label(method: str, url: str) -> str:
+    """Nomme la requête par son chemin Nextcloud, sans l'hôte ni le préfixe DAV.
+
+    Un message d'erreur n'a pas à citer l'instance, et le chemin seul reste
+    lisible quand plusieurs écritures sont listées côte à côte.
+    """
+    path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+    if _DAV_ROOT_RE.match(path):
+        path = _DAV_ROOT_RE.sub("", path, count=1) or "/"
+    elif path.startswith("/ocs/"):
+        path = path[len("/ocs/"):]
+    return f"{method.upper()} {path or '/'}"
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaîne deux phrases sans les souder : un message sabre/DAV finit
+    rarement par un point, et « could not be located Etat » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, label: str) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {label} non appliquée : rejouer cette requête est sans "
+                "risque de doublon.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {label} inconnu : écriture non rejouée "
+                "automatiquement, Nextcloud a pu la traiter avant de perdre la "
+                "réponse ; relire la ressource avant de rejouer.")
+    return ""
+
+
+class NextcloudTransportError(RuntimeError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide.
+
+    Sans elle, un `httpx.ReadError` vide ou un `ReadTimeout` sans message se
+    rendaient à l'appelant en « Erreur : » nu, et rien ne distinguait un mot de
+    passe d'application révoqué d'une connexion coupée.
+    """
+
+    def __init__(self, kind: str, label: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.label = label
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        idempotent = label.split(" ", 1)[0] in _IDEMPOTENT_METHODS
+        self.write_state = (
+            "sans_objet" if idempotent
+            else "non_appliquee" if replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, label)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité de "
+                    "Nextcloud si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        super().__init__(
+            f"{kind} sur {label} ({self.detail}) après {attempts} {count}.{tail}")
+
+
 async def _request(
     method: str,
     url: str,
@@ -141,13 +265,33 @@ async def _request(
     raw_response: bool = False,
     **kwargs: Any,
 ) -> Any:
-    """Appel HTTP avec retry et backoff exponentiel."""
+    """Appel HTTP avec rejeu et backoff exponentiel.
+
+    Les lectures — GET, HEAD, OPTIONS et PROPFIND, qui est la lecture de WebDAV
+    malgré son corps de requête — sont rejouées après toute erreur de transport
+    et sur un HTTP 5xx. Une écriture n'est rejouée que si la connexion n'a
+    jamais abouti (ConnectError, ConnectTimeout) : une fois la requête partie,
+    Nextcloud a pu la traiter avant de perdre la réponse, et un POST de partage
+    rejoué crée un second lien public, avec son propre jeton, que personne ne
+    sait actif.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état que
+    le client ne peut pas trancher. Ni WebDAV ni OCS n'exposent de clef
+    d'idempotence ou d'identifiant de requête à vérifier ; il faut relire la
+    ressource — `nextcloud_get_file_info` pour un dépôt, `nextcloud_list_shares`
+    pour un partage — avant de rejouer, et c'est exactement ce que veut dire
+    « inconnu ». Le journal rappelle en outre les écritures déjà réussies dans
+    le même appel d'outil.
+    """
     headers = {
         "Accept": "application/json",
     }
     if extra_headers:
         headers.update(extra_headers)
 
+    label = _request_label(method, url)
+    idempotent = method.upper() in _IDEMPOTENT_METHODS
+    journal = _write_journal()
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -158,26 +302,44 @@ async def _request(
                 )
                 resp.raise_for_status()
                 if raw_response:
-                    return resp
-                if resp.content:
+                    data: Any = resp
+                elif resp.content:
                     ct = resp.headers.get("content-type", "")
                     if "json" in ct:
-                        return resp.json()
-                    if "xml" in ct or ct.startswith("application/xml") or ct.startswith("text/xml"):
-                        return resp.text
-                    # Réponse binaire ou texte brut
-                    return resp.content
-                return {}
-        except (httpx.ConnectError, httpx.ReadTimeout) as exc:
+                        data = resp.json()
+                    elif "xml" in ct or ct.startswith("application/xml") or ct.startswith("text/xml"):
+                        data = resp.text
+                    else:
+                        # Réponse binaire ou texte brut
+                        data = resp.content
+                else:
+                    data = {}
+            if not idempotent:
+                journal.append(label)
+            return data
+        except httpx.TransportError as exc:
+            # Seul un échec de connexion prouve que Nextcloud n'a rien reçu.
+            # Toute la famille est traitée : un ReadError, un WriteTimeout ou
+            # un RemoteProtocolError traversaient sans rejeu ni habillage.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or idempotent
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2**attempt)
-                logger.warning("Retry %s dans %.1fs : %s", url, delay, exc)
+                logger.warning("Retry %s dans %.1fs (%s : %s)", url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise NextcloudTransportError(
+                    type(exc).__name__, label, attempt + 1, replayable, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            # Les outils inspectent le statut HTTP — nextcloud_upload_file
+            # distingue 412, 404 et 409 — : garder l'exception httpx d'origine
+            # tout en donnant au formateur le contexte de l'écriture.
+            exc.nc_label = label
+            exc.nc_mutating = not idempotent
+            if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2**attempt)
                 logger.warning("Retry %s (HTTP %d) dans %.1fs", url, exc.response.status_code, delay)
@@ -377,8 +539,16 @@ def _dav_error_message(body: str) -> str | None:
 
 
 def _format_error(exc: Exception) -> str:
-    """Formate un message d'erreur lisible."""
-    if isinstance(exc, httpx.HTTPStatusError):
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, RemoteProtocolError) garde son type et le sens de sa famille,
+    et l'appelant doit pouvoir distinguer une défaillance réseau d'un refus,
+    puis décider quoi relire.
+    """
+    if isinstance(exc, NextcloudTransportError):
+        message = f"Erreur réseau {exc}"
+    elif isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         try:
             body = exc.response.json()
@@ -386,8 +556,40 @@ def _format_error(exc: Exception) -> str:
         except Exception:
             text = exc.response.text
             msg = _dav_error_message(text) or text[:200]
-        return f"Erreur HTTP {status} : {msg}"
-    return f"Erreur : {exc}"
+        message = f"Erreur HTTP {status} : {str(msg).strip() or 'sans message.'}"
+        if getattr(exc, "nc_mutating", False):
+            label = getattr(exc, "nc_label", "inconnue")
+            if status >= 500:
+                message = _append_sentence(
+                    message, _write_state_message("inconnu", label))
+            elif status >= 400 and status not in (401, 403, 404, 412):
+                # 401, 403 et 404 gardent leur message exact : une auth refusée
+                # n'écrit rien. Le 412 aussi, mais pour la raison inverse : il
+                # dit « la cible existe », ce qui peut vouloir dire qu'un essai
+                # précédent A écrit — nextcloud_upload_file le qualifie lui-même
+                # et le message générique ne doit pas le contredire.
+                message = _append_sentence(
+                    message,
+                    f" Écriture {label} non appliquée : la requête a été refusée "
+                    "avant exécution, corriger l'appel avant de rejouer.")
+    elif isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        message = f"Erreur réseau {kind} : {detail}."
+    elif isinstance(exc, json.JSONDecodeError):
+        message = f"Erreur JSON Nextcloud : {exc}"
+    else:
+        text = str(exc)
+        message = (f"Erreur : {text}" if text.strip()
+                   else f"Erreur {type(exc).__name__} : sans message.")
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
 
 
 def _compact(obj: Any) -> str:
