@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "gitlab-mcp",
   "display_name": "GitLab",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Connecteur GitLab : projets, issues, merge requests, repository, pipelines CI/CD.",
   "author": {
     "name": "inno³",
