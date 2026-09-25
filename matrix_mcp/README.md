@@ -130,6 +130,64 @@ the cap — and `unread_after` came back `null`, indistinguishable from a room
 genuinely at zero. It is now an integer, zero included; when the re-read does
 fail, `read_state_confirmed` is false and `unread_after_note` says why.
 
+## When a call fails, what the message tells you (1.5.0)
+
+The same error contract as the Dolibarr and Kanboard connectors, which was
+written after both answered `Erreur : ` — nothing else — in production on
+08/09/2026 and 24/09/2026. It was worse here: this connector had no
+`_format_error` at all. Eleven tools each carried their own
+`return f"Erreur : {exc}"`, so an httpx exception with no text produced a bare
+`Erreur : ` eleven different ways, and an expired access token, a room you were
+not invited to, a rate limit and a passing network fault all read alike.
+
+**No message is ever bare.** An httpx exception carrying no text (`ReadError`,
+a naked `ReadTimeout`, `RemoteProtocolError`) is rendered with its type and what
+that family means. Any other empty exception keeps at least its class name. The
+eleven tools now share one formatter.
+
+**The whole `httpx.TransportError` family is handled.** Only `ConnectError` and
+the two timeouts used to be caught; a `ReadError`, a `PoolTimeout` or a
+`RemoteProtocolError` went through with neither replay nor wrapping.
+
+**The Matrix `errcode` is rendered.** `M_FORBIDDEN`, `M_LIMIT_EXCEEDED`,
+`M_UNKNOWN_TOKEN` say precisely what is refused, where `error` gives a sentence;
+the body used to be passed through raw and truncated at 500 characters.
+
+**What can be replayed follows the protocol, not the HTTP verb.** Two Matrix
+properties decide it:
+
+- `POST /search` queries, it does not write, so it is replayed like a read. The
+  other POSTs — `createRoom`, `invite`, `read_markers` — do write;
+- a `PUT` carries a transaction id fixed *before* the call (send, edit, redact)
+  or sets a state to a value. The homeserver deduplicates on that id, so an
+  internal replay reuses it and produces no second message. `PUT` stays
+  replayable, which it already was — removing that would have cost reliability
+  for no safety gain.
+
+Everything else is replayed only when the connection never succeeded
+(`ConnectError`, `ConnectTimeout`). Replaying `createRoom` would leave a
+duplicate room, and that one is only fixable by hand.
+
+**The error says what became of the write.** `write_state` is `sans_objet` for a
+read, `non_appliquee` when the request never reached the homeserver or it
+refused the request before executing it, and `inconnu` when the request left and
+the answer was lost. For a `PUT` the `inconnu` message is explicit about the
+limit: the attempts kept the same transaction id, so nothing was duplicated
+*here*, but a fresh tool call draws a new one — re-read the room before
+replaying. A 401, 403 or 404 keeps its usual message. Writes already applied
+earlier in the same tool call are named by route: several tools upload then
+send, or send then react.
+
+Unchanged: `_request` still raises a `RuntimeError` on an HTTP error — eleven
+tools have no handler of their own and let it through — and the message keeps
+its `Erreur Matrix {status} — {method} {url} : ` prefix. `MatrixAPIError` and
+`MatrixTransportError` are both `RuntimeError` subclasses, so those tools now
+surface a named message even without a handler.
+
+The limit that remains: a write whose response is lost leaves a state the client
+cannot decide, and transaction-id deduplication does not span two tool calls. So
+`inconnu` means exactly that — re-read the room, do not replay blind.
+
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
