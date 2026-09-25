@@ -5,6 +5,7 @@ Tous les appels HTTP/WebDAV sont mockés : la suite tourne sans réseau ni crede
 
 import asyncio
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -1163,3 +1164,135 @@ class TestUploadRetrySafety:
         assert state["puts"] == 2
         assert "existe déjà" in out["error"]
         assert "nextcloud_get_file_info" in out["error"]
+
+# ── upload_file : ce que la vérification en production a révélé ──────────────
+#
+# Trois constats du 25/09/2026, sur l'instance réelle, qu'aucun test mocké ne
+# pouvait donner :
+#
+# 1. Un base64 recopié dans la réponse d'un modèle avait perdu 16 caractères
+#    (un quantum entier, 12 octets) au milieu d'une zone répétitive. Il restait
+#    un multiple de 4, donc `validate=True` l'a accepté ; le fichier déposé
+#    faisait 2748 octets au lieu de 2760, et `size`, `verified_size` et le
+#    serveur étaient tous d'accord — sur le contenu envoyé, pas sur le contenu
+#    voulu. Seul un condensat calculé à la source traverse la transcription.
+# 2. Nextcloud répond 404 (Sabre\DAV\Exception\NotFound), et non 409, sur un
+#    dossier parent absent.
+# 3. Les erreurs WebDAV sont du XML : tronquées à 200 caractères, elles
+#    coupaient le message au milieu.
+
+
+class TestUploadDigest:
+    def test_response_always_carries_the_digest(self) -> None:
+        pdf = _pdf_bytes(2048)
+        nc = _FakeNextcloud()
+        with mock_http(nc):
+            out = upload(path="/Depot/piece.pdf", content_base64=base64.b64encode(pdf).decode("ascii"))
+        assert out["sha256"] == hashlib.sha256(pdf).hexdigest()
+
+    def test_declared_digest_matching_is_accepted(self) -> None:
+        pdf = _pdf_bytes(2048)
+        nc = _FakeNextcloud()
+        with mock_http(nc):
+            out = upload(
+                path="/Depot/piece.pdf",
+                content_base64=base64.b64encode(pdf).decode("ascii"),
+                sha256=hashlib.sha256(pdf).hexdigest().upper(),
+            )
+        assert out["ok"] is True
+        assert nc.files["/Depot/piece.pdf"] == pdf
+
+    def test_base64_amputee_dun_quantum_est_prise_par_le_condensat(self) -> None:
+        """Le défaut réel du 25/09/2026, en laboratoire.
+
+        On retire 4 caractères de base64 : la chaîne reste décodable, la taille
+        reste cohérente de bout en bout, et rien d'autre que le condensat ne
+        peut le voir.
+        """
+        pdf = _pdf_bytes(2048)
+        b64 = base64.b64encode(pdf).decode("ascii")
+        ampute = b64[:400] + b64[404:]
+        # le tronçon reste du base64 valide, et décode sans erreur
+        decoded = base64.b64decode("".join(ampute.split()), validate=True)
+        assert len(decoded) == len(pdf) - 3
+
+        nc = _FakeNextcloud()
+        with mock_http(nc) as calls:
+            out = upload(
+                path="/Depot/piece.pdf",
+                content_base64=ampute,
+                sha256=hashlib.sha256(pdf).hexdigest(),
+            )
+        assert "condensat différent" in out["error"]
+        assert "rien n'a été déposé" in out["error"]
+        assert calls == []
+        assert nc.files == {}
+
+    def test_sans_condensat_la_troncature_passe_inapercue(self) -> None:
+        """Témoin : sans sha256, le dépôt tronqué se présente comme un succès."""
+        pdf = _pdf_bytes(2048)
+        b64 = base64.b64encode(pdf).decode("ascii")
+        ampute = b64[:400] + b64[404:]
+        nc = _FakeNextcloud()
+        with mock_http(nc):
+            out = upload(path="/Depot/piece.pdf", content_base64=ampute)
+        assert out["ok"] is True
+        assert out["size"] == out["verified_size"] == len(pdf) - 3
+        assert nc.files["/Depot/piece.pdf"] != pdf
+
+    @pytest.mark.parametrize("bad", ["abc", "z" * 64, "0" * 63])
+    def test_malformed_digest_is_refused_before_any_call(self, bad) -> None:
+        with mock_http(_FakeNextcloud()) as calls:
+            out = upload(path="/Depot/piece.pdf", content="x", sha256=bad)
+        assert "64 caractères" in out["error"]
+        assert calls == []
+
+
+class TestUploadMissingParent:
+    def test_404_names_the_parent_folder(self) -> None:
+        """Nextcloud répond 404 sur parent absent, pas 409 (vérifié en prod)."""
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>\n'
+            b'<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">\n'
+            b"  <s:exception>Sabre\\DAV\\Exception\\NotFound</s:exception>\n"
+            b"  <s:message>File with name /Depot/absent could not be located</s:message>\n"
+            b"</d:error>"
+        )
+
+        def handler(method, url, kwargs):
+            return 404, body, {"content-type": "application/xml"}
+
+        with mock_http(handler):
+            out = upload(path="/Depot/absent/piece.pdf", content="x")
+        assert "le dossier parent /Depot/absent n'existe pas" in out["error"]
+        assert "nextcloud_create_folder" in out["error"]
+
+
+class TestDavErrorMessage:
+    def test_sabre_message_is_extracted_and_unescaped(self) -> None:
+        body = (
+            '<?xml version="1.0"?>\n<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">\n'
+            "  <s:exception>Sabre\\DAV\\Exception\\Conflict</s:exception>\n"
+            "  <s:message>Files &amp; folders\n  cannot be nested</s:message>\n</d:error>"
+        )
+        assert srv._dav_error_message(body) == "Files & folders cannot be nested"
+
+    def test_non_dav_body_returns_none(self) -> None:
+        assert srv._dav_error_message("boom") is None
+        assert srv._dav_error_message("") is None
+
+    def test_format_error_uses_it_instead_of_raw_xml(self) -> None:
+        body = (
+            '<?xml version="1.0"?><d:error xmlns:s="http://sabredav.org/ns">'
+            "<s:exception>Sabre\\DAV\\Exception\\NotFound</s:exception>"
+            "<s:message>File with name /x could not be located</s:message></d:error>"
+        )
+        exc = httpx.HTTPStatusError(
+            "404",
+            request=httpx.Request("PUT", "https://nc.example.test/x"),
+            response=httpx.Response(404, content=body.encode("utf-8"),
+                                    headers={"content-type": "application/xml"}),
+        )
+        msg = srv._format_error(exc)
+        assert msg == "Erreur HTTP 404 : File with name /x could not be located"
+        assert "<?xml" not in msg

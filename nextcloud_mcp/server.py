@@ -12,6 +12,8 @@ import asyncio
 import base64
 import binascii
 import fnmatch
+import hashlib
+import html
 import json
 import logging
 import mimetypes
@@ -360,6 +362,20 @@ def _parse_propfind(xml_text: str) -> list[dict]:
     return results
 
 
+def _dav_error_message(body: str) -> str | None:
+    """Extrait le `<s:message>` d'une erreur sabre/DAV, ou None.
+
+    Sans cela, le corps d'erreur WebDAV remonte en XML brut tronqué à 200
+    caractères : l'exception et le message utile sont coupés en plein milieu,
+    et le modèle comme le lecteur y perdent la seule information exploitable.
+    """
+    match = re.search(r"<s:message>(.*?)</s:message>", body or "", re.DOTALL)
+    if not match:
+        return None
+    msg = " ".join(html.unescape(match.group(1)).split())
+    return msg or None
+
+
 def _format_error(exc: Exception) -> str:
     """Formate un message d'erreur lisible."""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -368,7 +384,8 @@ def _format_error(exc: Exception) -> str:
             body = exc.response.json()
             msg = body.get("message") or body.get("error") or str(body)[:200]
         except Exception:
-            msg = exc.response.text[:200]
+            text = exc.response.text
+            msg = _dav_error_message(text) or text[:200]
         return f"Erreur HTTP {status} : {msg}"
     return f"Erreur : {exc}"
 
@@ -501,6 +518,35 @@ def _decode_base64(raw: str) -> bytes:
         # Un base64 tronqué ou mal recopié doit se voir tout de suite : décodé
         # en mode permissif, il produirait un fichier silencieusement amputé.
         raise ValueError(f"content_base64 invalide : {exc}") from None
+
+
+def _check_declared_digest(payload: bytes, declared: str) -> str:
+    """Rend le sha256 du contenu, après contrôle du condensat déclaré.
+
+    Un base64 recopié dans la réponse d'un modèle peut perdre un quantum entier
+    (4 caractères = 3 octets) et rester parfaitement décodable : `validate=True`
+    l'accepte, le plafond ne bronche pas, et la relecture par taille confirme
+    l'octet près ce qui a été envoyé — pas ce qu'on voulait envoyer. Constaté le
+    25/09/2026 : 12 octets perdus au milieu d'un PDF, `size`, `verified_size` et
+    le serveur tous d'accord sur un fichier tronqué. Un condensat calculé à la
+    source est le seul contrôle qui traverse la transcription.
+    """
+    digest = hashlib.sha256(payload).hexdigest()
+    wanted = (declared or "").strip().lower()
+    if not wanted:
+        return digest
+    if not re.fullmatch(r"[0-9a-f]{64}", wanted):
+        raise ValueError(
+            "sha256 doit être un condensat hexadécimal de 64 caractères "
+            f"(reçu {len(wanted)} caractères)"
+        )
+    if wanted != digest:
+        raise ValueError(
+            f"condensat différent : {len(payload)} octets valent {digest}, "
+            f"le sha256 déclaré est {wanted}. Le contenu a été altéré en route, "
+            "rien n'a été déposé"
+        )
+    return digest
 
 
 def _guess_content_type(path: str) -> str:
@@ -826,6 +872,7 @@ async def nextcloud_upload_file(
     local_path: str = "",
     content_type: str = "",
     overwrite: bool = True,
+    sha256: str = "",
 ) -> str:
     """Crée ou remplace un fichier dans Nextcloud, en texte ou en binaire.
 
@@ -858,6 +905,14 @@ async def nextcloud_upload_file(
                             est préservée et l'appel échoue (contrôle PROPFIND
                             préalable, doublé d'un `If-None-Match: *` qui rend
                             le refus atomique côté serveur).
+      sha256       (str)  — condensat hexadécimal du fichier tel qu'il est à la
+                            SOURCE. Fortement recommandé avec content_base64 :
+                            un base64 recopié peut perdre un quantum entier et
+                            rester décodable, auquel cas taille envoyée, taille
+                            relue et serveur s'accordent tous sur un fichier
+                            tronqué. En cas d'écart, rien n'est déposé. La
+                            réponse porte de toute façon le `sha256` de ce qui a
+                            été envoyé, à comparer à la source.
 
     Plafond : 25 Mo par fichier quelle que soit la source, réglable par
     NEXTCLOUD_MAX_UPLOAD_BYTES. Le contrôle a lieu AVANT tout appel réseau ;
@@ -909,6 +964,11 @@ async def nextcloud_upload_file(
                          f"{_MAX_UPLOAD_BYTES} (NEXTCLOUD_MAX_UPLOAD_BYTES)."
             })
 
+        try:
+            digest = _check_declared_digest(payload, sha256)
+        except ValueError as exc:
+            return _compact({"error": str(exc), "path": path})
+
         ctype = (content_type or "").strip() or _guess_content_type(path)
 
         if not overwrite and await _resource_exists(path):
@@ -936,11 +996,15 @@ async def nextcloud_upload_file(
                              "réussir au premier essai : vérifier avec nextcloud_get_file_info.",
                     "path": path,
                 })
-            if status == 409:
+            if status in (404, 409):
+                # Vérifié en production le 25/09/2026 : Nextcloud (sabre/dav)
+                # répond 404 Sabre\DAV\Exception\NotFound sur un dossier parent
+                # absent, là où la RFC laisse attendre un 409. Sans les deux, le
+                # cas le plus banal du dépôt remonte en XML brut.
                 parent = path.rsplit("/", 1)[0] or "/"
                 return _compact({
-                    "error": f"Erreur HTTP 409 : le dossier parent {parent} n'existe pas "
-                             "(le créer avec nextcloud_create_folder).",
+                    "error": f"Erreur HTTP {status} : le dossier parent {parent} n'existe "
+                             "pas (le créer avec nextcloud_create_folder).",
                     "path": path,
                 })
             raise
@@ -951,6 +1015,7 @@ async def nextcloud_upload_file(
             "size": len(payload),
             "source": source,
             "content_type": ctype,
+            "sha256": digest,
         }
         # Read-after-write : une taille annoncée par l'appelant ne prouve rien,
         # c'est le serveur qui dit ce qu'il a stocké.

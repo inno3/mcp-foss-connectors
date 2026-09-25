@@ -22,7 +22,7 @@ environment variables — no host, login or secret is baked into the code.
 - `nextcloud_list_files` — Liste les fichiers et dossiers d'un chemin Nextcloud (PROPFIND)
 - `nextcloud_get_file_info` — Retourne les métadonnées d'un fichier ou dossier (PROPFIND depth=0)
 - `nextcloud_download_file` — Télécharge un fichier : contenu texte dans le contexte (≤100 KB), ou `save_path` vers le dossier de téléchargement local (binaires et gros fichiers) ; lecture par plage `offset`/`length`
-- `nextcloud_upload_file` — Crée ou remplace un fichier : `content` (texte UTF-8), `content_base64` (binaire : PDF, ODT, XLSX, DOCX…) ou `local_path` (fichier local sous `NEXTCLOUD_UPLOAD_DIR`) ; plafond 25 Mo, `overwrite` explicite, dépôt relu par PROPFIND
+- `nextcloud_upload_file` — Crée ou remplace un fichier : `content` (texte UTF-8), `content_base64` (binaire : PDF, ODT, XLSX, DOCX…) ou `local_path` (fichier local sous `NEXTCLOUD_UPLOAD_DIR`) ; plafond 25 Mo, `overwrite` explicite, `sha256` déclaré contrôlé avant dépôt, dépôt relu par PROPFIND
 - `nextcloud_create_folder` — Crée un dossier dans Nextcloud (MKCOL)
 - `nextcloud_delete` — Supprime un fichier ou un dossier dans Nextcloud (DELETE)
 - `nextcloud_move` — Déplace ou renomme un fichier/dossier dans Nextcloud (MOVE)
