@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "wordpress-mcp",
   "display_name": "WordPress",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Connecteur WordPress : pages, articles, CPT (news/realisations/...), ACF, taxonomies personnalisées, médias, redirections, révisions et contrôle de contenu. Supporte prod/test et multisite FR/EN (paramètre subsite). Lecture par défaut en context=edit (markup Gutenberg raw, <!-- wp:* --> préservés).",
   "author": {
     "name": "inno³",

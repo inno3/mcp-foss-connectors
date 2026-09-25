@@ -87,6 +87,58 @@ environment variables — no host, login or secret is baked into the code.
 - ACF and the *Redirection* plugin are optional; their tools degrade gracefully
   when the plugin is absent.
 
+## When a call fails, what the message tells you (1.6.0)
+
+The same error contract as the Dolibarr and Kanboard connectors, which was
+written after both answered `Erreur : ` — nothing else — in production on
+08/09/2026 and 24/09/2026. An empty string separates nothing: a refused
+application password, a missing post, an invalid parameter and a passing network
+fault all read alike, and the caller cannot tell whether to replay, fix the call
+or stop. Five things now hold.
+
+**No message is ever bare.** An httpx exception carrying no text (`ReadError`,
+a naked `ReadTimeout`, `RemoteProtocolError`) is rendered with its type and what
+that family means — `Erreur réseau ReadError : connexion coupée par le serveur
+avant la réponse.` Any other empty exception keeps at least its class name.
+
+**The whole `httpx.TransportError` family is handled.** Only `ConnectError` and
+`ReadTimeout` used to be caught — not even `WriteTimeout`; a `ReadError`, a
+`PoolTimeout` or a `RemoteProtocolError` went through with neither replay nor
+wrapping.
+
+**The REST error code is rendered next to the message.** WordPress's `code`
+(`rest_invalid_param`, `rest_cannot_edit`, `rest_post_invalid_id`) says precisely
+what is being refused, where the message often just paraphrases it; it used to be
+dropped in favour of `message` alone.
+
+**A write is never replayed once the request has left.** Publishing twice is
+visible to the public, and only a re-read finds it. Reads (`GET`, `HEAD`,
+`OPTIONS`) are replayed on any transport error and on 5xx. Writes are replayed
+only when the connection never succeeded (`ConnectError`, `ConnectTimeout`),
+which is the only proof WordPress received nothing.
+
+**The error says what became of the write.** `write_state` is `sans_objet` for a
+read, `non_appliquee` when the request never reached WordPress or WordPress
+refused it before executing it (HTTP 4xx) — replaying is then free of any
+duplicate risk — and `inconnu` when the request left and the answer was lost
+(read timeout, 5xx): the message then asks you to re-read the object before
+replaying. A 401, 403 or 404 writes nothing and keeps its usual message. Writes
+already applied earlier in the same tool call are named by their route:
+`wordpress_upload_media` posts the file and then sets its title and alt text, so
+when the second call fails the message says the media is already in the library.
+The upload itself now goes through the shared request path, which is what makes
+that possible.
+
+Non-JSON bodies on a 2xx response are still returned as text, unchanged:
+`wordpress_check_content` reads rendered HTML that way.
+
+The limit that remains: a write whose response is lost leaves a state the client
+cannot decide. The REST API exposes neither an idempotency key nor a request id
+to check against, so `inconnu` means exactly that — re-read the object, do not
+replay blind. Three read-only paths still call httpx directly and so carry no
+write state: the two ACF v3 routes and the XML-RPC version probe. They are
+reads, and `_format_error` still names whatever they raise.
+
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
