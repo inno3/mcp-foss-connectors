@@ -1144,24 +1144,41 @@ class TestUploadServerErrors:
 
 
 class TestUploadRetrySafety:
-    def test_412_after_a_network_retry_points_to_verification(self) -> None:
-        """Le premier PUT a écrit, la réponse s'est perdue, le rejeu voit 412.
+    """Ce qui arrive quand la réponse d'un dépôt se perd.
 
-        Le message ne doit pas se lire comme « rien n'a été déposé ».
-        """
+    Le scénario n'a pas changé — le PUT a écrit, la réponse s'est perdue, un
+    second essai voit 412 — mais le connecteur ne produit plus ce second essai
+    lui-même : depuis le portage du contrat d'erreur, une écriture n'est jamais
+    rejouée automatiquement une fois la requête partie. Le 412 reste donc
+    atteignable, par un rejeu décidé par l'appelant, et son message garde sa
+    valeur ; c'est ce que vérifie le second test.
+    """
+
+    def test_le_put_nest_pas_rejoue_et_lerreur_dit_letat(self) -> None:
         state = {"puts": 0}
 
         def handler(method, url, kwargs):
             if method == "PUT":
                 state["puts"] += 1
-                if state["puts"] == 1:
-                    raise httpx.ReadTimeout("coupure après écriture", request=None)
+                raise httpx.ReadTimeout("coupure après écriture", request=None)
+            return 404, b"Not Found", {}
+
+        with patch.object(srv, "_RETRY_DELAY", 0), mock_http(handler):
+            out = upload(path="/Depot/piece.pdf", content="x", overwrite=False)
+        assert state["puts"] == 1, "rejouer un PUT dont la réponse est perdue écrase"
+        assert "inconnu" in out["error"]
+        assert "relire" in out["error"]
+
+    def test_412_points_to_verification(self) -> None:
+        """Le message ne doit pas se lire comme « rien n'a été déposé »."""
+
+        def handler(method, url, kwargs):
+            if method == "PUT":
                 return 412, b"", {}
             return 404, b"Not Found", {}
 
         with patch.object(srv, "_RETRY_DELAY", 0), mock_http(handler):
             out = upload(path="/Depot/piece.pdf", content="x", overwrite=False)
-        assert state["puts"] == 2
         assert "existe déjà" in out["error"]
         assert "nextcloud_get_file_info" in out["error"]
 

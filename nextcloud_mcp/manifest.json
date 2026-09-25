@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "nextcloud-mcp",
   "display_name": "Nextcloud",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Connecteur Nextcloud : fichiers (WebDAV), partages (OCS), recherche, statut utilisateur.",
   "author": {
     "name": "inno³",
