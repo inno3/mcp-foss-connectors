@@ -1107,7 +1107,7 @@ def _format_task_contact(raw: dict) -> dict:
     }
 
 
-async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
+async def _fetch_task_contacts(task_id: int, *, strict: bool = False) -> list[dict] | None:
     """Intervenants d'une tâche, ou None si la lecture échoue.
 
     Utilisé aussi bien par le tool de lecture que par le diagnostic d'échec :
@@ -1117,6 +1117,8 @@ async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
     try:
         raw = await api_get(TASK_CONTACTS_ENDPOINT.format(task_id=task_id))
     except Exception:
+        if strict:
+            raise
         return None
     if not isinstance(raw, list):
         return None
@@ -1537,7 +1539,7 @@ async def dolibarr_unassign_task_user(
         if not user_id:
             return "Le user_id est obligatoire (identifiant llx_user)."
 
-        contacts = await _fetch_task_contacts(task_id)
+        contacts = await _fetch_task_contacts(task_id, strict=True)
         if contacts is None:
             return _dumps({
                 "success": False,
@@ -5241,7 +5243,9 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
                         f"Proposition {proposal_id} introuvable (404) — rien à supprimer."
                     ),
                 })
-            snapshot_error = str(get_exc)
+            if get_exc.response.status_code in (401, 403):
+                return _format_error(get_exc)
+            snapshot_error = _format_error(get_exc)
         except Exception as get_exc:
             snapshot_error = str(get_exc)
 

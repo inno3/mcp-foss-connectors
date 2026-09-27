@@ -712,3 +712,18 @@ porte sur les opérations bancaires TTC, avec les exclusions déjà décrites.
 Un parcours de factures interrompu, répété ou invalide refuse désormais de
 publier un total financier. Aucune définition propre à une organisation ne
 remplace cette formule dans le cœur.
+
+### Compte technique et refus de droits
+
+`DOLIBARR_API_KEY` accepte la clef de tout utilisateur Dolibarr. Aucun statut
+administrateur ni identifiant personnel n'est requis par le cœur. Les droits
+natifs de l'API définissent les ressources accessibles. Un HTTP 401 signale une
+clef invalide et un HTTP 403 des permissions insuffisantes. Ces refus ne sont
+pas rejoués. La suppression d'une proposition et le retrait d'un intervenant
+conservent désormais aussi le refus rencontré pendant leur lecture préalable.
+
+Le rapprochement bancaire par formulaire reste facultatif et nécessite les
+identifiants web du compte autorisé. Laisser les deux variables web absentes
+pour le désactiver. Créer le compte technique et attribuer ses droits se fait
+dans Dolibarr, puis remplacer la clef dans la configuration du client MCP.
+La recette doit vérifier les droits propres à chaque module activé.
