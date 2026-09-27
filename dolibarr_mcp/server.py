@@ -436,7 +436,7 @@ def _format_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 401:
-            return "Erreur 401 : clé API Dolibarr invalide ou manquante."
+            return "Erreur 401 : clef API Dolibarr invalide ou manquante."
         if status == 403:
             return "Erreur 403 : permissions insuffisantes pour cette ressource."
         if status == 404:
@@ -493,7 +493,7 @@ def _unique_rows(rows: list, identity: str = "") -> list:
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Export invalide : un objet attendu par ligne.")
-        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id")
+        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id", "card_id")
         value = next((row[k] for k in keys if row.get(k) is not None), None)
         if value is not None:
             token = str(value)
@@ -552,11 +552,11 @@ def _cursor_offset(cursor: str, offset: int = 0) -> int:
 
 
 def _export_payload(payload: dict, key: str, limit: int, cursor: str = "",
-                    *, scan=None, offset: int = 0, identity: str = "") -> dict:
+                    *, scan=None, offset: int = 0, identity: str = "", max_limit: int = MAX_LIMIT) -> dict:
     """Pagination du résultat filtré. total=null signifie total non certifié."""
     rows = _unique_rows(payload[key], identity)
     start = _cursor_offset(cursor, offset)
-    size = _clamp_limit(limit)
+    size = max(1, min(limit, max_limit))
     shown = rows[start:start + size]
     complete = getattr(scan, "complete", True)
     more = start + len(shown) < len(rows)
@@ -571,6 +571,79 @@ def _export_payload(payload: dict, key: str, limit: int, cursor: str = "",
     if not complete:
         payload["scan_note"] = getattr(scan, "scan_note", "Balayage incomplet.")
     return payload
+
+
+def _first_present(row: dict, *keys: str):
+    """La présence d'une clef prime sur la vérité de sa valeur, même null ou 0."""
+    return next((row[key] for key in keys if key in row), None)
+
+
+def _financial_fields(row: dict, *, proposal: bool = False) -> dict:
+    """Projection financière et distinction entre un champ absent et null."""
+    fields = {
+        "total_ht": ("total_ht",), "total_ttc": ("total_ttc",),
+        "status": ("fk_statut", "status", "statut"),
+    }
+    if proposal:
+        fields["date_validity"] = ("fin_validite", "date_fin_validite", "date_validity")
+    else:
+        fields.update({
+            "date_due": ("date_echeance", "date_lim_reglement"),
+            "remaining_to_pay": ("remaintopay", "remaining_to_pay"),
+            "source_invoice_id": ("fk_facture_source",),
+            "type": ("type",),
+        })
+    result = {"unavailable_fields": []}
+    for field, aliases in fields.items():
+        value = _first_present(row, *aliases)
+        if not any(alias in row for alias in aliases):
+            result["unavailable_fields"].append(field)
+        if value is not None:
+            if field in ("date_due", "date_validity"):
+                value = _ts_to_date(value)
+            elif field == "status":
+                value = str(value)
+            else:
+                value = _num(value)
+        result[field] = value
+    status = result["status"]
+    result["status_label"] = (_format_proposal_status(status) if proposal
+                              else _format_invoice_status(status, row.get("paye")))
+    return result
+
+
+async def _with_invoice_payments(row: dict, supplier: bool, include_payments: bool) -> None:
+    """Une lecture refusée ne signifie jamais absence de paiement."""
+    row["payments"] = None
+    row["payments_total"] = None
+    if not include_payments:
+        row["payments_error"] = "Lecture non demandée (include_payments=false)."
+    elif not row.get("id"):
+        row["payments_error"] = "Identifiant de facture absent."
+    else:
+        try:
+            payments = await _invoice_payments(int(row["id"]), supplier)
+            row["payments"] = payments
+            if all(p.get("amount") is not None for p in payments):
+                row["payments_total"] = round(sum(float(p["amount"]) for p in payments), 2)
+            return
+        except Exception as exc:
+            row["payments_error"] = _format_error(exc)
+    row.setdefault("unavailable_fields", []).append("payments")
+
+
+async def _invoice_export(payload: dict, limit: int, cursor: str, scan,
+                          supplier: bool, include_payments: bool) -> str:
+    payload = _export_payload(payload, "invoices", limit, cursor, scan=scan)
+    for row in payload["invoices"]:
+        await _with_invoice_payments(row, supplier, include_payments)
+    if not supplier:
+        credits = [r for r in payload["invoices"]
+                   if str(r.get("type")) == "2" or (r.get("total_ttc") or 0) < 0]
+        payload["credit_notes"] = credits
+        payload["credit_notes_count"] = len(credits)
+        payload["credit_notes_scope"] = "page rendue, avec les mêmes filtres que invoices"
+    return _dumps(payload)
 
 
 def _sf_escape(value: str) -> str:
@@ -1958,7 +2031,7 @@ async def dolibarr_list_invoices(
     date_start: str = "",
     date_end: str = "",
     sort: str = "desc",
-    search_ref: str = "", cursor: str = "",) -> str:
+    search_ref: str = "", cursor: str = "", include_payments: bool = True,) -> str:
     """Liste les factures clients.
 
     Paramètres :
@@ -2025,7 +2098,7 @@ async def dolibarr_list_invoices(
             if min_amount and total_ttc < min_amount:
                 continue
 
-            date_lim = _ts_to_date(inv.get("date_lim_reglement"))
+            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -2048,16 +2121,17 @@ async def dolibarr_list_invoices(
                 "status_label": _format_invoice_status(inv_status, inv.get("paye")),
                 "days_late": days_late,
                 "remaining_to_pay": float(inv.get("remaintopay") or total_ttc),
+                **_financial_fields(inv, proposal=False),
             })
 
-        return _dumps(_export_payload({
+        return await _invoice_export({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
-            "credit_notes_count": sum(1 for r in results if r["total_ttc"] < 0),
+            "credit_notes_count": sum(1 for r in results if (r["total_ttc"] or 0) < 0),
             "invoices": results,
-        }, "invoices", limit, cursor, scan=invoices))
+        }, limit, cursor, invoices, False, include_payments)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2070,7 +2144,7 @@ async def dolibarr_list_supplier_invoices(
     date_start: str = "",
     date_end: str = "",
     sort: str = "desc",
-    search_ref: str = "", cursor: str = "",) -> str:
+    search_ref: str = "", cursor: str = "", include_payments: bool = True,) -> str:
     """Liste les factures fournisseur.
 
     Paramètres :
@@ -2117,7 +2191,7 @@ async def dolibarr_list_supplier_invoices(
         today = datetime.now().strftime("%Y-%m-%d")
         results = []
         for inv in invoices:
-            date_lim = _ts_to_date(inv.get("date_lim_reglement"))
+            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -2139,15 +2213,16 @@ async def dolibarr_list_supplier_invoices(
                 "status": inv_status,
                 "status_label": _format_invoice_status(inv_status, inv.get("paye")),
                 "days_late": days_late,
+                **_financial_fields(inv, proposal=False),
             })
 
-        return _dumps(_export_payload({
+        return await _invoice_export({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
             "invoices": results,
-        }, "invoices", limit, cursor, scan=invoices))
+        }, limit, cursor, invoices, True, include_payments)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2191,6 +2266,7 @@ async def dolibarr_list_proposals(
                 "date_validity": _ts_to_date(p.get("fin_validite") or p.get("date_fin_validite")),
                 "status": p.get("fk_statut") or p.get("status") or p.get("statut"),
                 "status_label": _format_proposal_status(p.get("fk_statut") or p.get("status") or p.get("statut")),
+                **_financial_fields(p, proposal=True),
             })
 
         return _dumps(_export_payload({"count": len(results), "proposals": results}, "proposals", limit, cursor, scan=proposals))
@@ -3606,22 +3682,22 @@ async def _invoices_in_range(date_start: str, date_end: str) -> list:
     rows: list = []
     for page in range(REVENUE_SCAN_MAX_PAGES):
         chunk = await _api_get_list("invoices", {
-            "sortfield": "t.datef",
+            "sortfield": "t.datef,t.rowid",
             "sortorder": "DESC",
             "limit": REVENUE_SCAN_PAGE,
             "page": page,
             "sqlfilters": sqlfilters,
             "properties": "id,ref,total_ht,total_ttc,date,fk_statut,paye",
         })
-        chunk = chunk if isinstance(chunk, list) else []
-        rows.extend(chunk)
+        if not isinstance(chunk, list):
+            raise ValueError("Balayage financier incomplet : réponse invalide.")
+        merged = _unique_rows([*rows, *chunk])
+        if chunk and len(merged) == len(rows):
+            raise ValueError("Balayage financier incomplet : page répétée.")
+        rows = merged
         if len(chunk) < REVENUE_SCAN_PAGE:
             return rows
-    logger.warning(
-        "CA : %d pages de factures lues sur %s→%s, balayage arrêté au garde-fou.",
-        REVENUE_SCAN_MAX_PAGES, date_start, date_end,
-    )
-    return rows
+    raise ValueError("Balayage financier incomplet : plafond atteint, aucun total certifié.")
 
 
 async def _customer_cash_in(date_start: str, date_end: str) -> dict:
@@ -3741,6 +3817,9 @@ async def dolibarr_get_revenue_summary(
                 "year": year,
                 "month": month,
                 "basis": "encaissees",
+                "definition": {"date_basis": "bank_operation", "amount_basis": "TTC",
+                               "date_start": year_start, "date_end": year_end,
+                               "ytd_scope": "année entière, nom historique"},
                 "basis_label": (
                     "encaissements clients constatés en banque, à la date d'opération (TTC)"
                 ),
@@ -3777,6 +3856,10 @@ async def dolibarr_get_revenue_summary(
             "year": year,
             "month": month,
             "basis": "emises",
+            "definition": {"date_basis": "invoice_date", "credit_note_date": "own_date",
+                           "statuses": [1, 2], "date_start": year_start,
+                           "date_end": year_end, "bounds": "inclusive",
+                           "ytd_scope": "année entière, nom historique"},
             "basis_label": (
                 "factures validées ou payées (fk_statut 1 et 2), à la date de facture, "
                 "NET des avoirs de la période"
@@ -4580,7 +4663,7 @@ def _format_doc_line(line: dict) -> dict:
 
 
 @mcp.tool()
-async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
+async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "", include_payments: bool = True,) -> str:
     """Détail d'une facture client par ID numérique ou par référence.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
@@ -4643,6 +4726,8 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payments(result, False, include_payments)
         return _dumps(result)
 
     except Exception as exc:
@@ -4709,6 +4794,7 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(p, proposal=True))
         return _dumps(result)
 
     except Exception as exc:
@@ -4716,7 +4802,7 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
 
 
 @mcp.tool()
-async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> str:
+async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "", include_payments: bool = True,) -> str:
     """Détail d'une facture FOURNISSEUR par ID numérique ou par référence.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
@@ -4784,6 +4870,8 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payments(result, True, include_payments)
         return _dumps(result)
 
     except Exception as exc:
@@ -6610,6 +6698,7 @@ def _format_payment(raw: dict) -> dict:
         return {}
     bank_line = _id_int(raw.get("fk_bank_line")) or None
     out = {
+        "id": _id_int(raw.get("id") or raw.get("rowid")),
         "ref": raw.get("ref"),
         "date": _ts_to_date(raw.get("date")),
         "amount": _num(raw.get("amount")),
@@ -6675,7 +6764,9 @@ async def _invoice_payments(invoice_id: int, supplier: bool) -> list:
         SUPPLIER_INVOICE_PAYMENTS_ENDPOINT if supplier else INVOICE_PAYMENTS_ENDPOINT
     ).format(invoice_id=invoice_id)
     rows = await api_get(endpoint)
-    formatted = (_format_payment(r) for r in (rows or []) if isinstance(r, dict))
+    if not isinstance(rows, list):
+        raise ValueError("Réponse de paiements invalide : liste attendue.")
+    formatted = (_format_payment(r) for r in _unique_rows(rows))
     return [p for p in formatted if p]
 
 

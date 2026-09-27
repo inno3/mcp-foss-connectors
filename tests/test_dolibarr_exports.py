@@ -1,8 +1,12 @@
 """Contrat d'export sur données fictives, sans service distant."""
 
 import json
+import os
 
 import pytest
+
+os.environ.setdefault("DOLIBARR_URL", "https://erp.example.test")
+os.environ.setdefault("DOLIBARR_API_KEY", "test-key")
 
 from dolibarr_mcp import server
 
@@ -82,3 +86,85 @@ async def test_source_error_is_not_an_empty_export(monkeypatch):
 
     monkeypatch.setattr(server, "api_get", get)
     assert "Erreur" in await server.dolibarr_list_proposals()
+
+
+@pytest.mark.parametrize("supplier", [False, True])
+async def test_invoice_fields_keep_zero_null_and_missing(monkeypatch, supplier):
+    rows = [
+        {"id": 1, "total_ht": "10", "total_ttc": "12", "remaintopay": 0,
+         "fk_statut": 0, "date_echeance": "2026-09-30", "date_lim_reglement": "2026-09-30"},
+        {"id": 2, "total_ht": None, "total_ttc": None, "remaintopay": None},
+        {"id": 3},
+    ]
+
+    async def get(endpoint, params=None):
+        if endpoint.endswith("/payments"):
+            return [{"id": 71, "amount": "12", "type": "VIR", "date": "2026-09-01"}]
+        return rows
+
+    monkeypatch.setattr(server, "api_get", get)
+    tool = server.dolibarr_list_supplier_invoices if supplier else server.dolibarr_list_invoices
+    data = json.loads(await tool(status="all"))
+    first, null, missing = data["invoices"]
+    assert first["remaining_to_pay"] == 0
+    assert first["status"] == "0"
+    assert first["date_due"] == "2026-09-30"
+    assert first["payments"][0]["amount"] == 12
+    assert null["total_ht"] is None
+    assert "total_ht" not in null["unavailable_fields"]
+    assert missing["total_ht"] is None
+    assert "total_ht" in missing["unavailable_fields"]
+
+
+async def test_supplier_due_date_alias_and_unavailable_payments(monkeypatch):
+    import httpx
+
+    async def get(endpoint, params=None):
+        if endpoint.endswith("/payments"):
+            response = httpx.Response(403, request=httpx.Request("GET", "https://erp.test/payments"))
+            response.raise_for_status()
+        return [{"id": 1, "date_echeance": "2026-10-15", "total_ttc": 50}]
+
+    monkeypatch.setattr(server, "api_get", get)
+    row = json.loads(await server.dolibarr_list_supplier_invoices())["invoices"][0]
+    assert row["date_due"] == "2026-10-15"
+    assert row["payments"] is None
+    assert "403" in row["payments_error"]
+    assert row["remaining_to_pay"] is None
+
+
+async def test_proposal_preserves_draft_and_absent_amount(monkeypatch):
+    async def get(endpoint, params=None):
+        return [{"id": 1, "fk_statut": 0, "total_ttc": None, "date_validity": None}]
+
+    monkeypatch.setattr(server, "api_get", get)
+    row = json.loads(await server.dolibarr_list_proposals())["proposals"][0]
+    assert str(row["status"]) == "0"
+    assert row["total_ht"] is None
+    assert row["total_ttc"] is None
+    assert "total_ht" in row["unavailable_fields"]
+    assert "total_ttc" not in row["unavailable_fields"]
+    assert "date_validity" not in row["unavailable_fields"]
+
+
+async def test_credit_notes_are_exported_as_objects(monkeypatch):
+    async def get(endpoint, params=None):
+        if endpoint.endswith("/payments"):
+            return []
+        return [{"id": 9, "type": "2", "total_ttc": -12, "fk_facture_source": 8}]
+
+    monkeypatch.setattr(server, "api_get", get)
+    data = json.loads(await server.dolibarr_list_invoices(status="all"))
+    assert data["credit_notes"][0]["id"] == 9
+    assert data["credit_notes"][0]["source_invoice_id"] == 8
+
+
+async def test_revenue_scan_refuses_partial_total(monkeypatch):
+    async def get(endpoint, params=None):
+        return [{"id": i, "total_ht": 10, "date": "2026-09-01"} for i in range(100)]
+
+    monkeypatch.setattr(server, "api_get", get)
+    monkeypatch.setattr(server, "REVENUE_SCAN_MAX_PAGES", 1)
+    data = await server.dolibarr_get_revenue_summary(year=2026, month=9)
+    assert "incomplet" in data.lower()
+    assert "ytd_ca_ht" not in data

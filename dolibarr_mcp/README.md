@@ -676,3 +676,39 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 
 Les agrégats sont calculés sur la sélection collectée, avant pagination de
 sortie. Ils ne sont complets que lorsque `scan_truncated=false`.
+
+### Champs financiers et paiements
+
+Les listes et détails de factures rendent `total_ht`, `total_ttc`, `status`,
+`date_due`, `remaining_to_pay`, `type`, `source_invoice_id` et
+`unavailable_fields`. Les propositions rendent aussi `date_validity`.
+Une valeur absente de la source est rendue `null` et nommée dans
+`unavailable_fields`. Une valeur explicitement `null` reste `null` sans y
+figurer. Zéro reste zéro, notamment pour le reste à payer et le statut brouillon.
+L'échéance fournisseur accepte `date_echeance` puis `date_lim_reglement`.
+Un reste inconnu n'est jamais remplacé par le total TTC.
+
+`include_payments=true` par défaut sur les listes et détails de factures lit
+les règlements détaillés de chaque facture rendue. `payments_total` additionne
+les règlements et les imputations renvoyés par la route, y compris avoirs et
+acomptes, ce n'est donc pas un encaissement bancaire. Une route refusée,
+inexistante ou invalide rend `payments=null`, avec `payments_error` et un
+champ indisponible explicite. `include_payments=false` évite ces appels
+supplémentaires et signale que les paiements n'ont pas été demandés.
+
+La liste client contient aussi `credit_notes`, les objets avoirs de la page
+rendue, avec leur facture source quand elle est connue. `credit_notes_count`
+compte ces objets. Ce tableau suit les mêmes filtres que `invoices` et n'est
+pas la liste des avoirs rattachés à chaque facture hors de la période.
+
+### Définition de la synthèse générique
+
+La réponse de `get_revenue_summary` rend un objet `definition` exploitable :
+statuts 1 et 2, date propre de chaque facture et de chaque avoir, bornes
+incluses sur l'année demandée. Les champs historiques `ytd_*` couvrent l'année
+entière, même si le mois demandé n'est pas décembre. `definition.ytd_scope`
+le rappelle. Le mois est une sélection séparée. La variante `encaissees`
+porte sur les opérations bancaires TTC, avec les exclusions déjà décrites.
+Un parcours de factures interrompu, répété ou invalide refuse désormais de
+publier un total financier. Aucune définition propre à une organisation ne
+remplace cette formule dans le cœur.

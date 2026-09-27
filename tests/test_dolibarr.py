@@ -119,7 +119,7 @@ class TestHelpers:
         exc = httpx.HTTPStatusError("", request=response.request, response=response)
         msg = _format_error(exc)
         assert "401" in msg
-        assert "clé API" in msg
+        assert "clef API" in msg
 
     def test_format_error_404(self) -> None:
         import httpx
@@ -335,7 +335,7 @@ class TestDolibarrInvoices:
                 "remaintopay": "1200.00",
             }
         ]
-        result = await dolibarr_list_invoices(status="unpaid")
+        result = await dolibarr_list_invoices(status="unpaid", include_payments=False)
         data = json.loads(result)
         assert data["count"] == 1
         assert data["invoices"][0]["total_ttc"] == 1200.0
@@ -346,7 +346,7 @@ class TestDolibarrInvoices:
             {"id": "1", "ref": "FA01", "total_ttc": "100.00", "fk_statut": "1"},
             {"id": "2", "ref": "FA02", "total_ttc": "5000.00", "fk_statut": "1"},
         ]
-        result = await dolibarr_list_invoices(min_amount=1000)
+        result = await dolibarr_list_invoices(min_amount=1000, include_payments=False)
         data = json.loads(result)
         assert data["count"] == 1
         assert data["invoices"][0]["ref"] == "FA02"
@@ -846,7 +846,7 @@ class TestListStatusLabels:
                 "date_lim_reglement": "1686182400",  # 2023-06-08
             }
         ]
-        data = json.loads(await dolibarr_list_invoices(status="unpaid"))
+        data = json.loads(await dolibarr_list_invoices(status="unpaid", include_payments=False))
         inv = data["invoices"][0]
         assert inv["status"] == "1"
         assert inv["status_label"] == "validée non payée"
@@ -858,7 +858,7 @@ class TestListStatusLabels:
             {"id": "1", "ref": "FA1", "socid": "1", "status": "1", "paye": "1",
              "total_ttc": "100", "total_ht": "100", "date": "1686096000"}
         ]
-        inv = json.loads(await dolibarr_list_invoices(status="all"))["invoices"][0]
+        inv = json.loads(await dolibarr_list_invoices(status="all", include_payments=False))["invoices"][0]
         assert inv["status_label"] == "payée"
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -867,7 +867,7 @@ class TestListStatusLabels:
             {"id": "5", "ref": "SI1", "ref_supplier": "X", "socid": "19",
              "status": "1", "paye": "0", "total_ttc": "6115.8", "date": "1740528000"}
         ]
-        inv = json.loads(await dolibarr_list_supplier_invoices())["invoices"][0]
+        inv = json.loads(await dolibarr_list_supplier_invoices( include_payments=False))["invoices"][0]
         assert inv["status_label"] == "validée non payée"
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -970,7 +970,7 @@ class TestGetDocumentLines:
             "lines": [{"id": str(i), "desc": f"L{i}", "qty": "1", "total_ht": "100"}
                       for i in range(25)],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         # plus de plafond à 20 : les 25 lignes sont présentes
         assert data["lines_count"] == 25
         assert len(data["lines"]) == 25
@@ -998,7 +998,7 @@ class TestGetDocumentLines:
             "lines": [{"id": "117", "desc": "Bilan 24h", "qty": "1",
                        "subprice": "2100", "total_ht": "2100", "product_type": "1"}],
         }
-        data = json.loads(await dolibarr_get_supplier_invoice(88))
+        data = json.loads(await dolibarr_get_supplier_invoice(88, include_payments=False))
         assert data["ref"] == "SI2602-0084"
         assert data["ref_supplier"] == "2026-89"
         assert data["label"] == "Bilan"
@@ -1014,14 +1014,14 @@ class TestGetDocumentLines:
             return {"id": "87", "ref": "SI2603-0085", "socid": "1",
                     "fk_statut": "1", "paye": "0", "lines": []}
         mock_api.side_effect = side_effect
-        data = json.loads(await dolibarr_get_supplier_invoice(0, "SI2603-0085"))
+        data = json.loads(await dolibarr_get_supplier_invoice(0, "SI2603-0085", include_payments=False))
         assert data["id"] == "87"
         assert data["lines_count"] == 0
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     async def test_get_supplier_invoice_not_found(self, mock_api: AsyncMock) -> None:
         mock_api.return_value = []
-        result = await dolibarr_get_supplier_invoice(0, "SI-INEXISTANT")
+        result = await dolibarr_get_supplier_invoice(0, "SI-INEXISTANT", include_payments=False)
         assert "Aucune facture fournisseur" in result
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -1030,7 +1030,7 @@ class TestGetDocumentLines:
             "id": "430", "ref": "FA1", "socid": "1", "fk_statut": "1", "paye": "0",
             "note_public": "Commande n&deg;655969&nbsp;<br>\nLimoges&nbsp;", "lines": [],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         assert "<br>" not in data["note_public"]
         assert "&nbsp;" not in data["note_public"]
         assert "Commande n°655969" in data["note_public"]
@@ -1189,7 +1189,7 @@ class TestDetailNotesRenderedWhole:
             "id": "430", "ref": "FA2609-0430", "socid": "1", "fk_statut": "1", "paye": "0",
             "note_public": note, "lines": [],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         self._assert_whole(data, "note_public", note)
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -1201,7 +1201,7 @@ class TestDetailNotesRenderedWhole:
             "id": "88", "ref": "SI2609-0088", "ref_supplier": "2026-89", "socid": "194",
             "fk_statut": "1", "paye": "0", "note_public": note, "lines": [],
         }
-        data = json.loads(await dolibarr_get_supplier_invoice(88))
+        data = json.loads(await dolibarr_get_supplier_invoice(88, include_payments=False))
         self._assert_whole(data, "note_public", note)
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -1264,7 +1264,7 @@ class TestDetailNotesRenderedWhole:
             "id": "430", "ref": "FA1", "socid": "1", "fk_statut": "1", "paye": "0",
             "note_public": None, "lines": [],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         assert data["note_public"] == ""
         assert data["note_public_length"] == 0
         assert data["note_public_truncated"] is False
@@ -3474,7 +3474,7 @@ class TestInvoiceListFilters:
     async def test_sorting_is_descending_on_the_invoice_date(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all")
+            await dolibarr_list_invoices(status="all", include_payments=False)
 
         params = get.call_args[0][1]
         assert params["sortfield"] == "t.datef,t.rowid"
@@ -3483,7 +3483,7 @@ class TestInvoiceListFilters:
     async def test_sort_asc_is_still_reachable(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", sort="asc")
+            await dolibarr_list_invoices(status="all", sort="asc", include_payments=False)
 
         assert get.call_args[0][1]["sortorder"] == "ASC"
 
@@ -3492,7 +3492,7 @@ class TestInvoiceListFilters:
             get.return_value = []
             await dolibarr_list_invoices(
                 status="all", date_start="2026-08-01", date_end="2026-08-31",
-            )
+             include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert "(t.datef:>=:'2026-08-01')" in criteria
@@ -3501,7 +3501,7 @@ class TestInvoiceListFilters:
     async def test_search_ref_is_a_partial_match(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", search_ref="2608-0939")
+            await dolibarr_list_invoices(status="all", search_ref="2608-0939", include_payments=False)
 
         assert "(t.ref:like:'%2608-0939%')" in get.call_args[0][1]["sqlfilters"]
 
@@ -3510,7 +3510,7 @@ class TestInvoiceListFilters:
             get.return_value = []
             await dolibarr_list_invoices(
                 status="unpaid", date_start="2026-01-01", search_ref="FA26",
-            )
+             include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert criteria.count(" and ") == 2
@@ -3520,7 +3520,7 @@ class TestInvoiceListFilters:
         """Le callback LIKE de Dolibarr rejette toute apostrophe dans la valeur."""
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", search_ref="O'Brien (2026)")
+            await dolibarr_list_invoices(status="all", search_ref="O'Brien (2026)", include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert criteria == "(t.ref:like:'%OBrien 2026%')"
@@ -3529,7 +3529,7 @@ class TestInvoiceListFilters:
     async def test_supplier_search_covers_the_supplier_own_reference(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_supplier_invoices(status="all", search_ref="F-2026")
+            await dolibarr_list_supplier_invoices(status="all", search_ref="F-2026", include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert "(t.ref:like:'%F-2026%')" in criteria
@@ -3539,7 +3539,7 @@ class TestInvoiceListFilters:
     async def test_supplier_list_sorts_descending_by_default(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_supplier_invoices(status="all")
+            await dolibarr_list_supplier_invoices(status="all", include_payments=False)
 
         params = get.call_args[0][1]
         assert params["sortfield"] == "t.datef,t.rowid"
@@ -3547,7 +3547,7 @@ class TestInvoiceListFilters:
 
     async def test_a_malformed_period_is_refused(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
-            msg = await dolibarr_list_invoices(date_start="août 2026")
+            msg = await dolibarr_list_invoices(date_start="août 2026", include_payments=False)
         assert "YYYY-MM-DD" in msg
         get.assert_not_called()
 
@@ -3595,8 +3595,9 @@ class TestRevenueSummaryBasis:
         assert params["limit"] == server.REVENUE_SCAN_PAGE
 
     async def test_every_page_is_read(self) -> None:
-        page = [self._invoice(1787011200, "100.00", "120.00")] * server.REVENUE_SCAN_PAGE
-        pages = iter([page, page[:3], [], []])
+        page = [dict(self._invoice(1787011200, "100.00", "120.00"), id=i)
+                for i in range(server.REVENUE_SCAN_PAGE + 3)]
+        pages = iter([page[:server.REVENUE_SCAN_PAGE], page[server.REVENUE_SCAN_PAGE:], [], []])
 
         with patch("dolibarr_mcp.server._api_get_list",
                    new=AsyncMock(side_effect=lambda *a, **k: next(pages))):
@@ -4537,7 +4538,7 @@ class TestCreditNotesAreNeverHidden:
     async def test_the_default_keeps_every_credit_note(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = self._rows()
-            data = json.loads(await dolibarr_list_invoices(status="all"))
+            data = json.loads(await dolibarr_list_invoices(status="all", include_payments=False))
 
         assert data["count"] == 3
         assert {i["ref"] for i in data["invoices"]} == {
@@ -4548,7 +4549,7 @@ class TestCreditNotesAreNeverHidden:
     async def test_an_explicit_threshold_still_filters(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = self._rows()
-            data = json.loads(await dolibarr_list_invoices(status="all", min_amount=1000))
+            data = json.loads(await dolibarr_list_invoices(status="all", min_amount=1000, include_payments=False))
 
         assert [i["ref"] for i in data["invoices"]] == ["FA2608-0940"]
 
@@ -4556,7 +4557,7 @@ class TestCreditNotesAreNeverHidden:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = [{"id": "1", "ref": "SI1", "total_ttc": "-500.00",
                                  "fk_statut": "2"}]
-            data = json.loads(await dolibarr_list_supplier_invoices(status="all"))
+            data = json.loads(await dolibarr_list_supplier_invoices(status="all", include_payments=False))
 
         assert data["count"] == 1
 
