@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "dolibarr-mcp",
   "display_name": "Dolibarr ERP",
-  "version": "1.7.6",
+  "version": "1.8.0",
   "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures clients et fournisseurs, propositions, banque, règlements, trésorerie, pièces jointes, tickets, comptes-rendus. API REST Dolibarr 16+.",
   "author": {
     "name": "inno³",

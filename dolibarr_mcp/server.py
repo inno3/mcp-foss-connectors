@@ -32,7 +32,10 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
+__version__ = "1.8.0"
+
 mcp = FastMCP("dolibarr")
+mcp._mcp_server.version = __version__
 
 DOLIBARR_URL = os.environ.get("DOLIBARR_URL", "")
 API_KEY = os.environ.get("DOLIBARR_API_KEY", "")
@@ -471,6 +474,105 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
+# Contrat commun des exports. Le plafond borne les appels HTTP, pas le rendu.
+EXPORT_SCAN_PAGE = 100
+EXPORT_SCAN_MAX_PAGES = 100
+
+
+class ExportRows(list):
+    """Lignes collectées et preuve de fin de balayage."""
+
+    complete = True
+    scan_note = ""
+
+
+def _unique_rows(rows: list, identity: str = "") -> list:
+    """Conserve la première occurrence de chaque identifiant connu."""
+    seen = set()
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Export invalide : un objet attendu par ligne.")
+        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id")
+        value = next((row[k] for k in keys if row.get(k) is not None), None)
+        if value is not None:
+            token = str(value)
+            if token in seen:
+                continue
+            seen.add(token)
+        result.append(row)
+    return result
+
+
+async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None) -> ExportRows:
+    """Lit des pages stables jusqu'à la fin, sans certifier un parcours interrompu.
+
+    Les routes sans pagination ne doivent pas passer par ce helper.
+    Une API qui ignore page est détectée au premier lot sans nouvel ID.
+    """
+    fetch = fetch or _api_get_list
+    base = dict(params or {})
+    base.pop("page", None)
+    base["limit"] = EXPORT_SCAN_PAGE
+    field = base.get("sortfield", "t.rowid")
+    if "rowid" not in field:
+        field += "," + (field.split(".")[0] + "." if "." in field else "") + "rowid"
+    base["sortfield"] = field
+    result = ExportRows()
+    fingerprints = set()
+    for page in range(EXPORT_SCAN_MAX_PAGES):
+        chunk = await fetch(endpoint, dict(base, page=page))
+        if not isinstance(chunk, list):
+            raise ValueError("Export invalide : la route ne renvoie pas une liste.")
+        fingerprint = _dumps(chunk)
+        if chunk and fingerprint in fingerprints:
+            result.complete = False
+            result.scan_note = "Page répétée par le serveur. Restreindre les filtres."
+            return result
+        fingerprints.add(fingerprint)
+        merged = _unique_rows([*result, *chunk])
+        if chunk and len(merged) == len(result):
+            result.complete = False
+            result.scan_note = "Aucun nouvel identifiant. Restreindre les filtres."
+            return result
+        result[:] = merged
+        if len(chunk) < EXPORT_SCAN_PAGE:
+            return result
+    result.complete = False
+    result.scan_note = "Plafond de balayage atteint. Restreindre les filtres."
+    return result
+
+
+def _cursor_offset(cursor: str, offset: int = 0) -> int:
+    if cursor:
+        if not cursor.isascii() or not cursor.isdecimal():
+            raise ValueError("Curseur invalide : reprendre next_cursor avec les mêmes filtres.")
+        return int(cursor)
+    return max(0, offset)
+
+
+def _export_payload(payload: dict, key: str, limit: int, cursor: str = "",
+                    *, scan=None, offset: int = 0, identity: str = "") -> dict:
+    """Pagination du résultat filtré. total=null signifie total non certifié."""
+    rows = _unique_rows(payload[key], identity)
+    start = _cursor_offset(cursor, offset)
+    size = _clamp_limit(limit)
+    shown = rows[start:start + size]
+    complete = getattr(scan, "complete", True)
+    more = start + len(shown) < len(rows)
+    payload.update({
+        key: shown, "total": len(rows) if complete else None,
+        "total_exact": complete, "total_lower_bound": len(rows),
+        "count": len(shown), "returned": len(shown),
+        "truncated": more or not complete, "scan_truncated": not complete,
+        "next_cursor": str(start + len(shown)) if more else None,
+        "limit": size, "offset": start,
+    })
+    if not complete:
+        payload["scan_note"] = getattr(scan, "scan_note", "Balayage incomplet.")
+    return payload
+
+
 def _sf_escape(value: str) -> str:
     """Escape a string value for use in Dolibarr sqlfilters (escapes single quotes)."""
     return str(value).replace("'", "''")
@@ -646,8 +748,7 @@ async def dolibarr_list_projects(
     status: str = "1",
     thirdparty_id: int = 0,
     search: str = "",
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les projets Dolibarr.
 
     Paramètres :
@@ -672,7 +773,7 @@ async def dolibarr_list_projects(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        projects = await _api_get_list("projects", params)
+        projects = await _scan_list("projects", params)
 
         results = []
         for p in projects:
@@ -693,14 +794,11 @@ async def dolibarr_list_projects(
                 if search.lower() not in haystack:
                     continue
             results.append(entry)
-            if len(results) >= clamp:
-                break
 
-        return _dumps({"count": len(results), "projects": results})
+        return _dumps(_export_payload({"count": len(results), "projects": results}, "projects", limit, cursor, scan=projects))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
@@ -758,8 +856,7 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 async def dolibarr_list_tasks(
     project_id: int = 0,
     assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les tâches d'un projet Dolibarr.
 
     Paramètres :
@@ -779,7 +876,7 @@ async def dolibarr_list_tasks(
         if not project_id:
             return "Veuillez fournir un project_id."
 
-        params: dict[str, Any] = {"limit": _clamp_limit(limit)}
+        params: dict[str, Any] = {}
         tasks = await api_get(f"projects/{project_id}/tasks", params)
 
         results = []
@@ -801,11 +898,10 @@ async def dolibarr_list_tasks(
                 continue
             results.append(entry)
 
-        return _dumps({"count": len(results), "tasks": results})
+        return _dumps(_export_payload({"count": len(results), "tasks": results}, "tasks", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # Routes du temps passé, vérifiées contre le swagger servi par l'API elle-même
 # (Dolibarr v23). Plusieurs routes se ressemblent, une seule accepte un POST :
@@ -1203,7 +1299,7 @@ async def dolibarr_log_time(
 
 
 @mcp.tool()
-async def dolibarr_list_task_contacts(task_id: int, role: str = "") -> str:
+async def dolibarr_list_task_contacts(task_id: int, role: str = "", limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les intervenants affectés à une tâche Dolibarr.
 
     Paramètres :
@@ -1231,15 +1327,14 @@ async def dolibarr_list_task_contacts(task_id: int, role: str = "") -> str:
         raw = await api_get(endpoint, params)
         contacts = [_format_task_contact(c) for c in raw if isinstance(c, dict)]
 
-        return _dumps({
+        return _dumps(_export_payload({
             "task_id": task_id,
             "count": len(contacts),
             "contacts": contacts,
-        })
+        }, "contacts", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 async def _task_role_codes() -> list[dict] | None:
     """Codes de rôle valides pour une tâche sur CETTE instance, ou None.
@@ -1476,6 +1571,7 @@ async def dolibarr_list_time_entries(
     date_start: str = "",
     date_end: str = "",
     limit: int = DEFAULT_LIMIT,
+    cursor: str = "",
 ) -> str:
     """Liste les écritures de temps d'une tâche ou de tout un projet.
 
@@ -1505,7 +1601,7 @@ async def dolibarr_list_time_entries(
         if task_id:
             task_ids = [int(task_id)]
         else:
-            tasks = await api_get(f"projects/{project_id}/tasks", {"limit": MAX_LIMIT})
+            tasks = await api_get(f"projects/{project_id}/tasks", {})
             task_ids = [int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")]
 
         entries: list[dict] = []
@@ -1519,6 +1615,7 @@ async def dolibarr_list_time_entries(
         if date_end:
             entries = [e for e in entries if e["date"] and e["date"] <= date_end]
 
+        entries = _unique_rows(entries)
         entries.sort(key=lambda e: (e["date"] or "", e["entry_id"] or 0))
 
         total_seconds = sum(e["seconds"] or 0 for e in entries)
@@ -1530,7 +1627,8 @@ async def dolibarr_list_time_entries(
             by_task[key] = by_task.get(key, 0) + (e["seconds"] or 0)
 
         capped = _clamp_limit(limit)
-        shown = entries[:capped]
+        shown = entries
+        paging = _export_payload({"entries": entries}, "entries", capped, cursor)
 
         return _dumps({
             "task_id": task_id or None,
@@ -1550,6 +1648,7 @@ async def dolibarr_list_time_entries(
                 for t, s in sorted(by_task.items(), key=lambda kv: -kv[1])
             },
             "entries": shown,
+            **paging,
         })
 
     except Exception as exc:
@@ -1859,8 +1958,7 @@ async def dolibarr_list_invoices(
     date_start: str = "",
     date_end: str = "",
     sort: str = "desc",
-    search_ref: str = "",
-) -> str:
+    search_ref: str = "", cursor: str = "",) -> str:
     """Liste les factures clients.
 
     Paramètres :
@@ -1911,7 +2009,7 @@ async def dolibarr_list_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await _api_get_list("invoices", params)
+        invoices = await _scan_list("invoices", params)
 
         from datetime import datetime
 
@@ -1951,21 +2049,18 @@ async def dolibarr_list_invoices(
                 "days_late": days_late,
                 "remaining_to_pay": float(inv.get("remaintopay") or total_ttc),
             })
-            if len(results) >= clamp:
-                break
 
-        return _dumps({
+        return _dumps(_export_payload({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
             "credit_notes_count": sum(1 for r in results if r["total_ttc"] < 0),
             "invoices": results,
-        })
+        }, "invoices", limit, cursor, scan=invoices))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_list_supplier_invoices(
@@ -1975,8 +2070,7 @@ async def dolibarr_list_supplier_invoices(
     date_start: str = "",
     date_end: str = "",
     sort: str = "desc",
-    search_ref: str = "",
-) -> str:
+    search_ref: str = "", cursor: str = "",) -> str:
     """Liste les factures fournisseur.
 
     Paramètres :
@@ -2016,7 +2110,7 @@ async def dolibarr_list_supplier_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await _api_get_list("supplierinvoices", params)
+        invoices = await _scan_list("supplierinvoices", params)
 
         from datetime import datetime
 
@@ -2047,24 +2141,22 @@ async def dolibarr_list_supplier_invoices(
                 "days_late": days_late,
             })
 
-        return _dumps({
+        return _dumps(_export_payload({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
             "invoices": results,
-        })
+        }, "invoices", limit, cursor, scan=invoices))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_list_proposals(
     status: str = "",
     thirdparty_id: int = 0,
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les propositions commerciales (devis).
 
     Paramètres :
@@ -2085,7 +2177,7 @@ async def dolibarr_list_proposals(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        proposals = await _api_get_list("proposals", params)
+        proposals = await _scan_list("proposals", params)
 
         results = []
         for p in proposals:
@@ -2101,11 +2193,10 @@ async def dolibarr_list_proposals(
                 "status_label": _format_proposal_status(p.get("fk_statut") or p.get("status") or p.get("statut")),
             })
 
-        return _dumps({"count": len(results), "proposals": results})
+        return _dumps(_export_payload({"count": len(results), "proposals": results}, "proposals", limit, cursor, scan=proposals))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # ---------------------------------------------------------------------------
 # Tools — Tiers
@@ -2120,8 +2211,7 @@ async def dolibarr_list_thirdparties(
     search_code: str = "",
     category: int = 0,
     limit: int = DEFAULT_LIMIT,
-    offset: int = 0,
-) -> str:
+    offset: int = 0, cursor: str = "",) -> str:
     """Liste les tiers (clients, fournisseurs, prospects).
 
     Paramètres :
@@ -2141,7 +2231,7 @@ async def dolibarr_list_thirdparties(
             "sortfield": "t.nom",
             "sortorder": "ASC",
             "limit": clamp,
-            "page": offset // clamp if offset > 0 else 0,
+            "page": 0,
         }
 
         filters = []
@@ -2162,7 +2252,7 @@ async def dolibarr_list_thirdparties(
         if category:
             params["category"] = category
 
-        thirdparties = await _api_get_list("thirdparties", params)
+        thirdparties = await _scan_list("thirdparties", params)
 
         results = []
         for tp in thirdparties:
@@ -2179,11 +2269,10 @@ async def dolibarr_list_thirdparties(
                 "status": tp.get("status"),
             })
 
-        return _dumps({"count": len(results), "thirdparties": results})
+        return _dumps(_export_payload({"count": len(results), "thirdparties": results}, "thirdparties", limit, cursor, scan=thirdparties, offset=offset))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
@@ -2551,8 +2640,7 @@ async def dolibarr_update_thirdparty(
 @mcp.tool()
 async def dolibarr_list_contacts(
     thirdparty_id: int,
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les contacts rattachés à un tiers.
 
     Paramètres :
@@ -2565,7 +2653,7 @@ async def dolibarr_list_contacts(
         if not thirdparty_id:
             return "Veuillez fournir un thirdparty_id."
 
-        contacts = await _api_get_list("contacts", {
+        contacts = await _scan_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -2585,17 +2673,17 @@ async def dolibarr_list_contacts(
                 "status": c.get("statut"),
             })
 
-        return _dumps({"thirdparty_id": thirdparty_id, "count": len(results), "contacts": results})
+        return _dumps(_export_payload({"thirdparty_id": thirdparty_id, "count": len(results), "contacts": results}, "contacts", limit, cursor, scan=contacts))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_search_contacts(
     search: str = "",
     email: str = "",
     limit: int = DEFAULT_LIMIT,
+    cursor: str = "",
 ) -> str:
     """Cherche un contact par email ou nom à travers tous les tiers.
 
@@ -2616,7 +2704,7 @@ async def dolibarr_search_contacts(
         if search:
             filters.append(f"(t.lastname:like:'%{_sf_escape(search)}%')")
 
-        contacts = await _api_get_list("contacts", {
+        contacts = await _scan_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -2635,7 +2723,7 @@ async def dolibarr_search_contacts(
                 "job_title": c.get("poste"),
             })
 
-        return _dumps({"count": len(results), "contacts": results})
+        return _dumps(_export_payload({"contacts": results}, "contacts", limit, cursor, scan=contacts))
 
     except Exception as exc:
         return _format_error(exc)
@@ -2780,8 +2868,7 @@ async def dolibarr_list_tickets(
     status: str = "",
     thirdparty_id: int = 0,
     severity: str = "",
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les tickets de support.
 
     Paramètres :
@@ -2827,7 +2914,7 @@ async def dolibarr_list_tickets(
         if filters:
             params["sqlfilters"] = " AND ".join(filters)
 
-        tickets = await _api_get_list("tickets", params)
+        tickets = await _scan_list("tickets", params)
 
         results = []
         for t in tickets:
@@ -2847,11 +2934,10 @@ async def dolibarr_list_tickets(
                 "assigned_to": t.get("fk_user_assign"),
             })
 
-        return _dumps({"count": len(results), "tickets": results})
+        return _dumps(_export_payload({"count": len(results), "tickets": results}, "tickets", limit, cursor, scan=tickets))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
@@ -3751,8 +3837,7 @@ async def dolibarr_list_actions_open(
     project_id: int = 0,
     thirdparty_id: int = 0,
     assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr.
 
     Retourne les actions non terminées (percent < 100), triées par date prévue ascendante.
@@ -3781,10 +3866,10 @@ async def dolibarr_list_actions_open(
             sql_parts.append(f"(t.fk_soc:=:{thirdparty_id})")
         params["sqlfilters"] = " AND ".join(sql_parts)
 
-        actions = await _api_get_list("agendaevents", params)
+        actions = await _scan_list("agendaevents", params)
 
         if not isinstance(actions, list):
-            return _dumps({"count": 0, "actions": []})
+            return _dumps(_export_payload({"count": 0, "actions": []}, "actions", limit, cursor, scan=actions))
 
         results = []
         for a in actions:
@@ -3810,11 +3895,10 @@ async def dolibarr_list_actions_open(
                 "fulldayevent": a.get("fulldayevent"),
             })
 
-        return _dumps({"count": len(results), "actions": results})
+        return _dumps(_export_payload({"count": len(results), "actions": results}, "actions", limit, cursor, scan=actions))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # ---------------------------------------------------------------------------
 # Tools — Dashboard
@@ -5717,7 +5801,7 @@ def _sort_bank_lines(lines: list, descending: bool) -> list:
 
 
 @mcp.tool()
-async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
+async def dolibarr_list_bank_accounts(include_closed: bool = False, limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les comptes bancaires avec leur solde courant.
 
     C'est la donnée qui alimente un suivi de trésorerie : libellé, type, numéro,
@@ -5735,7 +5819,7 @@ async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
     : il EXCLUT les écritures postdatées, pour coller au solde réel du compte.
     """
     try:
-        accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+        accounts = await _scan_list(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
         results = []
         total = 0.0
         for raw in accounts if isinstance(accounts, list) else []:
@@ -5747,16 +5831,15 @@ async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
             results.append(acc)
             total += float(acc.get("balance") or 0)
 
-        return _dumps({
+        return _dumps(_export_payload({
             "count": len(results),
             "total_balance": round(total, 2),
             "include_closed": include_closed,
             "accounts": results,
-        })
+        }, "accounts", limit, cursor, scan=accounts))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_list_bank_entries(
@@ -5768,6 +5851,7 @@ async def dolibarr_list_bank_entries(
     sort: str = "desc",
     with_links: bool = True,
     reconciled: str = "",
+    cursor: str = "",
 ) -> str:
     """Écritures d'un compte bancaire sur une période, solde cumulé compris.
 
@@ -5824,6 +5908,7 @@ async def dolibarr_list_bank_entries(
             _sf_and(_bank_date_filter(after=window_start, before=date_end), flags[wanted]),
         )
 
+        window = _unique_rows(window)
         response: dict[str, Any] = {
             "account_id": account_id,
             "date_start": window_start,
@@ -5837,7 +5922,7 @@ async def dolibarr_list_bank_entries(
                 f"{BANK_ENTRIES_DEFAULT_WINDOW_DAYS} jours appliquée."
             )
         if not window:
-            response.update({"count": 0, "entries": []})
+            response.update(_export_payload({"entries": []}, "entries", limit, cursor))
             return _dumps(response)
 
         ascending = _sort_bank_lines(window, descending=False)
@@ -5879,8 +5964,10 @@ async def dolibarr_list_bank_entries(
                 running_note = f"Solde cumulé non calculé : {_format_error(exc)}"
 
         ordered = _sort_bank_lines(window, descending=not str(sort).lower().startswith("a"))
-        start = max(0, offset)
-        page = ordered[start:start + _clamp_limit(limit)]
+        paging = _export_payload({"entries": ordered}, "entries", limit, cursor, offset=offset)
+        start = paging["offset"]
+        page = paging.pop("entries")
+        response.update(paging)
 
         entries = []
         for raw in page:
@@ -6593,7 +6680,7 @@ async def _invoice_payments(invoice_id: int, supplier: bool) -> list:
 
 
 @mcp.tool()
-async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False) -> str:
+async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False, limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Règlements rattachés à une facture, et écriture bancaire de chacun.
 
     Paramètres :
@@ -6629,17 +6716,16 @@ async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False
                 payment["bank_line_error"] = _format_error(exc)
 
         total = round(sum(float(p.get("amount") or 0) for p in payments), 2)
-        return _dumps({
+        return _dumps(_export_payload({
             "invoice_id": invoice_id,
             "supplier": supplier,
             "count": len(payments),
             "total_paid": total,
             "payments": payments,
-        })
+        }, "payments", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_add_invoice_payment(
@@ -7630,8 +7716,7 @@ async def dolibarr_list_documents(
     module: str,
     object_id: int = 0,
     ref: str = "",
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les pièces jointes d'un objet Dolibarr.
 
     Paramètres :
@@ -7652,7 +7737,6 @@ async def dolibarr_list_documents(
 
         params: dict[str, Any] = {
             "modulepart": _document_module(module),
-            "limit": _clamp_limit(limit),
         }
         # `id` est plus sûr que `ref` : il évite la résolution par référence, qui
         # échoue sur les brouillons dont la ref porte des parenthèses.
@@ -7691,7 +7775,7 @@ async def dolibarr_list_documents(
             for row in (rows if isinstance(rows, list) else [])
             if isinstance(row, dict)
         ]
-        return _dumps({
+        return _dumps(_export_payload({
             "success": True,
             "module": module,
             "modulepart_sent": params["modulepart"],
@@ -7699,11 +7783,10 @@ async def dolibarr_list_documents(
             "ref": ref or None,
             "count": len(documents),
             "documents": documents,
-        })
+        }, "documents", limit, cursor, identity="relative_path"))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_upload_document(
@@ -7881,8 +7964,7 @@ PRODUCTS_ENDPOINT = "products"
 async def dolibarr_list_users(
     search: str = "",
     include_disabled: bool = False,
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les utilisateurs Dolibarr (identifiants internes).
 
     Paramètres :
@@ -7906,7 +7988,7 @@ async def dolibarr_list_users(
         if not include_disabled:
             params["sqlfilters"] = "(t.statut:=:1)"
 
-        rows = await api_get(USERS_ENDPOINT, params)
+        rows = await _scan_list(USERS_ENDPOINT, params)
         needle = search.strip().lower()
         results = []
         for row in rows if isinstance(rows, list) else []:
@@ -7929,21 +8011,17 @@ async def dolibarr_list_users(
                 if needle not in haystack:
                     continue
             results.append({k: v for k, v in user.items() if v not in (None, "")})
-            if len(results) >= _clamp_limit(limit):
-                break
 
-        return _dumps({"count": len(results), "users": results})
+        return _dumps(_export_payload({"count": len(results), "users": results}, "users", limit, cursor, scan=rows))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_list_products(
     search: str = "",
     kind: str = "",
-    limit: int = DEFAULT_LIMIT,
-) -> str:
+    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les produits et services du catalogue Dolibarr.
 
     Paramètres :
@@ -7973,7 +8051,7 @@ async def dolibarr_list_products(
             needle = _sf_like(search)
             params["sqlfilters"] = f"((t.ref:like:'%{needle}%') or (t.label:like:'%{needle}%'))"
 
-        rows = await api_get(PRODUCTS_ENDPOINT, params)
+        rows = await _scan_list(PRODUCTS_ENDPOINT, params)
         results = []
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
@@ -7989,14 +8067,13 @@ async def dolibarr_list_products(
                 "on_sell": str(row.get("status") or "0") == "1",
             }.items() if v not in (None, "")})
 
-        return _dumps({"count": len(results), "kind": wanted or "tous", "products": results})
+        return _dumps(_export_payload({"count": len(results), "kind": wanted or "tous", "products": results}, "products", limit, cursor, scan=rows))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 @mcp.tool()
-async def dolibarr_list_payment_types() -> str:
+async def dolibarr_list_payment_types( limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Liste les modes de règlement actifs de l'instance (dictionnaire c_paiement).
 
     Sans paramètre. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
@@ -8010,11 +8087,10 @@ async def dolibarr_list_payment_types() -> str:
     try:
         types = await _payment_types()
         rows = sorted(types["by_code"].values(), key=lambda t: t["code"])
-        return _dumps({"count": len(rows), "payment_types": rows})
+        return _dumps(_export_payload({"count": len(rows), "payment_types": rows}, "payment_types", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # ---------------------------------------------------------------------------
 # Tools — Trésorerie : prévisionnel, virements internes, relevés
@@ -8258,8 +8334,7 @@ async def dolibarr_transfer_between_accounts(
 async def dolibarr_list_bank_statements(
     account_id: int,
     date_start: str = "",
-    date_end: str = "",
-) -> str:
+    date_end: str = "", limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
     """Recense les relevés déjà posés sur un compte, et les écritures restantes.
 
     Paramètres :
@@ -8308,7 +8383,7 @@ async def dolibarr_list_bank_statements(
             entry["last_date"] = max(entry["last_date"] or date, date or "")
 
         ordered = sorted(statements.values(), key=lambda s: s["last_date"], reverse=True)
-        return _dumps({
+        return _dumps(_export_payload({
             "account_id": account_id,
             "date_start": window_start,
             "date_end": date_end or None,
@@ -8318,11 +8393,10 @@ async def dolibarr_list_bank_statements(
             "unreconciled_entries": unreconciled,
             "last_statement": ordered[0]["num_releve"] if ordered else None,
             "statements": ordered,
-        })
+        }, "statements", limit, cursor, identity="num_releve"))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # ---------------------------------------------------------------------------
 # Point d'entrée

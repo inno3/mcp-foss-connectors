@@ -622,3 +622,57 @@ python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions \
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
+
+## Contrat des exports depuis 1.8.0
+
+Toutes les listes ci-dessous acceptent `limit` (20 par défaut, de 1 à 100)
+et `cursor` (vide au premier appel). Réutiliser `next_cursor` avec les mêmes
+filtres et le même tri. Le curseur est un décalage dans la liste dédoublonnée.
+Chaque appel relit les données. Il faut donc exporter une période stable pour
+obtenir une union reproductible, sans création ou suppression concurrente.
+
+Chaque réponse contient `total`, `returned`, `count`, `truncated`,
+`next_cursor`, `total_exact`, `total_lower_bound`, `scan_truncated`, `limit`
+et `offset`. `count` est toujours le nombre de lignes effectivement rendues.
+`total` compte les identifiants uniques après filtrage, sur toutes les pages.
+Ce n'est pas un compteur natif séparé, mais un décompte du parcours REST.
+`truncated` indique des lignes restant à rendre ou un parcours incomplet.
+`next_cursor=null` signifie qu'aucune autre page collectée n'est disponible.
+Si `scan_truncated=true`, `total=null` et `scan_note` explique la limite.
+Il faut alors restreindre les filtres, même sans curseur de suite.
+Une erreur HTTP ou une réponse de forme inattendue ne devient jamais une
+liste vide réussie.
+
+Les routes paginées sont lues par lots de 100, avec un plafond de 100 appels
+(`EXPORT_SCAN_PAGE`, `EXPORT_SCAN_MAX_PAGES`). Les IDs sont dédoublonnés avant
+la coupe et avant les filtres locaux. Le tri serveur ajoute `rowid` pour les
+égalités de dates ou de noms. Un serveur répétant une page est signalé.
+Les routes de collections complètes sont paginées localement.
+Les documents sont identifiés par chemin relatif, les relevés par numéro.
+Une ligne sans identifiant est conservée, sans fusion par ressemblance.
+
+| Outil, préfixe `dolibarr_` | Tableau et champs principaux | Filtres et statuts | Période et collecte |
+| --- | --- | --- | --- |
+| `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
+| `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet |
+| `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
+| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, collections complètes par tâche, agrégats sur toute la sélection |
+| `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
+| `list_supplier_invoices` | `invoices`, id, ref, ref_supplier, total_ttc, échéance, statut, retard | mêmes statuts, thirdparty_id, search_ref sur les deux références | mêmes bornes et tri que les factures clients |
+| `list_proposals` | `proposals`, id, ref, tiers, total_ht, total_ttc, date_validity, status | status vide tous, 0 brouillon, 1 validé, 2 signé, 3 refusé, 4 facturé, thirdparty_id | Toutes dates, datep décroissante, REST paginé |
+| `list_thirdparties` | `thirdparties`, id, nom, email, téléphone, ville, types, statut | type_filter customer, supplier, prospect, search, search_email, search_code, category | Toutes dates, nom croissant, offset conservé comme alternative au curseur |
+| `list_contacts` | `contacts`, id, identité, email, téléphone, poste | thirdparty_id obligatoire | Toutes dates, ID croissant, REST paginé |
+| `search_contacts` | `contacts`, id, identité, tiers, email, téléphone | search ou email obligatoire, union des critères | Toutes dates, ID croissant, REST paginé |
+| `list_tickets` | `tickets`, id, ref, sujet, statut, sévérité, tiers, assignation | status natif, thirdparty_id, severity | Toutes dates, REST paginé |
+| `list_actions_open` | `actions`, id, libellé, dates, progression, projet, tiers | project_id, thirdparty_id, assigned_to, actions non terminées | Toutes dates, REST paginé |
+| `list_bank_accounts` | `accounts`, id, libellé, type, devise, solde, rapprochement | include_closed faux par défaut | Comptes ouverts par défaut, REST paginé, solde agrégé sur la sélection |
+| `list_bank_entries` | `entries`, id, dates, montant signé, solde cumulé, rapprochement, liens | account_id obligatoire, reconciled yes, no ou vide, with_links, sort, offset | date_start et date_end incluses, début à 90 jours avant date_end ou aujourd'hui par défaut, collection complète de la fenêtre |
+| `list_invoice_payments` | `payments`, date, montant, mode, référence, type, ligne bancaire | invoice_id obligatoire, supplier faux par défaut | Tous règlements et imputations de la facture, collection complète |
+| `list_documents` | `documents`, name, relative_path, size, type, date | module et object_id ou ref obligatoires | Collection complète des pièces de l'objet |
+| `list_users` | `users`, id, login, identité, email, statut, employee | search local, include_disabled faux par défaut | Toutes dates, REST paginé |
+| `list_products` | `products`, id, ref, label, type, prix, TVA, on_sell | search, kind product, service ou vide | Toutes dates, REST paginé |
+| `list_payment_types` | `payment_types`, id, code, label | modes actifs | Dictionnaire complet |
+| `list_bank_statements` | `statements`, num_releve, dates, débits, crédits, rapprochement | account_id obligatoire | bornes incluses, début à 365 jours avant date_end ou aujourd'hui par défaut, regroupement de la fenêtre complète |
+
+Les agrégats sont calculés sur la sélection collectée, avant pagination de
+sortie. Ils ne sont complets que lorsque `scan_truncated=false`.

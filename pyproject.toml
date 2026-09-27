@@ -1,6 +1,6 @@
 [project]
 name = "mcp-foss-connectors"
-version = "0.1.0"
+version = "0.2.0"
 description = "Vendor-neutral MCP servers for free and open-source tools (Dolibarr, Kanboard, WordPress, n8n, Matrix, Nextcloud, HedgeDoc, GitLab)"
 readme = "README.md"
 requires-python = ">=3.11"

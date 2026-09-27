@@ -3477,7 +3477,7 @@ class TestInvoiceListFilters:
             await dolibarr_list_invoices(status="all")
 
         params = get.call_args[0][1]
-        assert params["sortfield"] == "t.datef"
+        assert params["sortfield"] == "t.datef,t.rowid"
         assert params["sortorder"] == "DESC"
 
     async def test_sort_asc_is_still_reachable(self) -> None:
@@ -3542,7 +3542,7 @@ class TestInvoiceListFilters:
             await dolibarr_list_supplier_invoices(status="all")
 
         params = get.call_args[0][1]
-        assert params["sortfield"] == "t.datef"
+        assert params["sortfield"] == "t.datef,t.rowid"
         assert params["sortorder"] == "DESC"
 
     async def test_a_malformed_period_is_refused(self) -> None:
