@@ -14,7 +14,7 @@ environment variables — no host, login or secret is baked into the code.
 | `DOLIBARR_WEB_LOGIN` | no | Login used **only** for the writes the REST API does not expose — today, bank reconciliation alone. Leave unset to disable that fallback. |
 | `DOLIBARR_WEB_PASSWORD` | no | Password for the account above. Needs the *bank → reconcile* permission. |
 
-## Tools (74)
+## Outils (78)
 
 - `dolibarr_list_projects` — Liste les projets Dolibarr
 - `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
@@ -727,3 +727,10 @@ identifiants web du compte autorisé. Laisser les deux variables web absentes
 pour le désactiver. Créer le compte technique et attribuer ses droits se fait
 dans Dolibarr, puis remplacer la clef dans la configuration du client MCP.
 La recette doit vérifier les droits propres à chaque module activé.
+
+Les montants de paiement absents sont aussi nommés dans `unavailable_fields`.
+Un total de paiements dont un montant manque reste `null`. La synthèse émise
+refuse également un montant ou une date absents. Pour les encaissements,
+`unresolved_entries` signale les liens bancaires illisibles et rend le résultat
+tronqué. Les appels MCP réussis ne produisent plus de journaux INFO sur stderr.
+Les avertissements et erreurs restent visibles.

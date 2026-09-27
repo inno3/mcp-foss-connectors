@@ -168,3 +168,76 @@ async def test_revenue_scan_refuses_partial_total(monkeypatch):
     data = await server.dolibarr_get_revenue_summary(year=2026, month=9)
     assert "incomplet" in data.lower()
     assert "ytd_ca_ht" not in data
+
+
+async def test_protocol_initialize_and_list_tools_in_memory(capsys):
+    import asyncio
+    from contextlib import suppress
+
+    import anyio
+    from mcp import ClientSession
+
+    client_write, server_read = anyio.create_memory_object_stream(10)
+    server_write, client_read = anyio.create_memory_object_stream(10)
+    task = asyncio.create_task(server.mcp._mcp_server.run(
+        server_read, server_write, server.mcp._mcp_server.create_initialization_options()))
+    try:
+        async with asyncio.timeout(5):
+            async with ClientSession(client_read, client_write) as session:
+                result = await session.initialize()
+                tools = await session.list_tools()
+                assert result.serverInfo.version == "1.8.0"
+                assert len(tools.tools) == 78
+                assert len({tool.name for tool in tools.tools}) == 78
+                proposal = next(t for t in tools.tools if t.name == "dolibarr_list_proposals")
+                assert "cursor" in proposal.inputSchema["properties"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    assert capsys.readouterr().err == ""
+
+
+async def test_revenue_missing_amount_is_not_zero(monkeypatch):
+    async def get(endpoint, params=None):
+        return [{"id": 1, "date": "2026-09-01", "total_ttc": 12}]
+
+    monkeypatch.setattr(server, "api_get", get)
+    result = await server.dolibarr_get_revenue_summary(year=2026, month=9)
+    assert "incomplet" in result.lower() and "ytd_ca_ht" not in result
+
+
+async def test_cash_unreadable_payment_links_are_announced(monkeypatch):
+    import httpx
+
+    async def get(endpoint, params=None):
+        if endpoint == "bankaccounts":
+            return [{"id": 1, "courant": 1}]
+        if endpoint.endswith("/lines"):
+            return [{"id": 7, "amount": 12, "dateo": "2026-09-01"}]
+        httpx.Response(403, request=httpx.Request("GET", "https://erp.example.test/links")).raise_for_status()
+
+    monkeypatch.setattr(server, "api_get", get)
+    result = json.loads(await server.dolibarr_get_revenue_summary(year=2026, month=9, basis="encaissees"))
+    assert result["truncated"] is True
+    assert result["unresolved_entries"] == 1
+
+
+def test_payment_amount_distinguishes_null_and_absent():
+    absent = server._format_payment({"id": 1})
+    null = server._format_payment({"id": 2, "amount": None})
+    assert absent["amount"] is null["amount"] is None
+    assert "amount" in absent["unavailable_fields"]
+    assert "amount" not in null["unavailable_fields"]
+
+
+async def test_task_contact_dedup_preserves_distinct_roles(monkeypatch):
+    async def get(endpoint, params=None):
+        manager = {"id": 7, "rowid": 1, "source": "internal", "code": "TASKEXECUTIVE"}
+        worker = {"id": 7, "rowid": 2, "source": "internal", "code": "TASKCONTRIBUTOR"}
+        return [manager, manager, worker]
+
+    monkeypatch.setattr(server, "api_get", get)
+    data = json.loads(await server.dolibarr_list_task_contacts(task_id=1))
+    assert data["total"] == 2
+    assert [c["link_id"] for c in data["contacts"]] == [1, 2]

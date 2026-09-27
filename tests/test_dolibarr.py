@@ -1680,7 +1680,7 @@ class TestTaskContacts:
 
     async def test_both_forms_of_the_role_are_returned(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
-            get.return_value = [_contact(7), _contact(5, "TASKEXECUTIVE")]
+            get.return_value = [_contact(7), dict(_contact(5, "TASKEXECUTIVE"), rowid=56)]
             data = json.loads(await dolibarr_list_task_contacts(task_id=42))
 
         assert data["count"] == 2

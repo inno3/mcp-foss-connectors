@@ -29,12 +29,12 @@ from mcp.server.fastmcp import FastMCP
 # Configuration
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
 __version__ = "1.8.0"
 
-mcp = FastMCP("dolibarr")
+mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
 
 DOLIBARR_URL = os.environ.get("DOLIBARR_URL", "")
@@ -493,7 +493,7 @@ def _unique_rows(rows: list, identity: str = "") -> list:
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Export invalide : un objet attendu par ligne.")
-        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id", "card_id")
+        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id", "card_id", "link_id")
         value = next((row[k] for k in keys if row.get(k) is not None), None)
         if value is not None:
             token = str(value)
@@ -818,17 +818,22 @@ async def _web_post(path: str, data: "list[tuple[str, str]]", query: str = "") -
 
 @mcp.tool()
 async def dolibarr_list_projects(
-    status: str = "1",
-    thirdparty_id: int = 0,
-    search: str = "",
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    status: str='1',
+    thirdparty_id: int=0,
+    search: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les projets Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 0=brouillon, 1=ouvert, 2=fermé (défaut : 1 = ouvert)
     - thirdparty_id : filtrer par tiers (0 = tous)
     - search : mot-clé dans le titre ou la référence
-    - limit : nombre max de résultats (défaut 50, max 100)
+    - limit : nombre max de résultats (défaut 20, max 100)
 
     Retourne : ref, titre, tiers, statut, dates, budget.
     """
@@ -927,10 +932,15 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
 @mcp.tool()
 async def dolibarr_list_tasks(
-    project_id: int = 0,
-    assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    project_id: int=0,
+    assigned_to: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les tâches d'un projet Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - project_id : ID du projet (obligatoire)
@@ -1374,8 +1384,16 @@ async def dolibarr_log_time(
 
 
 @mcp.tool()
-async def dolibarr_list_task_contacts(task_id: int, role: str = "", limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+async def dolibarr_list_task_contacts(
+    task_id: int,
+    role: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les intervenants affectés à une tâche Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
@@ -1649,6 +1667,9 @@ async def dolibarr_list_time_entries(
     cursor: str = "",
 ) -> str:
     """Liste les écritures de temps d'une tâche ou de tout un projet.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - task_id : ID d'une tâche (task_id OU project_id est obligatoire)
@@ -2026,15 +2047,24 @@ INVOICE_STATUS_FILTER = {"draft": "0", "validated": "1", "paid": "2", "unpaid": 
 
 @mcp.tool()
 async def dolibarr_list_invoices(
-    status: str = "unpaid",
-    thirdparty_id: int = 0,
-    min_amount: float = 0,
-    limit: int = DEFAULT_LIMIT,
-    date_start: str = "",
-    date_end: str = "",
-    sort: str = "desc",
-    search_ref: str = "", cursor: str = "", include_payments: bool = True,) -> str:
+    status: str='unpaid',
+    thirdparty_id: int=0,
+    min_amount: float=0,
+    limit: int=DEFAULT_LIMIT,
+    date_start: str='',
+    date_end: str='',
+    sort: str='desc',
+    search_ref: str='',
+    cursor: str='',
+    include_payments: bool=True,
+) -> str:
     """Liste les factures clients.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
@@ -2140,14 +2170,23 @@ async def dolibarr_list_invoices(
 
 @mcp.tool()
 async def dolibarr_list_supplier_invoices(
-    status: str = "unpaid",
-    thirdparty_id: int = 0,
-    limit: int = DEFAULT_LIMIT,
-    date_start: str = "",
-    date_end: str = "",
-    sort: str = "desc",
-    search_ref: str = "", cursor: str = "", include_payments: bool = True,) -> str:
+    status: str='unpaid',
+    thirdparty_id: int=0,
+    limit: int=DEFAULT_LIMIT,
+    date_start: str='',
+    date_end: str='',
+    sort: str='desc',
+    search_ref: str='',
+    cursor: str='',
+    include_payments: bool=True,
+) -> str:
     """Liste les factures fournisseur.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Paramètres :
     - status : 'unpaid', 'paid', 'draft', 'all'
@@ -2231,10 +2270,15 @@ async def dolibarr_list_supplier_invoices(
 
 @mcp.tool()
 async def dolibarr_list_proposals(
-    status: str = "",
-    thirdparty_id: int = 0,
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    status: str='',
+    thirdparty_id: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les propositions commerciales (devis).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 0=brouillon, 1=validé, 2=signé, 3=refusé, 4=facturé, vide=tous
@@ -2283,14 +2327,19 @@ async def dolibarr_list_proposals(
 
 @mcp.tool()
 async def dolibarr_list_thirdparties(
-    type_filter: str = "",
-    search: str = "",
-    search_email: str = "",
-    search_code: str = "",
-    category: int = 0,
-    limit: int = DEFAULT_LIMIT,
-    offset: int = 0, cursor: str = "",) -> str:
+    type_filter: str='',
+    search: str='',
+    search_email: str='',
+    search_code: str='',
+    category: int=0,
+    limit: int=DEFAULT_LIMIT,
+    offset: int=0,
+    cursor: str='',
+) -> str:
     """Liste les tiers (clients, fournisseurs, prospects).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - type_filter : 'customer' (client), 'supplier' (fournisseur), 'prospect', vide=tous
@@ -2718,8 +2767,13 @@ async def dolibarr_update_thirdparty(
 @mcp.tool()
 async def dolibarr_list_contacts(
     thirdparty_id: int,
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les contacts rattachés à un tiers.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - thirdparty_id : ID du tiers (obligatoire)
@@ -2764,6 +2818,9 @@ async def dolibarr_search_contacts(
     cursor: str = "",
 ) -> str:
     """Cherche un contact par email ou nom à travers tous les tiers.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : mot-clé dans nom/prénom
@@ -2943,11 +3000,16 @@ async def _fetch_ticket(ticket_id: int, ref: str) -> "dict[str, Any] | str":
 
 @mcp.tool()
 async def dolibarr_list_tickets(
-    status: str = "",
-    thirdparty_id: int = 0,
-    severity: str = "",
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    status: str='',
+    thirdparty_id: int=0,
+    severity: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les tickets de support.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 'not_read', 'read', 'assigned', 'in_progress', 'waiting' (=en
@@ -3698,6 +3760,9 @@ async def _invoices_in_range(date_start: str, date_end: str) -> list:
             raise ValueError("Balayage financier incomplet : page répétée.")
         rows = merged
         if len(chunk) < REVENUE_SCAN_PAGE:
+            if any(r.get("total_ht") is None or r.get("total_ttc") is None
+                   or not _ts_to_date(r.get("date")) for r in rows):
+                raise ValueError("Calcul incomplet : montant ou date de facture absent.")
             return rows
     raise ValueError("Balayage financier incomplet : plafond atteint, aucun total certifié.")
 
@@ -3710,7 +3775,7 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
     écritures créditrices portant un lien `payment`, celui que Dolibarr pose
     entre un règlement de facture client et sa ligne de banque.
     """
-    accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+    accounts = await _scan_list(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
     scanned: list[tuple[int, dict]] = []
     used_accounts = []
     for raw in accounts if isinstance(accounts, list) else []:
@@ -3728,7 +3793,7 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
             and _id_int(line.get("id") or line.get("rowid")) is not None
         )
 
-    truncated = len(scanned) > REVENUE_CASH_SCAN_MAX
+    truncated = len(scanned) > REVENUE_CASH_SCAN_MAX or not accounts.complete
     kept = scanned[:REVENUE_CASH_SCAN_MAX]
 
     links = await _gather_limited([
@@ -3737,8 +3802,11 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
     ])
 
     payments = []
+    unresolved = 0
     for (acc_id, line), resolved in zip(kept, links):
         if isinstance(resolved, Exception):
+            unresolved += 1
+            truncated = True
             logger.warning("Liens illisibles sur l'écriture %s : %s", line.get("id"), resolved)
             continue
         sources = resolved.get("sources") or []
@@ -3754,6 +3822,8 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
 
     return {
         "payments": payments,
+        "unresolved_entries": unresolved,
+        "accounts_complete": accounts.complete,
         "accounts_scanned": used_accounts,
         "entries_scanned": len(kept),
         "entries_matched": len(scanned),
@@ -3831,13 +3901,16 @@ async def dolibarr_get_revenue_summary(
                 "ytd_nb_payments": len(cash["payments"]),
                 "accounts_scanned": cash["accounts_scanned"],
                 "entries_scanned": cash["entries_scanned"],
+                "unresolved_entries": cash["unresolved_entries"],
+                "accounts_complete": cash["accounts_complete"],
             }
             if cash["truncated"]:
                 result["truncated"] = True
                 result["truncation_note"] = (
                     f"{cash['entries_matched']} écritures créditrices sur la période, "
                     f"{cash['entries_scanned']} inspectées (plafond REVENUE_CASH_SCAN_MAX). "
-                    "Les montants ci-dessus sont donc minorés : restreindre la période."
+                    f"{cash['unresolved_entries']} liens illisibles. "
+                    "Montants incomplets : vérifier les droits et restreindre la période."
                 )
             return _dumps(result)
 
@@ -3919,11 +3992,16 @@ def _month_last_day(year: int, month: int) -> str:
 
 @mcp.tool()
 async def dolibarr_list_actions_open(
-    project_id: int = 0,
-    thirdparty_id: int = 0,
-    assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    project_id: int=0,
+    thirdparty_id: int=0,
+    assigned_to: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Retourne les actions non terminées (percent < 100), triées par date prévue ascendante.
     Utile pour le suivi des engagements client et des actions projet.
@@ -4665,8 +4743,15 @@ def _format_doc_line(line: dict) -> dict:
 
 
 @mcp.tool()
-async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "", include_payments: bool = True,) -> str:
+async def dolibarr_get_invoice(
+    invoice_id: int=0,
+    ref: str='',
+    include_payments: bool=True,
+) -> str:
     """Détail d'une facture client par ID numérique ou par référence.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
     ref, tiers, montants HT/TTC/TVA, statut, échéance, paiements associés
@@ -4804,8 +4889,15 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
 
 
 @mcp.tool()
-async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "", include_payments: bool = True,) -> str:
+async def dolibarr_get_supplier_invoice(
+    invoice_id: int=0,
+    ref: str='',
+    include_payments: bool=True,
+) -> str:
     """Détail d'une facture FOURNISSEUR par ID numérique ou par référence.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
     ref (ref interne Dolibarr type SI2602-0084). Retourne ref interne, ref
@@ -5893,8 +5985,15 @@ def _sort_bank_lines(lines: list, descending: bool) -> list:
 
 
 @mcp.tool()
-async def dolibarr_list_bank_accounts(include_closed: bool = False, limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+async def dolibarr_list_bank_accounts(
+    include_closed: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les comptes bancaires avec leur solde courant.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     C'est la donnée qui alimente un suivi de trésorerie : libellé, type, numéro,
     solde, statut ouvert/clos et indicateur de rapprochement.
@@ -5946,6 +6045,9 @@ async def dolibarr_list_bank_entries(
     cursor: str = "",
 ) -> str:
     """Écritures d'un compte bancaire sur une période, solde cumulé compris.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - account_id : ID du compte (obligatoire, cf. dolibarr_list_bank_accounts)
@@ -6712,7 +6814,10 @@ def _format_payment(raw: dict) -> dict:
         "bank_line_id": bank_line,
         "has_bank_line": bank_line is not None,
     }
-    return {k: v for k, v in out.items() if v not in (None, "")}
+    result = {k: v for k, v in out.items() if v not in (None, "")}
+    result["amount"] = _num(raw.get("amount"))
+    result["unavailable_fields"] = [] if "amount" in raw else ["amount"]
+    return result
 
 
 async def _payable_invoice(invoice_id: int, supplier: bool) -> dict:
@@ -6775,8 +6880,16 @@ async def _invoice_payments(invoice_id: int, supplier: bool) -> list:
 
 
 @mcp.tool()
-async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False, limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+async def dolibarr_list_invoice_payments(
+    invoice_id: int,
+    supplier: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Règlements rattachés à une facture, et écriture bancaire de chacun.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - invoice_id : ID de la facture (obligatoire)
@@ -6810,7 +6923,8 @@ async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False
             except Exception as exc:
                 payment["bank_line_error"] = _format_error(exc)
 
-        total = round(sum(float(p.get("amount") or 0) for p in payments), 2)
+        total = (round(sum(float(p["amount"]) for p in payments), 2)
+                 if all(p.get("amount") is not None for p in payments) else None)
         return _dumps(_export_payload({
             "invoice_id": invoice_id,
             "supplier": supplier,
@@ -7809,10 +7923,15 @@ DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
 @mcp.tool()
 async def dolibarr_list_documents(
     module: str,
-    object_id: int = 0,
-    ref: str = "",
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    object_id: int=0,
+    ref: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les pièces jointes d'un objet Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
@@ -8057,10 +8176,15 @@ PRODUCTS_ENDPOINT = "products"
 
 @mcp.tool()
 async def dolibarr_list_users(
-    search: str = "",
-    include_disabled: bool = False,
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    search: str='',
+    include_disabled: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les utilisateurs Dolibarr (identifiants internes).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : filtre sur login, nom ou prénom (recherche partielle)
@@ -8114,10 +8238,15 @@ async def dolibarr_list_users(
 
 @mcp.tool()
 async def dolibarr_list_products(
-    search: str = "",
-    kind: str = "",
-    limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    search: str='',
+    kind: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les produits et services du catalogue Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : filtre sur la référence ou le libellé (recherche partielle)
@@ -8168,10 +8297,16 @@ async def dolibarr_list_products(
         return _format_error(exc)
 
 @mcp.tool()
-async def dolibarr_list_payment_types( limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+async def dolibarr_list_payment_types(
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les modes de règlement actifs de l'instance (dictionnaire c_paiement).
 
-    Sans paramètre. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    limit et cursor paginent les résultats. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
     'PRE'…), son identifiant numérique et son libellé.
 
     Les deux formes servent : les outils de règlement attendent l'identifiant,
@@ -8428,9 +8563,15 @@ async def dolibarr_transfer_between_accounts(
 @mcp.tool()
 async def dolibarr_list_bank_statements(
     account_id: int,
-    date_start: str = "",
-    date_end: str = "", limit: int = DEFAULT_LIMIT, cursor: str = "",) -> str:
+    date_start: str='',
+    date_end: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Recense les relevés déjà posés sur un compte, et les écritures restantes.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - account_id : ID du compte (obligatoire)
