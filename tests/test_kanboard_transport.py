@@ -91,6 +91,21 @@ def _http_403() -> httpx.HTTPStatusError:
     )
 
 
+@pytest.fixture(autouse=True)
+def _identite_deja_etablie(monkeypatch):
+    """Identité des deux comptes déjà vérifiée : ces tests portent sur le transport.
+
+    Depuis la 0.16.0, la première écriture d'un compte est précédée d'un `getMe`
+    (cf. `_ensure_account_identity()` et `tests/test_kanboard_identite_agent.py`).
+    Sans ce pré-remplissage, ce `getMe` consommerait la première étape des
+    scénarios ci-dessous, qui comptent les requêtes une par une.
+    """
+    monkeypatch.setattr(server, "_identity_cache", {
+        "primary": {"verified": True, "fatal": False, "user_id": 4, "username": "alice"},
+        "agent": {"verified": True, "fatal": False, "user_id": 84, "username": "bot"},
+    })
+
+
 @pytest.fixture
 def scripted(monkeypatch):
     """Installe un client scénarisé et supprime les délais de backoff."""

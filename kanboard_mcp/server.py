@@ -39,8 +39,10 @@ KANBOARD_URL = os.environ.get("KANBOARD_URL", "")
 # Le serveur supporte 2 jeux de credentials simultanement :
 #   - "primary" : compte humain principal — defaut pour la lecture
 #   - "agent"   : compte dedie a l'assistant IA — defaut pour les ecritures
-# Si KANBOARD_USER_ALT/KANBOARD_TOKEN_ALT sont vides, "agent" retombe sur "primary"
-# (retrocompat totale avec une config a un seul compte).
+# Si KANBOARD_USER_ALT/KANBOARD_TOKEN_ALT sont vides, "agent" est REFUSE (0.16.0) :
+# il retombait sur "primary" jusqu'a la 0.15.0, ce qui enregistrait sous le compte
+# humain des ecritures annoncees comme celles de l'assistant. Une configuration a un
+# seul compte reste valide : elle s'utilise avec as_user="primary" ou sans as_user.
 KANBOARD_USER = os.environ.get("KANBOARD_USER", "jsonrpc")
 KANBOARD_TOKEN = os.environ.get("KANBOARD_TOKEN", "")
 KANBOARD_USER_ALT = os.environ.get("KANBOARD_USER_ALT", "")
@@ -78,6 +80,9 @@ _request_id = 0
 _user_cache: dict[str, dict[int, str]] = {"primary": {}, "agent": {}}
 _my_id_cache: dict[str, int] = {}              # as_user -> user_id resolu
 _my_name_cache: dict[str, str] = {}            # as_user -> display name
+# Identite etablie par getMe avant le premier appel d'un compte, puis gardee.
+# compte -> {"verified": bool, "user_id": int, "username": str, "note": str}
+_identity_cache: dict[str, dict[str, Any]] = {}
 _column_cache: dict[int, dict[int, str]] = {}   # project_id -> {col_id -> name}
 _swimlane_cache: dict[int, dict[int, str]] = {}  # project_id -> {sw_id -> name}
 
@@ -110,14 +115,31 @@ def _resolve_account(as_user: str = "") -> str:
 def _get_credentials(as_user: str) -> tuple[str, str, str]:
     """Retourne (user, token, effective_account) pour le compte demande.
 
-    Si "agent" est demande mais ALT est vide, fallback transparent sur primary.
+    Aucun repli. Un "agent" demande sans identifiants agent leve
+    KanboardIdentityError plutot que de rendre ceux du compte primary : jusqu'a
+    la 0.15.0, ce repli rendait le libelle "primary" que personne ne lisait, et
+    les outils annoncaient le compte DEMANDE. Le 16/09/2026, des ecritures de
+    l'assistant se sont ainsi retrouvees enregistrees sous le compte humain,
+    avec une reponse qui disait `as_user: agent`.
     """
     account = _resolve_account(as_user)
     if account == "agent":
-        if KANBOARD_USER_ALT and KANBOARD_TOKEN_ALT:
-            return KANBOARD_USER_ALT, KANBOARD_TOKEN_ALT, "agent"
-        # Fallback retrocompat
-        return KANBOARD_USER, KANBOARD_TOKEN, "primary"
+        if not (KANBOARD_USER_ALT and KANBOARD_TOKEN_ALT):
+            missing = " et ".join(
+                name for name, value in (
+                    ("KANBOARD_USER_ALT", KANBOARD_USER_ALT),
+                    ("KANBOARD_TOKEN_ALT", KANBOARD_TOKEN_ALT),
+                ) if not value
+            )
+            raise KanboardIdentityError(
+                "agent",
+                f"{missing} n'est pas defini",
+                "Definir KANBOARD_USER_ALT et KANBOARD_TOKEN_ALT avec le token "
+                "PERSONNEL du compte de l'assistant. Demander as_user='primary' "
+                "reste possible, en sachant que l'appel sera signe du compte "
+                "humain : aucune substitution n'est faite a votre place.",
+            )
+        return KANBOARD_USER_ALT, KANBOARD_TOKEN_ALT, "agent"
     return KANBOARD_USER, KANBOARD_TOKEN, "primary"
 
 # ---------------------------------------------------------------------------
@@ -226,6 +248,26 @@ class KanboardAPIError(RuntimeError):
         ))
 
 
+class KanboardIdentityError(RuntimeError):
+    """L'identité du compte demandé n'est pas établie : aucun appel n'est émis.
+
+    Cette erreur remplace un repli. Une identité invalide n'est pas un
+    désagrément de configuration : c'est une traçabilité fausse, et une écriture
+    attribuée à quelqu'un d'autre ne se rattrape pas après coup. L'appel est donc
+    refusé avant d'atteindre le réseau, et `write_state` vaut « non appliquée » :
+    rejouer après correction est sans risque de doublon.
+    """
+
+    def __init__(self, account: str, reason: str, remedy: str = ""):
+        self.account = account
+        self.reason = reason
+        self.write_state = "non_appliquee"
+        super().__init__(_append_sentence(
+            f"Identité du compte '{account}' non établie : {reason}",
+            (" " + remedy) if remedy else "",
+        ))
+
+
 class KanboardTransportError(RuntimeError):
     """Échec réseau définitif, nommé même quand l'exception httpx est vide."""
 
@@ -272,6 +314,175 @@ def _parse_json_or_raise(resp: httpx.Response, method: str) -> Any:
         ) from exc
 
 
+async def _recorded_author(
+    read_method: str,
+    params: dict,
+    field: str,
+    expected_uid: int,
+    account: str,
+) -> tuple[dict[str, Any], str]:
+    """Relit l'auteur qu'un objet créé porte réellement côté Kanboard.
+
+    Une écriture acceptée ne prouve pas sous quel nom elle a été enregistrée : le
+    16/09/2026, la réponse annonçait l'auteur qu'on croyait écrire. Cette
+    relecture est le dernier filet, et le seul qui ne repose pas sur nos propres
+    suppositions.
+
+    Rend (champs à fusionner dans la réponse, message d'écart éventuel). Une
+    relecture impossible est dite (`author_read_error`) plutôt que silencieuse :
+    elle n'infirme pas l'écriture, elle laisse seulement la preuve manquante.
+    """
+    try:
+        obj = await kb_call(read_method, params, as_user=account)
+    except Exception as exc:  # noqa: BLE001 - l'écriture, elle, a réussi
+        return {"author_read_error": str(exc)}, ""
+    if not isinstance(obj, dict) or obj.get(field) in (None, ""):
+        return {"author_read_error": f"{read_method} n'a pas rendu {field}"}, ""
+    try:
+        recorded = int(obj.get(field) or 0)
+    except (TypeError, ValueError):
+        return {"author_read_error": f"{field} illisible : {obj.get(field)!r}"}, ""
+    out = {f"{field}_recorded" if field != "creator_id" else field: recorded}
+    if field == "user_id":
+        out = {"author_user_id_recorded": recorded}
+    mismatch = ""
+    if expected_uid > 0 and recorded != expected_uid:
+        mismatch = (f"Kanboard a enregistre l'auteur {recorded} alors que l'identite "
+                    f"verifiee du compte '{account}' est {expected_uid} : relire "
+                    "l'objet avant de s'appuyer sur cette ecriture.")
+    return out, mismatch
+
+
+async def _ensure_account_identity(account: str) -> dict[str, Any]:
+    """Établit par `getMe` qui parle réellement pour ce compte, une fois par processus.
+
+    `getMe` est la seule procédure qui réponde « qui est le porteur de CE token ».
+    `getUserByLoginName` et `getAllUsers` disent quel utilisateur porte un login
+    donné, ce qui est une autre question : un token primary déclaré sous le login
+    de l'agent leur paraît parfaitement valide. Ils ne peuvent donc pas fonder
+    une traçabilité, et ne servent ici de repli pour aucun contrôle.
+
+    Trois refus pour le compte « agent », chacun ferme une porte de l'incident du
+    16/09/2026 :
+
+    - login agent identique au login primary : une seule personne sous deux noms,
+      constatable sans appel ;
+    - `getMe` muet ou en erreur : identité inconnue, donc non établie ;
+    - `getMe` qui répond un autre login que `KANBOARD_USER_ALT`, ou l'identifiant
+      numérique déjà connu du compte primary : le token n'est pas celui qu'on
+      croit. C'est la forme invisible du défaut, celle qu'aucune relecture de
+      configuration n'attrape.
+
+    Le compte « primary », lui, n'est pas bloqué par un `getMe` indisponible : un
+    token applicatif n'y répond pas, et c'est l'usurpation de l'agent qui était le
+    risque. La vérification manquante est alors déclarée (`verified: False`,
+    `note`), et reste lisible dans `kanboard_who_am_i`. En revanche, un `getMe`
+    qui répond un AUTRE login que `KANBOARD_USER` est un refus : les écritures
+    « humaines » partiraient sous un autre nom.
+
+    Retourne l'entrée de cache. Lève KanboardIdentityError sur refus.
+    """
+    cached = _identity_cache.get(account)
+    if cached is not None:
+        if not cached["verified"] and cached.get("fatal"):
+            raise KanboardIdentityError(account, cached["reason"], cached.get("remedy", ""))
+        return cached
+
+    # Lève déjà si le compte agent n'a pas d'identifiants propres.
+    user, _token, effective = _get_credentials(account)
+
+    if effective == "agent" and user.strip().lower() == KANBOARD_USER.strip().lower():
+        entry = {
+            "verified": False,
+            "fatal": True,
+            "user_id": 0,
+            "username": user,
+            "reason": (f"le login agent et le login primary sont le meme ({user}) : "
+                       "toute ecriture « agent » serait enregistree sous le compte humain"),
+            "remedy": ("Donner a l'assistant son propre compte Kanboard et son token "
+                       "personnel, puis renseigner KANBOARD_USER_ALT avec ce login."),
+        }
+        _identity_cache[account] = entry
+        raise KanboardIdentityError(account, entry["reason"], entry["remedy"])
+
+    me: dict | None = None
+    probe_error = ""
+    try:
+        me = await kb_call("getMe", as_user=effective)
+    except Exception as exc:  # noqa: BLE001 - le motif exact est rendu tel quel
+        probe_error = str(exc)
+
+    uid = 0
+    username = ""
+    if isinstance(me, dict):
+        try:
+            uid = int(me.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            uid = 0
+        username = str(me.get("username") or "")
+
+    expected = user.strip().lower()
+    got = username.strip().lower()
+
+    if uid <= 0 or got == "":
+        reason = (f"getMe n'a pas rendu d'identite pour le login declare '{user}'"
+                  + (f" ({probe_error})" if probe_error else ""))
+        if effective == "agent":
+            entry = {
+                "verified": False, "fatal": True, "user_id": 0, "username": user,
+                "reason": reason,
+                "remedy": ("Verifier que KANBOARD_TOKEN_ALT est le token PERSONNEL du "
+                           "compte de l'assistant (Kanboard > Profil > Gestion des API) "
+                           "et non un token applicatif : seul un token personnel repond "
+                           "getMe, et seul getMe prouve qui ecrit."),
+            }
+            _identity_cache[account] = entry
+            raise KanboardIdentityError(account, entry["reason"], entry["remedy"])
+        # Compte humain : l'appel passe, mais la verification est declaree absente.
+        entry = {
+            "verified": False, "fatal": False,
+            "user_id": _my_id_cache.get("primary", 0), "username": user,
+            "note": reason + ". Les ecritures partent sous ce token sans que "
+                             "Kanboard ait confirme son porteur.",
+        }
+        _identity_cache[account] = entry
+        return entry
+
+    if got != expected:
+        reason = (f"le token declare pour '{user}' authentifie en realite "
+                  f"'{username}' (user_id {uid})")
+        entry = {
+            "verified": False, "fatal": True, "user_id": uid, "username": username,
+            "reason": reason,
+            "remedy": ("Reprendre le token du bon compte : le login declare et le "
+                       "porteur du token doivent etre la meme personne."),
+        }
+        _identity_cache[account] = entry
+        raise KanboardIdentityError(account, reason, entry["remedy"])
+
+    other = _identity_cache.get("primary") if effective == "agent" else None
+    known_primary = (other or {}).get("user_id") or _my_id_cache.get("primary", 0)
+    if effective == "agent" and known_primary and uid == int(known_primary):
+        reason = (f"le compte agent et le compte primary portent le meme user_id "
+                  f"({uid}) : ce sont deux noms pour un seul utilisateur")
+        entry = {
+            "verified": False, "fatal": True, "user_id": uid, "username": username,
+            "reason": reason,
+            "remedy": ("Creer un utilisateur Kanboard distinct pour l'assistant et "
+                       "utiliser son token personnel."),
+        }
+        _identity_cache[account] = entry
+        raise KanboardIdentityError(account, reason, entry["remedy"])
+
+    entry = {"verified": True, "fatal": False, "user_id": uid, "username": username}
+    _identity_cache[account] = entry
+    # Le cache de resolution partage la meme verite : eviter un second getMe.
+    _my_id_cache.setdefault(account, uid)
+    if isinstance(me, dict):
+        _my_name_cache.setdefault(account, me.get("name") or username)
+    return entry
+
+
 async def kb_call(method: str, params: dict | None = None, as_user: str = "") -> Any:
     """Appel JSON-RPC 2.0 à l'API Kanboard avec rejeu et backoff exponentiel.
 
@@ -288,6 +499,12 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     Limite : une écriture partie dont la réponse est perdue laisse un état
     indécidable côté client. Il faut relire l'objet avant de rejouer ; le
     journal rappelle aussi les écritures déjà réussies dans cet appel d'outil.
+
+    Avant la PREMIÈRE écriture d'un compte dans le processus, l'identité du token
+    est établie par `getMe` (cf. `_ensure_account_identity()`). Une identité non
+    établie interdit l'écriture, sans repli : rien ne part sur le réseau. Les
+    lectures ne déclenchent pas cette vérification, mais un compte « agent » sans
+    identifiants propres leur est refusé aussi, faute d'identifiants à employer.
     """
     global _request_id
     _request_id += 1
@@ -295,6 +512,10 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     journal = _write_journal()
     mutating = _is_mutating_method(method)
     user, token, account = _get_credentials(as_user)
+    if mutating:
+        # Levée volontairement AVANT toute requête : une écriture dont on ne peut
+        # pas nommer l'auteur ne doit pas exister.
+        await _ensure_account_identity(account)
     auth = base64.b64encode(f"{user}:{token}".encode()).decode()
     payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": _request_id}
     if params:
@@ -378,7 +599,11 @@ def _format_error(exc: Exception) -> str:
     Une exception vide garde son type et un libellé : l'appelant doit pouvoir
     distinguer une défaillance réseau d'un refus et décider quoi relire.
     """
-    if isinstance(exc, KanboardTransportError):
+    if isinstance(exc, KanboardIdentityError):
+        # Pas de « Erreur réseau » ni de conseil de rejeu : rien n'est parti, et
+        # rejouer à l'identique redonnera le même refus jusqu'à correction.
+        message = f"Refus : {exc}"
+    elif isinstance(exc, KanboardTransportError):
         message = f"Erreur réseau {exc}"
     elif isinstance(exc, KanboardAPIError):
         message = f"Erreur {exc}"
@@ -1716,8 +1941,12 @@ async def kanboard_add_comment(
     if not comment:
         return "Erreur : comment est obligatoire."
     try:
+        # Le compte SERVI, pas le compte demande : `_resolve_account()` rendait
+        # ce qui avait ete demande, et la reponse annoncait donc « agent » pour
+        # une ecriture partie en primary (incident du 16/09/2026).
+        _user, _token, account = _get_credentials(as_user)
         # Recuperer l'ID de l'utilisateur courant pour ce compte
-        uid, err = await _get_my_user_id(as_user=as_user)
+        uid, err = await _get_my_user_id(as_user=account)
         if uid <= 0:
             return f"Erreur : impossible de recuperer l'utilisateur courant. {err}"
 
@@ -1725,16 +1954,24 @@ async def kanboard_add_comment(
             "task_id": task_id,
             "user_id": uid,
             "content": comment,
-        }, as_user=as_user)
+        }, as_user=account)
 
         if comment_id:
-            return _dumps({
+            out: dict[str, Any] = {
                 "success": True,
                 "comment_id": comment_id,
                 "task_id": task_id,
-                "as_user": _resolve_account(as_user),
+                "as_user": account,
                 "author_user_id": uid,
-            })
+            }
+            # Relecture de l'auteur tel que Kanboard l'a enregistre : c'est la
+            # seule preuve. Une relecture impossible se dit, elle ne s'invente pas.
+            recorded, mismatch = await _recorded_author(
+                "getComment", {"comment_id": comment_id}, "user_id", uid, account)
+            out.update(recorded)
+            if mismatch:
+                out["author_mismatch"] = mismatch
+            return _dumps(out)
         else:
             return "Echec de la creation du commentaire."
     except Exception as exc:
@@ -1921,7 +2158,22 @@ async def kanboard_create_task(
         task_id = await kb_call("createTask", params, as_user=as_user)
 
         if task_id:
-            return _dumps({"success": True, "task_id": task_id, "project_id": project_id, "title": title})
+            # Le compte servi, et l'auteur que Kanboard a reellement enregistre.
+            _u, _t, account = _get_credentials(as_user)
+            expected = int((_identity_cache.get(account) or {}).get("user_id") or 0)
+            out: dict[str, Any] = {
+                "success": True,
+                "task_id": task_id,
+                "project_id": project_id,
+                "title": title,
+                "as_user": account,
+            }
+            recorded, mismatch = await _recorded_author(
+                "getTask", {"task_id": task_id}, "creator_id", expected, account)
+            out.update(recorded)
+            if mismatch:
+                out["author_mismatch"] = mismatch
+            return _dumps(out)
         else:
             return "Echec de la creation de la tache."
     except Exception as exc:
@@ -3083,7 +3335,7 @@ def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detai
         hint += f"Reessayer avec as_user='{_other_account(account)}'."
     else:
         # Sans second compte configure, suggerer "l'autre compte" enverrait
-        # sur une fausse piste : tout retombe sur primary.
+        # sur une fausse piste : il n'existe pas.
         hint += (
             "Aucun second compte n'est configure (KANBOARD_USER_ALT/"
             "KANBOARD_TOKEN_ALT vides) : le commentaire appartient a un autre "
@@ -3187,9 +3439,9 @@ async def kanboard_update_comment(
     if not comment:
         return "Erreur : comment est obligatoire."
     try:
-        # Compte *effectif* : si "agent" n'est pas configure, l'ecriture est
-        # signee par primary. Diagnostiquer sur le compte demande enverrait
-        # sur une fausse piste ("reessayer avec primary" alors qu'on y etait).
+        # Compte *effectif*, seul nom qui puisse figurer dans le diagnostic.
+        # Depuis la 0.16.0 il ne peut plus differer du compte demande : un "agent"
+        # non configure leve avant d'arriver ici, au lieu de signer en primary.
         _, _, account = _get_credentials(as_user)
 
         # Relecture prealable : sans elle, l'ancien texte est perdu sans recours.
@@ -3634,9 +3886,22 @@ async def kanboard_who_am_i(as_user: str = "") -> str:
     Parametres :
     - as_user : "primary" (humain), "agent" (assistant IA), "" (defaut configure)
 
-    Retourne le user_id, username, nom et les erreurs eventuelles.
+    Retourne le user_id, username, nom, l'etat de la verification d'identite
+    (`identity_verified`) et les erreurs eventuelles. Un compte dont l'identite
+    n'est pas etablie est dit tel quel : c'est un diagnostic, il ne provoque pas
+    d'appel sous une autre identite et n'expose pas celle du compte primary.
     """
-    user, _, account = _get_credentials(as_user)
+    try:
+        user, _, account = _get_credentials(as_user)
+    except KanboardIdentityError as exc:
+        # Ne rien emettre : le diagnostic d'un compte non configure ne doit pas
+        # rendre l'identite du compte humain, ce que faisait le repli.
+        return _dumps({
+            "as_user_requested": as_user or "(default)",
+            "effective_account": _resolve_account(as_user),
+            "identity_verified": False,
+            "identity_error": str(exc),
+        })
     results: dict[str, Any] = {"as_user_requested": as_user or "(default)", "effective_account": account}
 
     # Essai getMe
@@ -3668,6 +3933,16 @@ async def kanboard_who_am_i(as_user: str = "") -> str:
     results["resolved_user_id"] = uid
     if err:
         results["resolution_error"] = err
+
+    # Ce que vaut cette identite pour une ecriture : c'est la question utile.
+    try:
+        identity = await _ensure_account_identity(account)
+        results["identity_verified"] = bool(identity.get("verified"))
+        if identity.get("note"):
+            results["identity_note"] = identity["note"]
+    except KanboardIdentityError as exc:
+        results["identity_verified"] = False
+        results["identity_error"] = str(exc)
 
     return _dumps(results)
 
@@ -3726,10 +4001,13 @@ async def kanboard_list_accounts() -> str:
         accounts["agent"] = {
             "login": KANBOARD_USER_ALT or "(non configure)",
             "token_set": bool(KANBOARD_TOKEN_ALT),
-            "status": "fallback_to_primary",
-            "note": ("Le compte 'agent' n'est pas configure. Tout appel as_user='agent' "
-                     "utilisera le compte primary. Pour activer un compte separe : definir "
-                     "KANBOARD_USER_ALT et KANBOARD_TOKEN_ALT."),
+            "status": "unconfigured",
+            "note": ("Le compte 'agent' n'est pas configure : tout appel "
+                     "as_user='agent' est refuse, en lecture comme en ecriture. "
+                     "Jusqu'a la 0.15.0 il repartait avec le compte primary, ce qui "
+                     "attribuait au compte humain des ecritures de l'assistant. "
+                     "Pour activer un compte separe : definir KANBOARD_USER_ALT et "
+                     "KANBOARD_TOKEN_ALT avec le token PERSONNEL de ce compte."),
         }
 
     return _dumps({

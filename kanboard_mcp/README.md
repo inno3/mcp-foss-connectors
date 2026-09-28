@@ -12,7 +12,7 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_URL` | yes | URL of the JSON-RPC endpoint, e.g. `https://kanboard.example.com/jsonrpc.php`. |
 | `KANBOARD_USER` | yes | Login of the primary (human) account. Used by default for reads. |
 | `KANBOARD_TOKEN` | yes | Personal API token of the primary account (Kanboard → Profile → API). |
-| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Empty → falls back to the primary account. |
+| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Empty means `as_user="agent"` is **refused**, never served by the primary account (see Multi-account model). |
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
@@ -155,8 +155,45 @@ closest one, saying when the gap is only accents, case or typographic variants.
 
 Write tools accept an `as_user` argument (`primary` | `agent`). This lets a human
 and an AI agent share the same MCP server while keeping a correct authorship
-trail on comments and task changes. If the agent account is not configured, all
-calls transparently fall back to the primary account.
+trail on comments and task changes.
+
+### An identity that cannot be established forbids the call (0.16.0)
+
+Up to 0.15.0, `as_user="agent"` silently fell back to the primary account when
+`KANBOARD_USER_ALT` or `KANBOARD_TOKEN_ALT` was missing, and the answer still
+said `as_user: agent`. The authorship trail it was there to protect was the one
+thing it broke. On 16/09/2026 writes meant for an assistant account ended up
+recorded under the human one, with no warning anywhere.
+
+There is no fallback any more. Four rules now hold:
+
+1. `as_user="agent"` without its own credentials is refused, for reads as well as
+   writes, with an error naming the two variables to set. Nothing reaches the
+   network. A single-account setup stays perfectly valid: use `as_user="primary"`,
+   or leave `as_user` empty.
+2. Before a given account's **first write** in the process, the identity behind the
+   token is established with `getMe`, then cached. `getUserByLoginName` and
+   `getAllUsers` are not used for this: they say which user carries a login, never
+   which user a token authenticates, so they cannot ground an authorship claim.
+3. Three configurations are refused for the agent account, because each one means
+   writes would be recorded under the human account: the same login as the primary
+   account; a token that `getMe` reports under another login; and a `user_id` equal
+   to the primary account's. A `getMe` that stays silent is a refusal too.
+4. Every answer reports the account **actually used**, and creations report the
+   author Kanboard actually recorded, re-read from the object
+   (`author_user_id_recorded` on comments, `creator_id` on tasks). A gap between
+   the verified identity and the recorded author is stated as `author_mismatch`.
+
+The primary account is treated less strictly on one point only: an application
+token does not answer `getMe`, and blocking the human account over that would be a
+regression for no gain, since impersonating the assistant was the risk. The missing
+verification is then declared rather than assumed, and `kanboard_who_am_i` reports
+`identity_verified: false` with the reason. A `getMe` that answers **another** login
+than `KANBOARD_USER` is still a refusal.
+
+`kanboard_who_am_i` and `kanboard_list_accounts` are the diagnostic path. Neither
+discloses the primary account's identity when the agent account is the one being
+asked about and is unconfigured.
 
 ### Editing and deleting comments: authorship applies
 
