@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
   "author": {
     "name": "inno³",
@@ -125,7 +125,7 @@
     },
     {
       "name": "kanboard_list_tasks",
-      "description": "Tâches d'un projet"
+      "description": "Tâches d'un projet (dates de création et de modification, filtre modified_before)"
     },
     {
       "name": "kanboard_get_task",
@@ -137,7 +137,7 @@
     },
     {
       "name": "kanboard_get_board",
-      "description": "État du board Kanban"
+      "description": "État du board Kanban (paramètre status, cartes actives par défaut)"
     },
     {
       "name": "kanboard_create_task",
