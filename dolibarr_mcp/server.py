@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -632,11 +632,125 @@ async def _with_invoice_payments(row: dict, supplier: bool, include_payments: bo
     row.setdefault("unavailable_fields", []).append("payments")
 
 
+PAYMENT_TERMS_NOTE = (
+    "Les échéances à date de facture + 1 jour sont un défaut Dolibarr et non une échéance "
+    "négociée, donc days_late surévalue le retard de règlement."
+)
+
+
+def _due_date_is_default(date_invoice: str, date_due: str) -> bool | None:
+    """Une date illisible ne permet pas d'écarter une échéance par défaut."""
+    from datetime import date
+
+    try:
+        return (date.fromisoformat(date_due) - date.fromisoformat(date_invoice)).days == 1
+    except (TypeError, ValueError):
+        return None
+
+
+def _payment_term_values(row: dict, dictionnaire: dict) -> dict:
+    """Résout la condition portée par l'objet, sans hériter de celle d'un autre objet."""
+    identifiant = _first_present(row, "cond_reglement_id", "cond_reglement", "fk_cond_reglement")
+    code = _first_present(row, "cond_reglement_code") or None
+    libelle = _first_present(row, "cond_reglement_label", "cond_reglement_doc") or None
+    valeurs = {
+        "cond_reglement_id": _id_int(identifiant) or None,
+        "cond_reglement_code": code,
+        "cond_reglement_label": libelle,
+    }
+    entree = dictionnaire["by_id"].get(str(valeurs["cond_reglement_id"]))
+    if entree is None and code:
+        entree = dictionnaire["by_code"].get(str(code).upper())
+    if entree:
+        for champ in ("id", "code", "label"):
+            clef = "cond_reglement_" + champ
+            if valeurs[clef] is None:
+                valeurs[clef] = entree[champ] or None
+    # L'absence de condition sur un objet lu est connue. Une condition partielle
+    # reste en revanche incomplète si le dictionnaire ne permet pas de la résoudre.
+    valeurs["unavailable_fields"] = (
+        [clef for clef, valeur in valeurs.items() if valeur is None]
+        if identifiant not in (None, "", 0, "0") or code or libelle else []
+    )
+    return valeurs
+
+
+async def _payment_terms_fields(row: dict, thirdparty_cache: dict, include: bool) -> dict:
+    """Une lecture complémentaire refusée ne doit pas masquer la facture elle-même."""
+    champs = ("cond_reglement_id", "cond_reglement_code", "cond_reglement_label")
+    resultat = dict.fromkeys((*champs, *("thirdparty_" + clef for clef in champs),
+                              "date_due_is_default"))
+    resultat["unavailable_fields"] = []
+    if not include:
+        resultat["unavailable_fields"] = [c for c in resultat if c != "unavailable_fields"]
+        resultat["payment_terms_error"] = "Lecture non demandée (include_payment_terms=false)."
+        return resultat
+
+    dictionnaire = await _payment_terms()
+    resultat.update(_payment_term_values(row, dictionnaire))
+    if dictionnaire["error"]:
+        resultat["payment_terms_unavailable"] = dictionnaire["error"]
+    resultat["date_due_is_default"] = _due_date_is_default(
+        _ts_to_date(_first_present(row, "date", "datef")),
+        _ts_to_date(_first_present(row, "date_echeance", "date_lim_reglement")),
+    )
+    if resultat["date_due_is_default"] is None:
+        resultat["unavailable_fields"].append("date_due_is_default")
+    elif resultat["date_due_is_default"]:
+        resultat["payment_terms_note"] = PAYMENT_TERMS_NOTE
+
+    identifiant_tiers = _id_int(_first_present(row, "socid", "thirdparty_id", "fk_soc"))
+    if not identifiant_tiers:
+        resultat["thirdparty_payment_terms_error"] = "Identifiant de tiers absent ou illisible."
+    else:
+        if identifiant_tiers not in thirdparty_cache:
+            try:
+                tiers = await api_get(f"thirdparties/{identifiant_tiers}")
+                if not isinstance(tiers, dict) or "error" in tiers:
+                    raise ValueError("Réponse tiers illisible.")
+                thirdparty_cache[identifiant_tiers] = (
+                    _payment_term_values(tiers, dictionnaire), None,
+                )
+            except Exception as exc:
+                thirdparty_cache[identifiant_tiers] = (None, _format_error(exc))
+        valeurs, erreur = thirdparty_cache[identifiant_tiers]
+        if erreur:
+            resultat["thirdparty_payment_terms_error"] = erreur
+        else:
+            resultat.update({"thirdparty_" + clef: valeurs[clef] for clef in champs})
+            resultat["unavailable_fields"].extend(
+                "thirdparty_" + clef for clef in valeurs["unavailable_fields"]
+            )
+    if "thirdparty_payment_terms_error" in resultat:
+        resultat["unavailable_fields"].extend("thirdparty_" + clef for clef in champs)
+    return resultat
+
+
+async def _with_invoice_payment_terms(resultat: dict, source: dict, cache: dict,
+                                      include: bool) -> None:
+    """Préserve les indisponibilités financières lors de l'ajout des conditions."""
+    champs = await _payment_terms_fields(source, cache, include)
+    resultat.setdefault("unavailable_fields", []).extend(champs.pop("unavailable_fields"))
+    resultat.update(champs)
+
+
 async def _invoice_export(payload: dict, limit: int, cursor: str, scan,
-                          supplier: bool, include_payments: bool) -> str:
+                          supplier: bool, include_payments: bool,
+                          include_payment_terms: bool) -> str:
     payload = _export_payload(payload, "invoices", limit, cursor, scan=scan)
+    cache_tiers = {}
     for row in payload["invoices"]:
+        # Garder la source jusqu'ici évite de perdre ses alias avant la pagination.
+        source = row.pop("_payment_terms_source")
+        await _with_invoice_payment_terms(row, source, cache_tiers, include_payment_terms)
+        if row.get("payment_terms_unavailable"):
+            payload["payment_terms_unavailable"] = row["payment_terms_unavailable"]
         await _with_invoice_payments(row, supplier, include_payments)
+    payload["date_due_default_count"] = sum(
+        row["date_due_is_default"] is True for row in payload["invoices"]
+    )
+    if payload["date_due_default_count"]:
+        payload["payment_terms_note"] = PAYMENT_TERMS_NOTE
     if not supplier:
         credits = [r for r in payload["invoices"]
                    if str(r.get("type")) == "2" or (r.get("total_ttc") or 0) < 0]
@@ -2057,6 +2171,7 @@ async def dolibarr_list_invoices(
     search_ref: str='',
     cursor: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Liste les factures clients.
 
@@ -2065,6 +2180,19 @@ async def dolibarr_list_invoices(
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default le signale ligne par ligne (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
@@ -2131,7 +2259,7 @@ async def dolibarr_list_invoices(
                 continue
 
             date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
-            date_inv = _ts_to_date(inv.get("date"))
+            date_inv = _ts_to_date(_first_present(inv, "date", "datef"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
             if date_lim and date_lim < today and inv_status == "1":
@@ -2142,6 +2270,7 @@ async def dolibarr_list_invoices(
                     pass
 
             results.append({
+                "_payment_terms_source": inv,
                 "id": inv.get("id"),
                 "ref": inv.get("ref"),
                 "thirdparty": inv.get("thirdparty_name") or inv.get("socid"),
@@ -2163,7 +2292,7 @@ async def dolibarr_list_invoices(
             "date_end": date_end or None,
             "credit_notes_count": sum(1 for r in results if (r["total_ttc"] or 0) < 0),
             "invoices": results,
-        }, limit, cursor, invoices, False, include_payments)
+        }, limit, cursor, invoices, False, include_payments, include_payment_terms)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2179,6 +2308,7 @@ async def dolibarr_list_supplier_invoices(
     search_ref: str='',
     cursor: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Liste les factures fournisseur.
 
@@ -2187,6 +2317,19 @@ async def dolibarr_list_supplier_invoices(
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default le signale ligne par ligne (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Paramètres :
     - status : 'unpaid', 'paid', 'draft', 'all'
@@ -2233,7 +2376,7 @@ async def dolibarr_list_supplier_invoices(
         results = []
         for inv in invoices:
             date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
-            date_inv = _ts_to_date(inv.get("date"))
+            date_inv = _ts_to_date(_first_present(inv, "date", "datef"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
             if date_lim and date_lim < today and inv_status == "1":
@@ -2244,6 +2387,7 @@ async def dolibarr_list_supplier_invoices(
                     pass
 
             results.append({
+                "_payment_terms_source": inv,
                 "id": inv.get("id"),
                 "ref": inv.get("ref"),
                 "ref_supplier": inv.get("ref_supplier"),
@@ -2263,7 +2407,7 @@ async def dolibarr_list_supplier_invoices(
             "date_start": date_start or None,
             "date_end": date_end or None,
             "invoices": results,
-        }, limit, cursor, invoices, True, include_payments)
+        }, limit, cursor, invoices, True, include_payments, include_payment_terms)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2408,6 +2552,12 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
     Retourne toutes les informations : coordonnées, catégories, contacts,
     conditions de paiement, etc.
 
+    cond_reglement_id, cond_reglement_code et cond_reglement_label décrivent
+    la condition du tiers : null sur les trois signifie qu'aucune condition
+    n'est paramétrée sur le tiers, ce qui produit des échéances par défaut sur
+    ses factures. Une résolution impossible est signalée dans unavailable_fields
+    et un dictionnaire illisible dans payment_terms_unavailable.
+
     Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
     DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
     plafond et la coupe est annoncée : `note_public_truncated` passe à true et
@@ -2442,6 +2592,10 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
             "note_public_length": note_length,
             "note_public_truncated": note_truncated,
         }
+        dictionnaire = await _payment_terms()
+        result.update(_payment_term_values(tp, dictionnaire))
+        if dictionnaire["error"]:
+            result["payment_terms_unavailable"] = dictionnaire["error"]
         return _dumps(result)
     except Exception as exc:
         return _format_error(exc)
@@ -4747,11 +4901,25 @@ async def dolibarr_get_invoice(
     invoice_id: int=0,
     ref: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Détail d'une facture client par ID numérique ou par référence.
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default le signale ligne par ligne (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
     ref, tiers, montants HT/TTC/TVA, statut, échéance, paiements associés
@@ -4802,7 +4970,7 @@ async def dolibarr_get_invoice(
             "total_ht": inv.get("total_ht"),
             "total_tva": inv.get("total_tva"),
             "total_ttc": inv.get("total_ttc"),
-            "date_invoice": _ts_to_date(inv.get("date")),
+            "date_invoice": _ts_to_date(_first_present(inv, "date", "datef")),
             "date_due": _ts_to_date(inv.get("date_lim_reglement")),
             "fk_project": inv.get("fk_project"),
             "ref_customer": inv.get("ref_client"),
@@ -4814,6 +4982,7 @@ async def dolibarr_get_invoice(
             "lines": lines,
         }
         result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payment_terms(result, inv, {}, include_payment_terms)
         await _with_invoice_payments(result, False, include_payments)
         return _dumps(result)
 
@@ -4893,11 +5062,25 @@ async def dolibarr_get_supplier_invoice(
     invoice_id: int=0,
     ref: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Détail d'une facture FOURNISSEUR par ID numérique ou par référence.
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default le signale ligne par ligne (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
     ref (ref interne Dolibarr type SI2602-0084). Retourne ref interne, ref
@@ -4952,7 +5135,7 @@ async def dolibarr_get_supplier_invoice(
             "total_ht": inv.get("total_ht"),
             "total_tva": inv.get("total_tva"),
             "total_ttc": inv.get("total_ttc"),
-            "date_invoice": _ts_to_date(inv.get("date") or inv.get("datef")),
+            "date_invoice": _ts_to_date(_first_present(inv, "date", "datef")),
             "date_due": _ts_to_date(
                 inv.get("date_echeance") or inv.get("date_lim_reglement")
             ),
@@ -4965,6 +5148,7 @@ async def dolibarr_get_supplier_invoice(
             "lines": lines,
         }
         result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payment_terms(result, inv, {}, include_payment_terms)
         await _with_invoice_payments(result, True, include_payments)
         return _dumps(result)
 
@@ -5712,6 +5896,7 @@ BANK_ACCOUNT_LINE_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}"
 BANK_LINE_LINKS_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}/links"
 BANK_BALANCE_ENDPOINT = "bankaccounts/{account_id}/balance"
 PAYMENT_TYPES_ENDPOINT = "setup/dictionary/payment_types"
+PAYMENT_TERMS_ENDPOINT = "setup/dictionary/payment_terms"
 
 #: llx_bank_account.courant — Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
 BANK_ACCOUNT_TYPES = {"0": "épargne", "1": "compte courant", "2": "caisse"}
@@ -5748,6 +5933,42 @@ BANK_LINK_SOURCE_LABELS = {
 #: le dictionnaire c_paiement ne bouge pas en cours de session. Les tests le
 #: remettent à None pour repartir d'un cache vide.
 _PAYMENT_TYPES_CACHE: "dict[str, dict] | None" = None
+
+# Un refus de ce dictionnaire facultatif doit aussi être mémorisé : le répéter
+# pour chaque facture ralentirait les lectures sans rendre l'échéance plus fiable.
+_PAYMENT_TERMS_CACHE: dict | None = None
+
+
+async def _payment_terms() -> dict:
+    """Mémorise les conditions, même si la route manque ou refuse l'accès."""
+    global _PAYMENT_TERMS_CACHE
+    if _PAYMENT_TERMS_CACHE is not None:
+        return _PAYMENT_TERMS_CACHE
+
+    par_code: dict[str, dict] = {}
+    par_id: dict[str, dict] = {}
+    erreur = None
+    try:
+        # Une facture ancienne peut encore porter une condition devenue inactive.
+        lignes = await api_get(PAYMENT_TERMS_ENDPOINT, {"limit": 100})
+        if not isinstance(lignes, list) or any(not isinstance(ligne, dict) for ligne in lignes):
+            raise ValueError("Dictionnaire des conditions de règlement illisible.")
+        for ligne in lignes:
+            entree = {
+                "id": _id_int(_first_present(ligne, "id", "rowid")),
+                "code": ligne.get("code") or None,
+                "label": (ligne.get("label") or ligne.get("libelle")
+                          or ligne.get("libelle_facture") or None),
+            }
+            if entree["code"]:
+                par_code[str(entree["code"]).upper()] = entree
+            if entree["id"] is not None:
+                par_id[str(entree["id"])] = entree
+    except Exception as exc:
+        par_code, par_id = {}, {}
+        erreur = _format_error(exc)
+    _PAYMENT_TERMS_CACHE = {"by_code": par_code, "by_id": par_id, "error": erreur}
+    return _PAYMENT_TERMS_CACHE
 
 
 async def _payment_types() -> dict:
