@@ -9,7 +9,7 @@ Claude Desktop et tout autre client MCP.
 
 Configuration : DOLIBARR_URL (URL de base) + DOLIBARR_API_KEY (header DOLAPIKEY).
 Optionnel : DOLIBARR_WEB_LOGIN / DOLIBARR_WEB_PASSWORD, requis uniquement par
-les écritures que l'API REST n'expose pas — à ce jour le seul rapprochement
+les écritures que l'API REST n'expose pas - à ce jour le seul rapprochement
 bancaire (cf. dolibarr_set_bank_statement).
 Compatible Dolibarr 16+ (API REST).
 """
@@ -29,10 +29,13 @@ from mcp.server.fastmcp import FastMCP
 # Configuration
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-mcp = FastMCP("dolibarr")
+__version__ = "1.8.0"
+
+mcp = FastMCP("dolibarr", log_level="WARNING")
+mcp._mcp_server.version = __version__
 
 DOLIBARR_URL = os.environ.get("DOLIBARR_URL", "")
 API_KEY = os.environ.get("DOLIBARR_API_KEY", "")
@@ -50,6 +53,16 @@ MAX_LIMIT = 100
 # min_amount) : sans elle, la limite demandée tronque AVANT le filtrage et des
 # résultats manquent silencieusement.
 CLIENT_FILTER_SCAN_LIMIT = 500
+
+# Plafond de sûreté sur les notes d'une lecture de détail (get_proposal,
+# get_invoice, get_supplier_invoice, get_thirdparty, get_project). En deçà, la
+# note est rendue entière ; au-delà, la coupe est ANNONCÉE par
+# `<champ>_truncated` et `<champ>_length`, jamais muette. Les `[:300]` et
+# `[:500]` historiques coupaient sans le dire : constaté le 14/09/2026 sur la
+# propale 172, dont la note publique revenait à 300 caractères exactement,
+# avant comme après un update_proposal réussi, ce qui se lisait comme une
+# perte en base.
+DETAIL_NOTE_MAX_CHARS = 20_000
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -164,7 +177,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 if resp.status_code < 500:
                     resp.raise_for_status()
 
-                # Erreurs serveur 5xx : bug connu de l'API REST Dolibarr — certains endpoints
+                # Erreurs serveur 5xx : bug connu de l'API REST Dolibarr - certains endpoints
                 # (contacts, thirdparties) retournent HTTP 500 avec un corps JSON valide (entier
                 # ou tableau) à la place d'un HTTP 200. On parse le corps avant de décider.
                 # Une vraie erreur Dolibarr a toujours la forme {"error": {"code":…, "message":…}}.
@@ -173,7 +186,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                     if not (isinstance(body, dict) and "error" in body):
                         logger.warning(
                             "HTTP %d avec corps JSON valide (non-erreur) pour %s %s "
-                            "— bug API Dolibarr, traité comme succès",
+                            "- bug API Dolibarr, traité comme succès",
                             resp.status_code, method, url,
                         )
                         return body
@@ -218,7 +231,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 raise
         except DolibarrAPIError as exc:
             # Corps non-JSON sur réponse 2xx : très probablement un hoquet transient
-            # côté PHP-FPM / proxy. On retry comme pour un timeout — donc jamais
+            # côté PHP-FPM / proxy. On retry comme pour un timeout - donc jamais
             # sur une écriture, qui a pu aboutir malgré la réponse illisible.
             last_exc = exc
             if idempotent and attempt < _MAX_RETRIES:
@@ -258,7 +271,7 @@ async def _api_get_list(endpoint: str, params: dict[str, Any] | None = None) -> 
                 body = exc.response.json()
                 msg = (body.get("error") or {}).get("message", "")
                 if "No " in msg and "found" in msg.lower():
-                    logger.info("404 'no results' pour %s — traité comme liste vide", endpoint)
+                    logger.info("404 'no results' pour %s - traité comme liste vide", endpoint)
                     return []
             except Exception:
                 pass
@@ -352,7 +365,7 @@ def _seconds_to_hours(value: Any) -> float | None:
     Dolibarr stocke et renvoie TOUTES les durées en secondes, le plus souvent
     sous forme de chaîne ('14400'). Exposer cette valeur brute sous un nom en
     heures fait conclure à un temps 3600 fois trop élevé, sans aucune erreur
-    visible — d'où cette conversion systématique.
+    visible - d'où cette conversion systématique.
 
     Retourne None si la valeur est absente ou non numérique : surtout pas 0,
     qui se lirait comme « aucun temps passé » alors que l'information manque.
@@ -423,7 +436,7 @@ def _format_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 401:
-            return "Erreur 401 : clé API Dolibarr invalide ou manquante."
+            return "Erreur 401 : clef API Dolibarr invalide ou manquante."
         if status == 403:
             return "Erreur 403 : permissions insuffisantes pour cette ressource."
         if status == 404:
@@ -459,6 +472,178 @@ def _dumps(data: Any) -> str:
 def _clamp_limit(limit: int) -> int:
     """Borne la limite entre 1 et MAX_LIMIT."""
     return max(1, min(limit, MAX_LIMIT))
+
+
+# Contrat commun des exports. Le plafond borne les appels HTTP, pas le rendu.
+EXPORT_SCAN_PAGE = 100
+EXPORT_SCAN_MAX_PAGES = 100
+
+
+class ExportRows(list):
+    """Lignes collectées et preuve de fin de balayage."""
+
+    complete = True
+    scan_note = ""
+
+
+def _unique_rows(rows: list, identity: str = "") -> list:
+    """Conserve la première occurrence de chaque identifiant connu."""
+    seen = set()
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Export invalide : un objet attendu par ligne.")
+        keys = (identity,) if identity else ("id", "rowid", "entry_id", "carnet_id", "card_id", "link_id")
+        value = next((row[k] for k in keys if row.get(k) is not None), None)
+        if value is not None:
+            token = str(value)
+            if token in seen:
+                continue
+            seen.add(token)
+        result.append(row)
+    return result
+
+
+async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None) -> ExportRows:
+    """Lit des pages stables jusqu'à la fin, sans certifier un parcours interrompu.
+
+    Les routes sans pagination ne doivent pas passer par ce helper.
+    Une API qui ignore page est détectée au premier lot sans nouvel ID.
+    """
+    fetch = fetch or _api_get_list
+    base = dict(params or {})
+    base.pop("page", None)
+    base["limit"] = EXPORT_SCAN_PAGE
+    field = base.get("sortfield", "t.rowid")
+    if "rowid" not in field:
+        field += "," + (field.split(".")[0] + "." if "." in field else "") + "rowid"
+    base["sortfield"] = field
+    result = ExportRows()
+    fingerprints = set()
+    for page in range(EXPORT_SCAN_MAX_PAGES):
+        chunk = await fetch(endpoint, dict(base, page=page))
+        if not isinstance(chunk, list):
+            raise ValueError("Export invalide : la route ne renvoie pas une liste.")
+        fingerprint = _dumps(chunk)
+        if chunk and fingerprint in fingerprints:
+            result.complete = False
+            result.scan_note = "Page répétée par le serveur. Restreindre les filtres."
+            return result
+        fingerprints.add(fingerprint)
+        merged = _unique_rows([*result, *chunk])
+        if chunk and len(merged) == len(result):
+            result.complete = False
+            result.scan_note = "Aucun nouvel identifiant. Restreindre les filtres."
+            return result
+        result[:] = merged
+        if len(chunk) < EXPORT_SCAN_PAGE:
+            return result
+    result.complete = False
+    result.scan_note = "Plafond de balayage atteint. Restreindre les filtres."
+    return result
+
+
+def _cursor_offset(cursor: str, offset: int = 0) -> int:
+    if cursor:
+        if not cursor.isascii() or not cursor.isdecimal():
+            raise ValueError("Curseur invalide : reprendre next_cursor avec les mêmes filtres.")
+        return int(cursor)
+    return max(0, offset)
+
+
+def _export_payload(payload: dict, key: str, limit: int, cursor: str = "",
+                    *, scan=None, offset: int = 0, identity: str = "", max_limit: int = MAX_LIMIT) -> dict:
+    """Pagination du résultat filtré. total=null signifie total non certifié."""
+    rows = _unique_rows(payload[key], identity)
+    start = _cursor_offset(cursor, offset)
+    size = max(1, min(limit, max_limit))
+    shown = rows[start:start + size]
+    complete = getattr(scan, "complete", True)
+    more = start + len(shown) < len(rows)
+    payload.update({
+        key: shown, "total": len(rows) if complete else None,
+        "total_exact": complete, "total_lower_bound": len(rows),
+        "count": len(shown), "returned": len(shown),
+        "truncated": more or not complete, "scan_truncated": not complete,
+        "next_cursor": str(start + len(shown)) if more else None,
+        "limit": size, "offset": start,
+    })
+    if not complete:
+        payload["scan_note"] = getattr(scan, "scan_note", "Balayage incomplet.")
+    return payload
+
+
+def _first_present(row: dict, *keys: str):
+    """La présence d'une clef prime sur la vérité de sa valeur, même null ou 0."""
+    return next((row[key] for key in keys if key in row), None)
+
+
+def _financial_fields(row: dict, *, proposal: bool = False) -> dict:
+    """Projection financière et distinction entre un champ absent et null."""
+    fields = {
+        "total_ht": ("total_ht",), "total_ttc": ("total_ttc",),
+        "status": ("fk_statut", "status", "statut"),
+    }
+    if proposal:
+        fields["date_validity"] = ("fin_validite", "date_fin_validite", "date_validity")
+    else:
+        fields.update({
+            "date_due": ("date_echeance", "date_lim_reglement"),
+            "remaining_to_pay": ("remaintopay", "remaining_to_pay"),
+            "source_invoice_id": ("fk_facture_source",),
+            "type": ("type",),
+        })
+    result = {"unavailable_fields": []}
+    for field, aliases in fields.items():
+        value = _first_present(row, *aliases)
+        if not any(alias in row for alias in aliases):
+            result["unavailable_fields"].append(field)
+        if value is not None:
+            if field in ("date_due", "date_validity"):
+                value = _ts_to_date(value)
+            elif field == "status":
+                value = str(value)
+            else:
+                value = _num(value)
+        result[field] = value
+    status = result["status"]
+    result["status_label"] = (_format_proposal_status(status) if proposal
+                              else _format_invoice_status(status, row.get("paye")))
+    return result
+
+
+async def _with_invoice_payments(row: dict, supplier: bool, include_payments: bool) -> None:
+    """Une lecture refusée ne signifie jamais absence de paiement."""
+    row["payments"] = None
+    row["payments_total"] = None
+    if not include_payments:
+        row["payments_error"] = "Lecture non demandée (include_payments=false)."
+    elif not row.get("id"):
+        row["payments_error"] = "Identifiant de facture absent."
+    else:
+        try:
+            payments = await _invoice_payments(int(row["id"]), supplier)
+            row["payments"] = payments
+            if all(p.get("amount") is not None for p in payments):
+                row["payments_total"] = round(sum(float(p["amount"]) for p in payments), 2)
+            return
+        except Exception as exc:
+            row["payments_error"] = _format_error(exc)
+    row.setdefault("unavailable_fields", []).append("payments")
+
+
+async def _invoice_export(payload: dict, limit: int, cursor: str, scan,
+                          supplier: bool, include_payments: bool) -> str:
+    payload = _export_payload(payload, "invoices", limit, cursor, scan=scan)
+    for row in payload["invoices"]:
+        await _with_invoice_payments(row, supplier, include_payments)
+    if not supplier:
+        credits = [r for r in payload["invoices"]
+                   if str(r.get("type")) == "2" or (r.get("total_ttc") or 0) < 0]
+        payload["credit_notes"] = credits
+        payload["credit_notes_count"] = len(credits)
+        payload["credit_notes_scope"] = "page rendue, avec les mêmes filtres que invoices"
+    return _dumps(payload)
 
 
 def _sf_escape(value: str) -> str:
@@ -539,13 +724,13 @@ async def _gather_limited(factories: list, concurrency: int = 8) -> list:
 # Repli formulaire web
 # ---------------------------------------------------------------------------
 #
-# Quelques écritures n'ont AUCUNE route REST dans Dolibarr 24 — le
+# Quelques écritures n'ont AUCUNE route REST dans Dolibarr 24 - le
 # rapprochement bancaire en est une (cf. dolibarr_set_bank_statement). Le
 # connecteur ne bascule sur le formulaire web que pour celles-là, et seulement
 # si un compte web est explicitement configuré. Sans DOLIBARR_WEB_LOGIN /
 # DOLIBARR_WEB_PASSWORD, les outils concernés refusent en le disant : jamais de
 # mode dégradé silencieux. Une instance derrière un SSO qui n'expose pas le
-# formulaire de login natif ne peut pas utiliser ce repli — l'échec est alors
+# formulaire de login natif ne peut pas utiliser ce repli - l'échec est alors
 # constaté à la relecture, pas supposé.
 
 WEB_LOGIN = os.environ.get("DOLIBARR_WEB_LOGIN", "")
@@ -627,24 +812,28 @@ async def _web_post(path: str, data: "list[tuple[str, str]]", query: str = "") -
 
 
 # ---------------------------------------------------------------------------
-# Tools — Projets
+# Tools - Projets
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def dolibarr_list_projects(
-    status: str = "1",
-    thirdparty_id: int = 0,
-    search: str = "",
-    limit: int = DEFAULT_LIMIT,
+    status: str='1',
+    thirdparty_id: int=0,
+    search: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les projets Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 0=brouillon, 1=ouvert, 2=fermé (défaut : 1 = ouvert)
     - thirdparty_id : filtrer par tiers (0 = tous)
     - search : mot-clé dans le titre ou la référence
-    - limit : nombre max de résultats (défaut 50, max 100)
+    - limit : nombre max de résultats (défaut 20, max 100)
 
     Retourne : ref, titre, tiers, statut, dates, budget.
     """
@@ -662,7 +851,7 @@ async def dolibarr_list_projects(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        projects = await _api_get_list("projects", params)
+        projects = await _scan_list("projects", params)
 
         results = []
         for p in projects:
@@ -683,14 +872,11 @@ async def dolibarr_list_projects(
                 if search.lower() not in haystack:
                     continue
             results.append(entry)
-            if len(results) >= clamp:
-                break
 
-        return _dumps({"count": len(results), "projects": results})
+        return _dumps(_export_payload({"count": len(results), "projects": results}, "projects", limit, cursor, scan=projects))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
@@ -698,6 +884,13 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
     Fournir soit project_id, soit ref. Retourne toutes les infos du projet
     incluant tâches et contacts associés.
+
+    Description et note publique : `description` (texte brut) et `note_public`
+    (HTML nettoyé) sont rendues entières jusqu'à DETAIL_NOTE_MAX_CHARS (20 000)
+    caractères. Au-delà, le champ est coupé à ce plafond et la coupe est
+    annoncée : `<champ>_truncated` passe à true et `<champ>_length` donne la
+    longueur réelle. Ces champs sont toujours présents. Les deux étaient
+    coupés à 500 caractères sans le dire.
     """
     try:
         if ref and not project_id:
@@ -712,6 +905,8 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
         p = await api_get(f"projects/{project_id}")
         # Filtrer les champs utiles
+        desc_text, desc_truncated, desc_length = _bounded_text(p.get("description"))
+        note_text, note_truncated, note_length = _bounded_note(p.get("note_public"))
         result = {
             "id": p.get("id"),
             "ref": p.get("ref"),
@@ -721,8 +916,12 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
             "date_start": _ts_to_date(p.get("date_start")),
             "date_end": _ts_to_date(p.get("date_end")),
             "budget": p.get("budget_amount"),
-            "description": (p.get("description") or "")[:500],
-            "note_public": _strip_html(p.get("note_public"))[:500],
+            "description": desc_text,
+            "description_length": desc_length,
+            "description_truncated": desc_truncated,
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "usage_bill_time": p.get("usage_bill_time"),
         }
         return _dumps(result)
@@ -733,11 +932,15 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
 
 @mcp.tool()
 async def dolibarr_list_tasks(
-    project_id: int = 0,
-    assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT,
+    project_id: int=0,
+    assigned_to: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les tâches d'un projet Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - project_id : ID du projet (obligatoire)
@@ -746,7 +949,7 @@ async def dolibarr_list_tasks(
 
     Retourne : ref, label, progression, dates, charge prévue et temps passé.
 
-    Durées — Dolibarr les renvoie en SECONDES ; chacune est exposée deux fois :
+    Durées - Dolibarr les renvoie en SECONDES ; chacune est exposée deux fois :
     - planned_hours / spent_hours   : heures, arrondies à 2 décimales
     - planned_seconds / spent_seconds : valeur brute Dolibarr, sans perte
     Une tâche portant 32,5 h ressort donc à spent_hours=32.5 et
@@ -756,7 +959,7 @@ async def dolibarr_list_tasks(
         if not project_id:
             return "Veuillez fournir un project_id."
 
-        params: dict[str, Any] = {"limit": _clamp_limit(limit)}
+        params: dict[str, Any] = {}
         tasks = await api_get(f"projects/{project_id}/tasks", params)
 
         results = []
@@ -778,11 +981,10 @@ async def dolibarr_list_tasks(
                 continue
             results.append(entry)
 
-        return _dumps({"count": len(results), "tasks": results})
+        return _dumps(_export_payload({"count": len(results), "tasks": results}, "tasks", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # Routes du temps passé, vérifiées contre le swagger servi par l'API elle-même
 # (Dolibarr v23). Plusieurs routes se ressemblent, une seule accepte un POST :
@@ -834,15 +1036,18 @@ TASK_ROLE_MANAGER = "TASKEXECUTIVE"        # libellé standard : « Responsable 
 # Dolibarr 22 déclarait « @param datetime $date » sans union et sans $progress :
 # la route y fonctionne. C'est donc une régression de la 23.
 _UPSTREAM_BUG_ADDTIMESPENT = (
-    "Bug amont Dolibarr 23.0.x, pas un problème de configuration : "
-    "POST tasks/{id}/addtimespent lève une fatale PHP "
-    "(TypeError « Cannot access offset of type array in isset or empty », "
+    "Signature du bug amont connu sur CERTAINS builds Dolibarr 23.0.x, pas un "
+    "problème de configuration : POST tasks/{id}/addtimespent lève une fatale "
+    "PHP (TypeError « Cannot access offset of type array in isset or empty », "
     "includes/restler/framework/Luracast/Restler/Data/Validator.php ligne 427) "
-    "pendant la validation des paramètres, avant toute lecture de la tâche. "
-    "Aucun contenu de requête ne contourne la fatale. L'imputation doit passer "
-    "par l'interface web (projet/tasks/time.php) tant que l'instance n'est pas "
-    "corrigée. Les routes de LECTURE et de CORRECTION du temps, elles, "
-    "fonctionnent : dolibarr_list_time_entries, dolibarr_update_time_entry, "
+    "pendant la validation des paramètres, avant toute lecture de la tâche. Sur "
+    "une instance atteinte, aucun contenu de requête ne contourne la fatale et "
+    "l'imputation doit passer par l'interface web (projet/tasks/time.php). "
+    "La production inno³, elle, écrit par cette route : elle tourne en "
+    "Dolibarr 24.0.1 (relevé le 25/09/2026 sur la mire), où la régression de "
+    "la 23 n'est plus là. Les "
+    "routes de LECTURE et de CORRECTION du temps, elles, fonctionnent dans les "
+    "deux cas : dolibarr_list_time_entries, dolibarr_update_time_entry, "
     "dolibarr_delete_time_entry."
 )
 
@@ -912,7 +1117,7 @@ def _format_task_contact(raw: dict) -> dict:
     }
 
 
-async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
+async def _fetch_task_contacts(task_id: int, *, strict: bool = False) -> list[dict] | None:
     """Intervenants d'une tâche, ou None si la lecture échoue.
 
     Utilisé aussi bien par le tool de lecture que par le diagnostic d'échec :
@@ -922,6 +1127,8 @@ async def _fetch_task_contacts(task_id: int) -> list[dict] | None:
     try:
         raw = await api_get(TASK_CONTACTS_ENDPOINT.format(task_id=task_id))
     except Exception:
+        if strict:
+            raise
         return None
     if not isinstance(raw, list):
         return None
@@ -1018,7 +1225,7 @@ async def _log_time_error(
         payload["hint"] = (
             f"La tâche #{task_id} existe, mais {endpoint} rend un 404 : la route "
             "ou le verbe ne correspond pas à cette version de Dolibarr. "
-            "L'ajout de temps est un POST sur tasks/{id}/addtimespent — "
+            "L'ajout de temps est un POST sur tasks/{id}/addtimespent - "
             "tasks/{id}/timespent est en lecture seule."
         )
     elif status == 400:
@@ -1056,16 +1263,23 @@ async def dolibarr_log_time(
 ) -> str:
     """Saisir du temps passé sur une tâche Dolibarr.
 
-    ATTENTION : sur Dolibarr 23.0.x cette route est CASSÉE EN AMONT et tout
-    appel échoue, quel qu'en soit le contenu : POST tasks/{id}/addtimespent
-    lève une fatale PHP dans le validateur de Restler avant même de lire la
-    tâche. Ce n'est pas un problème de configuration, d'affectation ni de
-    droits, et le connecteur ne peut pas le contourner. Sur ces instances,
-    l'imputation se fait par l'interface web (projet/tasks/time.php) ; la
-    LECTURE et la CORRECTION du temps, elles, restent disponibles par l'API
+    La route POST tasks/{id}/addtimespent fonctionne sur la production inno³,
+    qui tourne en Dolibarr 24.0.1 : 17 imputations écrites puis relues le
+    18/09/2026, et une écriture de contrôle écrite, relue et supprimée le
+    25/09/2026. Cette docstring la donnait pour morte sur toute Dolibarr 23 ;
+    la fatale est bien réelle, mais c'est une régression de la 23.0.x, et la
+    limite périmée a fait envisager un contournement navigateur pour rien.
+
+    Limite qui subsiste, et que le connecteur ne peut pas lever : sur les
+    builds atteints, l'appel meurt dans une fatale PHP du validateur de Restler
+    avant même de lire la tâche, et rend un HTTP 500 au corps vide quel qu'en
+    soit le contenu. Le connecteur reconnaît cette signature et la NOMME
+    (`cause` = `bug_dolibarr_addtimespent`) au lieu d'inventer un diagnostic ;
+    le détail est dans le champ `hint` de l'erreur retournée. Sur une instance
+    atteinte, l'imputation passe par l'interface web (projet/tasks/time.php) ;
+    la LECTURE et la CORRECTION du temps restent disponibles par l'API
     (dolibarr_list_time_entries, dolibarr_update_time_entry,
-    dolibarr_delete_time_entry). Détail complet dans le champ `hint` de
-    l'erreur retournée.
+    dolibarr_delete_time_entry).
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
@@ -1170,8 +1384,16 @@ async def dolibarr_log_time(
 
 
 @mcp.tool()
-async def dolibarr_list_task_contacts(task_id: int, role: str = "") -> str:
+async def dolibarr_list_task_contacts(
+    task_id: int,
+    role: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les intervenants affectés à une tâche Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - task_id : ID de la tâche (obligatoire)
@@ -1198,15 +1420,14 @@ async def dolibarr_list_task_contacts(task_id: int, role: str = "") -> str:
         raw = await api_get(endpoint, params)
         contacts = [_format_task_contact(c) for c in raw if isinstance(c, dict)]
 
-        return _dumps({
+        return _dumps(_export_payload({
             "task_id": task_id,
             "count": len(contacts),
             "contacts": contacts,
-        })
+        }, "contacts", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 async def _task_role_codes() -> list[dict] | None:
     """Codes de rôle valides pour une tâche sur CETTE instance, ou None.
@@ -1336,7 +1557,7 @@ async def dolibarr_unassign_task_user(
         if not user_id:
             return "Le user_id est obligatoire (identifiant llx_user)."
 
-        contacts = await _fetch_task_contacts(task_id)
+        contacts = await _fetch_task_contacts(task_id, strict=True)
         if contacts is None:
             return _dumps({
                 "success": False,
@@ -1443,8 +1664,12 @@ async def dolibarr_list_time_entries(
     date_start: str = "",
     date_end: str = "",
     limit: int = DEFAULT_LIMIT,
+    cursor: str = "",
 ) -> str:
     """Liste les écritures de temps d'une tâche ou de tout un projet.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - task_id : ID d'une tâche (task_id OU project_id est obligatoire)
@@ -1472,7 +1697,7 @@ async def dolibarr_list_time_entries(
         if task_id:
             task_ids = [int(task_id)]
         else:
-            tasks = await api_get(f"projects/{project_id}/tasks", {"limit": MAX_LIMIT})
+            tasks = await api_get(f"projects/{project_id}/tasks", {})
             task_ids = [int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")]
 
         entries: list[dict] = []
@@ -1486,6 +1711,7 @@ async def dolibarr_list_time_entries(
         if date_end:
             entries = [e for e in entries if e["date"] and e["date"] <= date_end]
 
+        entries = _unique_rows(entries)
         entries.sort(key=lambda e: (e["date"] or "", e["entry_id"] or 0))
 
         total_seconds = sum(e["seconds"] or 0 for e in entries)
@@ -1497,7 +1723,8 @@ async def dolibarr_list_time_entries(
             by_task[key] = by_task.get(key, 0) + (e["seconds"] or 0)
 
         capped = _clamp_limit(limit)
-        shown = entries[:capped]
+        shown = entries
+        paging = _export_payload({"entries": entries}, "entries", capped, cursor)
 
         return _dumps({
             "task_id": task_id or None,
@@ -1517,6 +1744,7 @@ async def dolibarr_list_time_entries(
                 for t, s in sorted(by_task.items(), key=lambda kv: -kv[1])
             },
             "entries": shown,
+            **paging,
         })
 
     except Exception as exc:
@@ -1808,7 +2036,7 @@ async def dolibarr_close_task(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Facturation
+# Tools - Facturation
 # ---------------------------------------------------------------------------
 
 
@@ -1819,21 +2047,29 @@ INVOICE_STATUS_FILTER = {"draft": "0", "validated": "1", "paid": "2", "unpaid": 
 
 @mcp.tool()
 async def dolibarr_list_invoices(
-    status: str = "unpaid",
-    thirdparty_id: int = 0,
-    min_amount: float = 0,
-    limit: int = DEFAULT_LIMIT,
-    date_start: str = "",
-    date_end: str = "",
-    sort: str = "desc",
-    search_ref: str = "",
+    status: str='unpaid',
+    thirdparty_id: int=0,
+    min_amount: float=0,
+    limit: int=DEFAULT_LIMIT,
+    date_start: str='',
+    date_end: str='',
+    sort: str='desc',
+    search_ref: str='',
+    cursor: str='',
+    include_payments: bool=True,
 ) -> str:
     """Liste les factures clients.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
     - thirdparty_id : filtrer par tiers
-    - min_amount : montant TTC minimum. Laissé à 0, il ne filtre RIEN — surtout
+    - min_amount : montant TTC minimum. Laissé à 0, il ne filtre RIEN - surtout
       pas les avoirs, dont le total est négatif par construction.
     - limit : nombre max de résultats
     - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
@@ -1878,7 +2114,7 @@ async def dolibarr_list_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await _api_get_list("invoices", params)
+        invoices = await _scan_list("invoices", params)
 
         from datetime import datetime
 
@@ -1894,7 +2130,7 @@ async def dolibarr_list_invoices(
             if min_amount and total_ttc < min_amount:
                 continue
 
-            date_lim = _ts_to_date(inv.get("date_lim_reglement"))
+            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -1917,34 +2153,40 @@ async def dolibarr_list_invoices(
                 "status_label": _format_invoice_status(inv_status, inv.get("paye")),
                 "days_late": days_late,
                 "remaining_to_pay": float(inv.get("remaintopay") or total_ttc),
+                **_financial_fields(inv, proposal=False),
             })
-            if len(results) >= clamp:
-                break
 
-        return _dumps({
+        return await _invoice_export({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
-            "credit_notes_count": sum(1 for r in results if r["total_ttc"] < 0),
+            "credit_notes_count": sum(1 for r in results if (r["total_ttc"] or 0) < 0),
             "invoices": results,
-        })
+        }, limit, cursor, invoices, False, include_payments)
 
     except Exception as exc:
         return _format_error(exc)
 
-
 @mcp.tool()
 async def dolibarr_list_supplier_invoices(
-    status: str = "unpaid",
-    thirdparty_id: int = 0,
-    limit: int = DEFAULT_LIMIT,
-    date_start: str = "",
-    date_end: str = "",
-    sort: str = "desc",
-    search_ref: str = "",
+    status: str='unpaid',
+    thirdparty_id: int=0,
+    limit: int=DEFAULT_LIMIT,
+    date_start: str='',
+    date_end: str='',
+    sort: str='desc',
+    search_ref: str='',
+    cursor: str='',
+    include_payments: bool=True,
 ) -> str:
     """Liste les factures fournisseur.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Paramètres :
     - status : 'unpaid', 'paid', 'draft', 'all'
@@ -1953,7 +2195,7 @@ async def dolibarr_list_supplier_invoices(
     - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
     - sort : 'desc' (défaut, plus récentes d'abord) ou 'asc'
     - search_ref : fragment de référence, cherché À LA FOIS dans la référence
-      interne Dolibarr (SI2602-0084) et dans la référence du fournisseur —
+      interne Dolibarr (SI2602-0084) et dans la référence du fournisseur -
       c'est cette dernière qu'on lit sur un relevé ou une relance.
 
     Mêmes corrections que pour les factures clients : tri décroissant par défaut
@@ -1983,14 +2225,14 @@ async def dolibarr_list_supplier_invoices(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        invoices = await _api_get_list("supplierinvoices", params)
+        invoices = await _scan_list("supplierinvoices", params)
 
         from datetime import datetime
 
         today = datetime.now().strftime("%Y-%m-%d")
         results = []
         for inv in invoices:
-            date_lim = _ts_to_date(inv.get("date_lim_reglement"))
+            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -2012,27 +2254,31 @@ async def dolibarr_list_supplier_invoices(
                 "status": inv_status,
                 "status_label": _format_invoice_status(inv_status, inv.get("paye")),
                 "days_late": days_late,
+                **_financial_fields(inv, proposal=False),
             })
 
-        return _dumps({
+        return await _invoice_export({
             "count": len(results),
             "sort": _sort_order(sort).lower(),
             "date_start": date_start or None,
             "date_end": date_end or None,
             "invoices": results,
-        })
+        }, limit, cursor, invoices, True, include_payments)
 
     except Exception as exc:
         return _format_error(exc)
 
-
 @mcp.tool()
 async def dolibarr_list_proposals(
-    status: str = "",
-    thirdparty_id: int = 0,
-    limit: int = DEFAULT_LIMIT,
+    status: str='',
+    thirdparty_id: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les propositions commerciales (devis).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 0=brouillon, 1=validé, 2=signé, 3=refusé, 4=facturé, vide=tous
@@ -2052,7 +2298,7 @@ async def dolibarr_list_proposals(
         if thirdparty_id:
             params["thirdparty_ids"] = str(thirdparty_id)
 
-        proposals = await _api_get_list("proposals", params)
+        proposals = await _scan_list("proposals", params)
 
         results = []
         for p in proposals:
@@ -2066,30 +2312,34 @@ async def dolibarr_list_proposals(
                 "date_validity": _ts_to_date(p.get("fin_validite") or p.get("date_fin_validite")),
                 "status": p.get("fk_statut") or p.get("status") or p.get("statut"),
                 "status_label": _format_proposal_status(p.get("fk_statut") or p.get("status") or p.get("statut")),
+                **_financial_fields(p, proposal=True),
             })
 
-        return _dumps({"count": len(results), "proposals": results})
+        return _dumps(_export_payload({"count": len(results), "proposals": results}, "proposals", limit, cursor, scan=proposals))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 # ---------------------------------------------------------------------------
-# Tools — Tiers
+# Tools - Tiers
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def dolibarr_list_thirdparties(
-    type_filter: str = "",
-    search: str = "",
-    search_email: str = "",
-    search_code: str = "",
-    category: int = 0,
-    limit: int = DEFAULT_LIMIT,
-    offset: int = 0,
+    type_filter: str='',
+    search: str='',
+    search_email: str='',
+    search_code: str='',
+    category: int=0,
+    limit: int=DEFAULT_LIMIT,
+    offset: int=0,
+    cursor: str='',
 ) -> str:
     """Liste les tiers (clients, fournisseurs, prospects).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - type_filter : 'customer' (client), 'supplier' (fournisseur), 'prospect', vide=tous
@@ -2108,7 +2358,7 @@ async def dolibarr_list_thirdparties(
             "sortfield": "t.nom",
             "sortorder": "ASC",
             "limit": clamp,
-            "page": offset // clamp if offset > 0 else 0,
+            "page": 0,
         }
 
         filters = []
@@ -2129,7 +2379,7 @@ async def dolibarr_list_thirdparties(
         if category:
             params["category"] = category
 
-        thirdparties = await _api_get_list("thirdparties", params)
+        thirdparties = await _scan_list("thirdparties", params)
 
         results = []
         for tp in thirdparties:
@@ -2146,11 +2396,10 @@ async def dolibarr_list_thirdparties(
                 "status": tp.get("status"),
             })
 
-        return _dumps({"count": len(results), "thirdparties": results})
+        return _dumps(_export_payload({"count": len(results), "thirdparties": results}, "thirdparties", limit, cursor, scan=thirdparties, offset=offset))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
@@ -2158,10 +2407,18 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
 
     Retourne toutes les informations : coordonnées, catégories, contacts,
     conditions de paiement, etc.
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         tp = await api_get(f"thirdparties/{thirdparty_id}")
         # Filtrer les champs utiles pour économiser les tokens
+        note_text, note_truncated, note_length = _bounded_note(tp.get("note_public"))
         result = {
             "id": tp.get("id"),
             "name": tp.get("name"),
@@ -2181,7 +2438,9 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
             "siret": tp.get("idprof2"),
             "tva_intra": tp.get("tva_intra"),
             "status": tp.get("status"),
-            "note_public": _strip_html(tp.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
         }
         return _dumps(result)
     except Exception as exc:
@@ -2204,8 +2463,8 @@ async def dolibarr_add_contact(
 
     Confirmation utilisateur requise avant exécution.
 
-    Anti-doublon : vérifie l'email (1) sur le tiers cible — doublon strict — et
-    (2) sur tous les autres tiers — doublon potentiel (même personne rattachée
+    Anti-doublon : vérifie l'email (1) sur le tiers cible - doublon strict - et
+    (2) sur tous les autres tiers - doublon potentiel (même personne rattachée
     ailleurs). Dans les deux cas, AUCUN contact n'est créé et l'id existant est
     renvoyé. Passer force=True pour créer malgré tout (ex. même personne
     légitimement contact de deux sociétés).
@@ -2347,7 +2606,7 @@ async def dolibarr_create_thirdparty(
 
         # Anti-doublon : nom identique (insensible à la casse) ou email identique.
         # En cas d'erreur de recherche (ex. 404 "no third parties found"), on
-        # n'empêche pas la création — le garde-fou est best-effort.
+        # n'empêche pas la création - le garde-fou est best-effort.
         if not force:
             try:
                 clauses = [f"(t.nom:like:'{_sf_escape(name)}')"]
@@ -2508,9 +2767,13 @@ async def dolibarr_update_thirdparty(
 @mcp.tool()
 async def dolibarr_list_contacts(
     thirdparty_id: int,
-    limit: int = DEFAULT_LIMIT,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les contacts rattachés à un tiers.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - thirdparty_id : ID du tiers (obligatoire)
@@ -2522,7 +2785,7 @@ async def dolibarr_list_contacts(
         if not thirdparty_id:
             return "Veuillez fournir un thirdparty_id."
 
-        contacts = await _api_get_list("contacts", {
+        contacts = await _scan_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -2542,19 +2805,22 @@ async def dolibarr_list_contacts(
                 "status": c.get("statut"),
             })
 
-        return _dumps({"thirdparty_id": thirdparty_id, "count": len(results), "contacts": results})
+        return _dumps(_export_payload({"thirdparty_id": thirdparty_id, "count": len(results), "contacts": results}, "contacts", limit, cursor, scan=contacts))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_search_contacts(
     search: str = "",
     email: str = "",
     limit: int = DEFAULT_LIMIT,
+    cursor: str = "",
 ) -> str:
     """Cherche un contact par email ou nom à travers tous les tiers.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : mot-clé dans nom/prénom
@@ -2573,7 +2839,7 @@ async def dolibarr_search_contacts(
         if search:
             filters.append(f"(t.lastname:like:'%{_sf_escape(search)}%')")
 
-        contacts = await _api_get_list("contacts", {
+        contacts = await _scan_list("contacts", {
             "sortfield": "t.rowid",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
@@ -2592,7 +2858,7 @@ async def dolibarr_search_contacts(
                 "job_title": c.get("poste"),
             })
 
-        return _dumps({"count": len(results), "contacts": results})
+        return _dumps(_export_payload({"contacts": results}, "contacts", limit, cursor, scan=contacts))
 
     except Exception as exc:
         return _format_error(exc)
@@ -2680,11 +2946,11 @@ async def dolibarr_delete_contact(contact_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Tickets
+# Tools - Tickets
 # ---------------------------------------------------------------------------
 
 #: Libellés FR des statuts de ticket (colonne llx_ticket.fk_statut), d'après les
-#: constantes Ticket::STATUS_* de Dolibarr — les codes 4 et 6 n'existent pas.
+#: constantes Ticket::STATUS_* de Dolibarr - les codes 4 et 6 n'existent pas.
 #: L'API REST renvoie status_label=null (libellé calculé par l'UI, jamais
 #: sérialisé) : on le reconstitue côté connecteur.
 TICKET_STATUS_LABELS = {
@@ -2734,12 +3000,16 @@ async def _fetch_ticket(ticket_id: int, ref: str) -> "dict[str, Any] | str":
 
 @mcp.tool()
 async def dolibarr_list_tickets(
-    status: str = "",
-    thirdparty_id: int = 0,
-    severity: str = "",
-    limit: int = DEFAULT_LIMIT,
+    status: str='',
+    thirdparty_id: int=0,
+    severity: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les tickets de support.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - status : 'not_read', 'read', 'assigned', 'in_progress', 'waiting' (=en
@@ -2784,7 +3054,7 @@ async def dolibarr_list_tickets(
         if filters:
             params["sqlfilters"] = " AND ".join(filters)
 
-        tickets = await _api_get_list("tickets", params)
+        tickets = await _scan_list("tickets", params)
 
         results = []
         for t in tickets:
@@ -2804,11 +3074,10 @@ async def dolibarr_list_tickets(
                 "assigned_to": t.get("fk_user_assign"),
             })
 
-        return _dumps({"count": len(results), "tickets": results})
+        return _dumps(_export_payload({"count": len(results), "tickets": results}, "tickets", limit, cursor, scan=tickets))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
@@ -2869,6 +3138,68 @@ async def dolibarr_get_ticket(ticket_id: int = 0, ref: str = "") -> str:
         return _format_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# Effets de bord d'une création de ticket
+# ---------------------------------------------------------------------------
+
+
+#: Observateurs appelés après une création de ticket réussie.
+#:
+#: Créer un ticket n'est pas une écriture isolée : un module branché sur le
+#: trigger Dolibarr TICKET_CREATE peut écrire ailleurs dans la foulée, et aucun
+#: connecteur générique ne peut deviner lesquels ni où. Une extension qui, elle,
+#: connaît le module s'inscrit ici pour aller relire ce qui a été écrit et le
+#: faire dire à l'outil. Constaté le 18/09/2026 sur la production inno³ : onze
+#: tickets créés par dolibarr_create_ticket ont débité onze unités sur les
+#: carnets de support du client (module maison `supportcredits`) sans que le
+#: retour de l'outil en souffle mot ; l'écriture ne s'est vue qu'au refus de
+#: l'imputation suivante, « statut=2, restant=0 ».
+#:
+#: Signature attendue :
+#:     async def observer(ticket_id: int, thirdparty_id: int) -> dict | None
+#: Le dict rendu est ajouté à `side_effects` ; sa clé `message`, si elle existe,
+#: est concaténée au message lisible du retour. None veut dire « rien à
+#: signaler » et n'ajoute aucune ligne.
+TICKET_CREATE_OBSERVERS: list = []
+
+
+def register_ticket_create_observer(observer) -> None:
+    """Inscrit un observateur d'effets de bord de création de ticket.
+
+    Idempotent : une extension dont le `register()` serait appelé deux fois ne
+    doit pas faire compter le débit deux fois.
+    """
+    if observer not in TICKET_CREATE_OBSERVERS:
+        TICKET_CREATE_OBSERVERS.append(observer)
+
+
+async def _ticket_create_side_effects(ticket_id: int, thirdparty_id: int) -> list:
+    """Collecte ce que les observateurs ont trouvé, sans jamais faire échouer.
+
+    Le ticket, lui, est créé : une panne d'observateur ne doit pas se lire comme
+    un échec de création. Elle est rendue telle quelle dans la liste, parce
+    qu'un observateur qui n'a rien vu et un observateur cassé ne disent pas la
+    même chose.
+    """
+    found: list = []
+    for observer in TICKET_CREATE_OBSERVERS:
+        try:
+            result = await observer(ticket_id, thirdparty_id)
+        except Exception as exc:
+            found.append({
+                "observer": getattr(observer, "__name__", repr(observer)),
+                "error": f"{type(exc).__name__}: {exc}",
+                "message": (
+                    "Un observateur d'effets de bord a échoué : ce que ce module "
+                    "a pu écrire au passage n'a PAS été vérifié."
+                ),
+            })
+            continue
+        if result:
+            found.append(result)
+    return found
+
+
 @mcp.tool()
 async def dolibarr_create_ticket(
     subject: str,
@@ -2882,15 +3213,47 @@ async def dolibarr_create_ticket(
 
     Confirmation utilisateur requise avant exécution.
 
+    ATTENTION - la création d'un ticket n'est pas forcément une écriture
+    isolée. Un module branché sur le trigger Dolibarr TICKET_CREATE peut
+    écrire ailleurs dans la foulée, et le connecteur ne peut pas l'en
+    empêcher : c'est du code serveur, déclenché par l'écriture elle-même.
+    Cas connu sur les instances inno³ (module maison `supportcredits`) :
+    créer un ticket rattaché à un tiers DÉBITE un carnet de support de ce
+    client - le plus ancien carnet actif, non périmé, ayant assez de solde.
+    Le comportement dépend de deux réglages du module, côté serveur :
+    SUPPORTCREDITS_CONSUME_MODE (`auto` débite, `suggest` et `manual` non) et
+    SUPPORTCREDITS_CONSUME_TIMING (`create` débite ici, `close` à la clôture).
+    Aucun paramètre de cet outil ne les surcharge. Constaté le 18/09/2026 :
+    onze tickets, onze unités débitées sur deux carnets, sans un mot dans le
+    retour.
+
     Paramètres :
     - subject       : sujet du ticket (obligatoire)
     - message       : message / description du problème (obligatoire)
     - thirdparty_id : ID du tiers concerné (optionnel)
     - project_id    : ID du projet associé (optionnel)
-    - severity      : 'low', 'normal', 'high', 'critical' (défaut: 'normal')
+    - severity      : 'low', 'normal', 'high', 'critical' (défaut: 'normal').
+      Sur une instance `supportcredits` en débit automatique, ce paramètre
+      décide AUSSI du nombre d'unités prélevées au client, sans que rien ne le
+      dise dans l'interface : 'low' → 1 unité, 'high' et 'critical' → 5
+      unités, 'normal' → 1 unité par défaut de correspondance (le module ne
+      connaît pas le code NORMAL et retombe sur « simple », en journalisant un
+      avertissement). Un ticket créé en 'critical' coûte donc cinq fois un
+      ticket créé en 'low'.
     - type_code     : 'QUESTION', 'INCIDENT', 'REQUEST', 'SUPPORT' (défaut: 'QUESTION')
 
-    Retourne l'ID et la référence du ticket créé.
+    Retourne l'ID et la référence du ticket créé, plus :
+    - `side_effects_checked` : le connecteur a-t-il su REGARDER les effets de
+      bord. Faux quand aucune extension ne lui apprend à les lire - « je n'ai
+      pas regardé » n'est pas « il ne s'est rien passé » ;
+    - `side_effects` : ce qui a été écrit au passage, une entrée par module.
+      Sur une instance `supportcredits`, l'entrée nomme le carnet débité, les
+      unités et le solde restant. Une entrée portant `error` signale un
+      observateur en panne : le ticket est créé, mais l'effet de bord n'a pas
+      pu être vérifié.
+
+    Annuler une imputation non voulue ne se fait pas d'ici : passer par
+    l'onglet « Crédit support » du ticket dans Dolibarr.
     """
     try:
         if not subject:
@@ -2917,13 +3280,30 @@ async def dolibarr_create_ticket(
 
         result = await api_post("tickets", data)
 
+        try:
+            new_ticket_id = int(result)
+        except (TypeError, ValueError):
+            # L'API rend normalement l'id nu ; si elle rend autre chose, on
+            # préfère un 0 explicite à une exception qui masquerait la création.
+            new_ticket_id = 0
+
+        side_effects = await _ticket_create_side_effects(new_ticket_id, thirdparty_id)
+        message = f"Ticket créé avec succès (ID {result})."
+        reported = " ".join(
+            str(effect["message"]) for effect in side_effects if effect.get("message")
+        )
+        if reported:
+            message = f"{message} {reported}"
+
         return _dumps({
             "success": True,
             "ticket_id": result,
             "subject": subject,
             "severity": severity_code,
             "type": type_code,
-            "message": f"Ticket créé avec succès (ID {result}).",
+            "side_effects_checked": bool(TICKET_CREATE_OBSERVERS),
+            "side_effects": side_effects,
+            "message": message,
         })
 
     except Exception as exc:
@@ -2944,7 +3324,7 @@ async def dolibarr_close_ticket(
     L'API REST Dolibarr n'a pas d'endpoint de clôture : l'outil passe par
     PUT /tickets/{id}. Piège couvert : Ticket::update() écrit la colonne
     fk_statut depuis $this->status (Dolibarr récents), si bien qu'un PUT ne
-    portant que fk_statut répond 200 sans rien écrire — on envoie les deux
+    portant que fk_statut répond 200 sans rien écrire - on envoie les deux
     clés puis on RELIT le ticket pour vérifier que le statut a changé.
     Pour un statut 8 ou 9, on reproduit Ticket::close() : date_close = now
     et progress = 100.
@@ -3156,7 +3536,7 @@ async def dolibarr_update_ticket(
 async def dolibarr_delete_ticket(ticket_id: int = 0, ref: str = "") -> str:
     """Supprime définitivement un ticket de support (DELETE /tickets/{id}).
 
-    Confirmation utilisateur requise avant exécution — suppression
+    Confirmation utilisateur requise avant exécution - suppression
     IRRÉVERSIBLE, fil de messages compris. Pour clore proprement un ticket,
     préférer dolibarr_close_ticket.
 
@@ -3185,7 +3565,7 @@ async def dolibarr_delete_ticket(ticket_id: int = 0, ref: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Résolution et synthèse
+# Tools - Résolution et synthèse
 # ---------------------------------------------------------------------------
 
 
@@ -3347,7 +3727,7 @@ REVENUE_SCAN_PAGE = 100
 #: Garde-fou de boucle : 50 pages = 5 000 factures sur la période demandée.
 REVENUE_SCAN_MAX_PAGES = 50
 #: Plafond d'écritures bancaires inspectées pour le CA encaissé. Au-delà, la
-#: réponse porte `truncated: true` — jamais de troncature muette.
+#: réponse porte `truncated: true` - jamais de troncature muette.
 REVENUE_CASH_SCAN_MAX = 400
 
 
@@ -3366,22 +3746,25 @@ async def _invoices_in_range(date_start: str, date_end: str) -> list:
     rows: list = []
     for page in range(REVENUE_SCAN_MAX_PAGES):
         chunk = await _api_get_list("invoices", {
-            "sortfield": "t.datef",
+            "sortfield": "t.datef,t.rowid",
             "sortorder": "DESC",
             "limit": REVENUE_SCAN_PAGE,
             "page": page,
             "sqlfilters": sqlfilters,
             "properties": "id,ref,total_ht,total_ttc,date,fk_statut,paye",
         })
-        chunk = chunk if isinstance(chunk, list) else []
-        rows.extend(chunk)
+        if not isinstance(chunk, list):
+            raise ValueError("Balayage financier incomplet : réponse invalide.")
+        merged = _unique_rows([*rows, *chunk])
+        if chunk and len(merged) == len(rows):
+            raise ValueError("Balayage financier incomplet : page répétée.")
+        rows = merged
         if len(chunk) < REVENUE_SCAN_PAGE:
+            if any(r.get("total_ht") is None or r.get("total_ttc") is None
+                   or not _ts_to_date(r.get("date")) for r in rows):
+                raise ValueError("Calcul incomplet : montant ou date de facture absent.")
             return rows
-    logger.warning(
-        "CA : %d pages de factures lues sur %s→%s, balayage arrêté au garde-fou.",
-        REVENUE_SCAN_MAX_PAGES, date_start, date_end,
-    )
-    return rows
+    raise ValueError("Balayage financier incomplet : plafond atteint, aucun total certifié.")
 
 
 async def _customer_cash_in(date_start: str, date_end: str) -> dict:
@@ -3392,7 +3775,7 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
     écritures créditrices portant un lien `payment`, celui que Dolibarr pose
     entre un règlement de facture client et sa ligne de banque.
     """
-    accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+    accounts = await _scan_list(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
     scanned: list[tuple[int, dict]] = []
     used_accounts = []
     for raw in accounts if isinstance(accounts, list) else []:
@@ -3410,7 +3793,7 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
             and _id_int(line.get("id") or line.get("rowid")) is not None
         )
 
-    truncated = len(scanned) > REVENUE_CASH_SCAN_MAX
+    truncated = len(scanned) > REVENUE_CASH_SCAN_MAX or not accounts.complete
     kept = scanned[:REVENUE_CASH_SCAN_MAX]
 
     links = await _gather_limited([
@@ -3419,8 +3802,11 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
     ])
 
     payments = []
+    unresolved = 0
     for (acc_id, line), resolved in zip(kept, links):
         if isinstance(resolved, Exception):
+            unresolved += 1
+            truncated = True
             logger.warning("Liens illisibles sur l'écriture %s : %s", line.get("id"), resolved)
             continue
         sources = resolved.get("sources") or []
@@ -3436,6 +3822,8 @@ async def _customer_cash_in(date_start: str, date_end: str) -> dict:
 
     return {
         "payments": payments,
+        "unresolved_entries": unresolved,
+        "accounts_complete": accounts.complete,
         "accounts_scanned": used_accounts,
         "entries_scanned": len(kept),
         "entries_matched": len(scanned),
@@ -3454,17 +3842,17 @@ async def dolibarr_get_revenue_summary(
     Paramètres :
     - year  : année (défaut : année en cours)
     - month : mois 1-12 (défaut : mois en cours)
-    - basis : assiette du calcul, et c'est le paramètre déterminant —
+    - basis : assiette du calcul, et c'est le paramètre déterminant -
         * 'emises' (défaut) : toutes les factures VALIDÉES, payées ou non
           (fk_statut 1 et 2), comptées à leur date de facture. C'est le CA
           commercial : une facture émise dans le mois y figure le jour de son
           émission, sans attendre son encaissement. Le total est NET des
-          avoirs — dont le montant est négatif — et le détail est rendu à part
+          avoirs - dont le montant est négatif - et le détail est rendu à part
           (`month_gross_ht`, `month_credit_notes_ht`, `month_nb_credit_notes`)
           pour qu'une facture annulée par un avoir de même montant se lise, au
           lieu de sembler avoir disparu.
         * 'encaissees' : les encaissements clients réellement constatés en
-          banque sur la période, à leur date d'opération. Montants TTC — ce
+          banque sur la période, à leur date d'opération. Montants TTC - ce
           sont des mouvements de compte, pas des bases HT.
       L'assiette retenue est toujours rappelée dans la réponse (`basis`,
       `basis_label`) : les deux chiffres sont légitimes et ne se comparent pas.
@@ -3474,7 +3862,7 @@ async def dolibarr_get_revenue_summary(
 
     'encaissees' reconstruit les encaissements depuis le journal bancaire, faute
     de route REST listant les règlements : les comptes clos et les caisses sont
-    exclus, et le balayage est plafonné à REVENUE_CASH_SCAN_MAX écritures — la
+    exclus, et le balayage est plafonné à REVENUE_CASH_SCAN_MAX écritures - la
     réponse porte alors `truncated: true`.
     """
     from datetime import datetime
@@ -3501,6 +3889,9 @@ async def dolibarr_get_revenue_summary(
                 "year": year,
                 "month": month,
                 "basis": "encaissees",
+                "definition": {"date_basis": "bank_operation", "amount_basis": "TTC",
+                               "date_start": year_start, "date_end": year_end,
+                               "ytd_scope": "année entière, nom historique"},
                 "basis_label": (
                     "encaissements clients constatés en banque, à la date d'opération (TTC)"
                 ),
@@ -3510,13 +3901,16 @@ async def dolibarr_get_revenue_summary(
                 "ytd_nb_payments": len(cash["payments"]),
                 "accounts_scanned": cash["accounts_scanned"],
                 "entries_scanned": cash["entries_scanned"],
+                "unresolved_entries": cash["unresolved_entries"],
+                "accounts_complete": cash["accounts_complete"],
             }
             if cash["truncated"]:
                 result["truncated"] = True
                 result["truncation_note"] = (
                     f"{cash['entries_matched']} écritures créditrices sur la période, "
                     f"{cash['entries_scanned']} inspectées (plafond REVENUE_CASH_SCAN_MAX). "
-                    "Les montants ci-dessus sont donc minorés : restreindre la période."
+                    f"{cash['unresolved_entries']} liens illisibles. "
+                    "Montants incomplets : vérifier les droits et restreindre la période."
                 )
             return _dumps(result)
 
@@ -3537,6 +3931,10 @@ async def dolibarr_get_revenue_summary(
             "year": year,
             "month": month,
             "basis": "emises",
+            "definition": {"date_basis": "invoice_date", "credit_note_date": "own_date",
+                           "statuses": [1, 2], "date_start": year_start,
+                           "date_end": year_end, "bounds": "inclusive",
+                           "ytd_scope": "année entière, nom historique"},
             "basis_label": (
                 "factures validées ou payées (fk_statut 1 et 2), à la date de facture, "
                 "NET des avoirs de la période"
@@ -3588,18 +3986,22 @@ def _month_last_day(year: int, month: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Actions / Agenda
+# Tools - Actions / Agenda
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def dolibarr_list_actions_open(
-    project_id: int = 0,
-    thirdparty_id: int = 0,
-    assigned_to: int = 0,
-    limit: int = DEFAULT_LIMIT,
+    project_id: int=0,
+    thirdparty_id: int=0,
+    assigned_to: int=0,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Retourne les actions non terminées (percent < 100), triées par date prévue ascendante.
     Utile pour le suivi des engagements client et des actions projet.
@@ -3627,10 +4029,10 @@ async def dolibarr_list_actions_open(
             sql_parts.append(f"(t.fk_soc:=:{thirdparty_id})")
         params["sqlfilters"] = " AND ".join(sql_parts)
 
-        actions = await _api_get_list("agendaevents", params)
+        actions = await _scan_list("agendaevents", params)
 
         if not isinstance(actions, list):
-            return _dumps({"count": 0, "actions": []})
+            return _dumps(_export_payload({"count": 0, "actions": []}, "actions", limit, cursor, scan=actions))
 
         results = []
         for a in actions:
@@ -3656,14 +4058,13 @@ async def dolibarr_list_actions_open(
                 "fulldayevent": a.get("fulldayevent"),
             })
 
-        return _dumps({"count": len(results), "actions": results})
+        return _dumps(_export_payload({"count": len(results), "actions": results}, "actions", limit, cursor, scan=actions))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 # ---------------------------------------------------------------------------
-# Tools — Dashboard
+# Tools - Dashboard
 # ---------------------------------------------------------------------------
 
 
@@ -3683,7 +4084,7 @@ async def dolibarr_dashboard() -> str:
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Projets ouverts — ne charger que id+ref pour compter
+    # Projets ouverts - ne charger que id+ref pour compter
     try:
         projects = await api_get("projects", {
             "sqlfilters": "(t.fk_statut:=:1)",
@@ -3694,7 +4095,7 @@ async def dolibarr_dashboard() -> str:
     except Exception as exc:
         dashboard["projects_open"] = f"Erreur : {exc}"
 
-    # Factures impayées — ne charger que les champs nécessaires au calcul
+    # Factures impayées - ne charger que les champs nécessaires au calcul
     try:
         invoices = await api_get("invoices", {
             "sqlfilters": "(t.fk_statut:=:1)",
@@ -3743,7 +4144,7 @@ async def dolibarr_dashboard() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Projets (création/modification)
+# Tools - Projets (création/modification)
 # ---------------------------------------------------------------------------
 
 
@@ -4027,7 +4428,7 @@ async def dolibarr_delete_project(project_id: int) -> str:
                     "dolibarr_body": body,
                     "diagnostic": (
                         "HTTP 500 sur DELETE /projects/{id}. Causes typiques :\n"
-                        "  1. FK enfant non gérée par Project::delete() — Dolibarr abandonne.\n"
+                        "  1. FK enfant non gérée par Project::delete() - Dolibarr abandonne.\n"
                         "  2. Trigger PROJECT_DELETE custom qui lève une exception PHP.\n"
                         "  3. Projet PROV laissé à mi-chemin (renommage cassé).\n"
                         "Étapes recommandées :\n"
@@ -4042,7 +4443,7 @@ async def dolibarr_delete_project(project_id: int) -> str:
                         f"(SELECT rowid FROM llx_projet_task WHERE fk_projet={project_id});\n"
                         "     SELECT * FROM llx_ecm_files WHERE filepath LIKE 'projet/%' "
                         f"AND src_object_id={project_id};\n"
-                        "  c. En dernier recours (irréversible — backup DB avant !) :\n"
+                        "  c. En dernier recours (irréversible - backup DB avant !) :\n"
                         f"     DELETE FROM llx_projet_extrafields WHERE fk_object={project_id};\n"
                         f"     DELETE FROM llx_element_contact WHERE element_id={project_id} "
                         "AND element_type='project';\n"
@@ -4074,7 +4475,7 @@ async def dolibarr_create_proposal(
     - thirdparty_id : ID du tiers (obligatoire)
     - title         : titre de la proposition (optionnel)
     - project_id    : ID du projet associé (optionnel)
-    - date          : date de création (format YYYY-MM-DD, optionnel — défaut : aujourd'hui)
+    - date          : date de création (format YYYY-MM-DD, optionnel - défaut : aujourd'hui)
     - date_validity : date de fin de validité (format YYYY-MM-DD, optionnel).
                       Sans ce paramètre, Dolibarr peut afficher 15/02/1970
                       (bug timestamp : duree_validite*86400 interprété comme epoch)
@@ -4160,7 +4561,7 @@ async def dolibarr_add_proposal_lines(
         if not proposal_id:
             return "Le proposal_id est obligatoire."
         if not lines:
-            return "La liste lines est vide — aucune ligne à ajouter."
+            return "La liste lines est vide - aucune ligne à ajouter."
 
         added = []
         total_ht = 0.0
@@ -4188,7 +4589,7 @@ async def dolibarr_add_proposal_lines(
             # [line_object], PAS un objet nu.
             #
             # Cause racine (api_proposals.class.php::postLines) :
-            #   foreach ($request_data as $TData) — itère sur les clés du dict
+            #   foreach ($request_data as $TData) - itère sur les clés du dict
             #   → iter 1 : $TData = valeur de "desc" (string) → foreach() warning, 0 ligne
             #   → iter 2..N : $TData = scalaire → empty($TData[0]) = true → wrappé en array
             #                 → (object)$scalaire → stdClass vide → addline(null,...) → ligne vide
@@ -4212,7 +4613,7 @@ async def dolibarr_add_proposal_lines(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Détail facture / propal + validate + download PDF
+# Tools - Détail facture / propal + validate + download PDF
 # ---------------------------------------------------------------------------
 
 
@@ -4266,6 +4667,25 @@ def _strip_html(text: Any) -> str:
     s = re.sub(r"[ \t]+", " ", s)          # espaces multiples → 1
     s = re.sub(r"\n[ \t]*\n+", "\n", s)    # lignes vides multiples → 1
     return s.strip()
+
+
+def _bounded_text(text: Any, limit: int = DETAIL_NOTE_MAX_CHARS) -> "tuple[str, bool, int]":
+    """Borne un texte brut sans jamais le couper en silence. Retourne
+    (texte, truncated, length) : `length` est la longueur du texte entier,
+    `truncated` vaut True si `texte` en est une coupe. None devient "".
+
+    Une lecture de détail rend ainsi le texte entier jusqu'à `limit`, et dit
+    quand elle a coupé : l'appelant peut comparer ce qu'il a écrit à ce qu'il
+    relit, au lieu de conclure à une perte en base.
+    """
+    s = "" if text is None else str(text)
+    return s[:limit], len(s) > limit, len(s)
+
+
+def _bounded_note(text: Any, limit: int = DETAIL_NOTE_MAX_CHARS) -> "tuple[str, bool, int]":
+    """Nettoie une note HTML (cf. _strip_html) puis la borne comme _bounded_text :
+    la longueur annoncée est celle du texte nettoyé, pas celle du HTML brut."""
+    return _bounded_text(_strip_html(text), limit)
 
 
 def _num(value: Any) -> Any:
@@ -4323,8 +4743,15 @@ def _format_doc_line(line: dict) -> dict:
 
 
 @mcp.tool()
-async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
+async def dolibarr_get_invoice(
+    invoice_id: int=0,
+    ref: str='',
+    include_payments: bool=True,
+) -> str:
     """Détail d'une facture client par ID numérique ou par référence.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
     ref, tiers, montants HT/TTC/TVA, statut, échéance, paiements associés
@@ -4335,6 +4762,13 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
     Paramètres :
     - invoice_id : ID de la facture
     - ref : référence (ex: FA2605-0001, ou (PROV1234) pour un brouillon)
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         if ref and not invoice_id:
@@ -4354,6 +4788,8 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
         lines_raw = inv.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
 
+        note_text, note_truncated, note_length = _bounded_note(inv.get("note_public"))
+
         result = {
             "id": inv.get("id"),
             "ref": inv.get("ref"),
@@ -4370,11 +4806,15 @@ async def dolibarr_get_invoice(invoice_id: int = 0, ref: str = "") -> str:
             "date_due": _ts_to_date(inv.get("date_lim_reglement")),
             "fk_project": inv.get("fk_project"),
             "ref_customer": inv.get("ref_client"),
-            "note_public": _strip_html(inv.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": inv.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payments(result, False, include_payments)
         return _dumps(result)
 
     except Exception as exc:
@@ -4386,8 +4826,17 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
     """Détail d'une proposition commerciale par ID numérique ou par référence.
 
     Fournir soit proposal_id, soit ref. Retourne ref, tiers, montants, statut,
-    date de validité, et TOUTES les lignes détaillées (id, type produit/service,
-    produit lié, libellé, quantité, prix, remise %, TVA, totaux, dates).
+    date de validité, la note publique, et TOUTES les lignes détaillées (id,
+    type produit/service, produit lié, libellé, quantité, prix, remise %, TVA,
+    totaux, dates).
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents : une note écrite par dolibarr_update_proposal
+    se vérifie en la relisant. Elle était coupée à 300 caractères sans le dire
+    (constat du 14/09/2026 sur la propale 172).
 
     Paramètres :
     - proposal_id : ID de la propal
@@ -4409,6 +4858,7 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
 
         lines_raw = p.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
+        note_text, note_truncated, note_length = _bounded_note(p.get("note_public"))
 
         result = {
             "id": p.get("id"),
@@ -4424,11 +4874,14 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
             "date_validity": _ts_to_date(p.get("fin_validite") or p.get("date_validity")),
             "fk_project": p.get("fk_project"),
             "ref_customer": p.get("ref_client"),
-            "note_public": _strip_html(p.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": p.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(p, proposal=True))
         return _dumps(result)
 
     except Exception as exc:
@@ -4436,8 +4889,15 @@ async def dolibarr_get_proposal(proposal_id: int = 0, ref: str = "") -> str:
 
 
 @mcp.tool()
-async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> str:
+async def dolibarr_get_supplier_invoice(
+    invoice_id: int=0,
+    ref: str='',
+    include_payments: bool=True,
+) -> str:
     """Détail d'une facture FOURNISSEUR par ID numérique ou par référence.
+
+    include_payments : vrai par défaut, lit les paiements des factures rendues.
+    Une lecture refusée est signalée, jamais remplacée par une liste vide.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
     ref (ref interne Dolibarr type SI2602-0084). Retourne ref interne, ref
@@ -4447,6 +4907,13 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
     Paramètres :
     - invoice_id : ID de la facture fournisseur
     - ref : référence interne Dolibarr (ex: SI2602-0084)
+
+    Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
+    DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
+    plafond et la coupe est annoncée : `note_public_truncated` passe à true et
+    `note_public_length` donne la longueur réelle du texte nettoyé. Ces deux
+    champs sont toujours présents. Elle était coupée à 300 caractères sans le
+    dire.
     """
     try:
         if ref and not invoice_id:
@@ -4468,6 +4935,8 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
         lines_raw = inv.get("lines") or []
         lines = [_format_doc_line(ln) for ln in lines_raw]
 
+        note_text, note_truncated, note_length = _bounded_note(inv.get("note_public"))
+
         result = {
             "id": inv.get("id"),
             "ref": inv.get("ref"),
@@ -4488,11 +4957,15 @@ async def dolibarr_get_supplier_invoice(invoice_id: int = 0, ref: str = "") -> s
                 inv.get("date_echeance") or inv.get("date_lim_reglement")
             ),
             "fk_project": inv.get("fk_project"),
-            "note_public": _strip_html(inv.get("note_public"))[:300],
+            "note_public": note_text,
+            "note_public_length": note_length,
+            "note_public_truncated": note_truncated,
             "model_pdf": inv.get("model_pdf"),
             "lines_count": len(lines_raw),
             "lines": lines,
         }
+        result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payments(result, True, include_payments)
         return _dumps(result)
 
     except Exception as exc:
@@ -4559,14 +5032,14 @@ async def dolibarr_update_invoice(
 
     Paramètres :
     - invoice_id   : ID de la facture (obligatoire)
-    - project_id   : rattacher la facture à ce projet — champ API `fk_project`.
+    - project_id   : rattacher la facture à ce projet - champ API `fk_project`.
                      0 = ne pas toucher au lien projet.
     - ref_customer : référence client (champ API `ref_client`)
     - note_public  : note publique
     - note_private : note privée
     - date_due     : date limite de règlement (format YYYY-MM-DD)
 
-    Statut — vérifié en production le 11/08/2026 sur FA2608-0939 (Dolibarr
+    Statut - vérifié en production le 11/08/2026 sur FA2608-0939 (Dolibarr
     23.0.0) : un PUT sur une facture **validée non payée** (fk_statut=1,
     paye=0) renvoie HTTP 200 et le champ est persisté. `Facture::update()`
     écrit `fk_projet` sans aucun garde de statut, et `api_invoices::put()`
@@ -4575,12 +5048,12 @@ async def dolibarr_update_invoice(
 
     Effet de bord mesuré sur ce même essai : `fk_user_modif` prend l'id de
     l'utilisateur de la clé API et le trigger FACTURE_MODIFY se déclenche.
-    Aucun autre champ ne bouge — `Facture::update()` réécrit toute la ligne,
+    Aucun autre champ ne bouge - `Facture::update()` réécrit toute la ligne,
     mais à partir de l'objet relu juste avant, donc à valeurs identiques.
 
     Piège d'interface, sans rapport avec l'API : dans `card.php`, le sélecteur
     de projet d'une facture **ne liste pas les projets fermés**. Un champ qui
-    paraît vide dans l'UI ne signifie donc pas « aucun projet rattaché » —
+    paraît vide dans l'UI ne signifie donc pas « aucun projet rattaché » -
     seule la valeur `fk_project` rendue ici fait foi.
 
     Retour JSON : success, invoice_id, ref, status, status_label, fk_project,
@@ -4705,7 +5178,7 @@ async def dolibarr_update_proposal(
 
     Paramètres :
     - proposal_id   : ID de la proposition (obligatoire)
-    - project_id    : rattacher la propal à ce projet — champ API `fk_project`.
+    - project_id    : rattacher la propal à ce projet - champ API `fk_project`.
                       0 = ne pas toucher au lien projet.
     - title         : titre/objet de la proposition (champ `titre`)
     - date          : date de la proposition (format YYYY-MM-DD)
@@ -4714,12 +5187,12 @@ async def dolibarr_update_proposal(
     - note_private  : note privée
     - ref_customer  : référence client (champ API `ref_client`)
 
-    Lien projet — vérifié en prod (Dolibarr 23.0.0) : l'API REST expose la
+    Lien projet - vérifié en prod (Dolibarr 23.0.0) : l'API REST expose la
     propriété `fk_project` (PAS `fk_projet`, qui est l'orthographe de la colonne
     SQL) ; `Propal::update()` persiste bien le lien. Un PUT {"fk_project":"258"}
     relu via GET renvoie fk_project="258".
 
-    Statut — l'update est autorisé quel que soit le statut : rattacher un projet
+    Statut - l'update est autorisé quel que soit le statut : rattacher un projet
     et éditer les notes restent possibles sur une propale *validée* (comme dans
     l'UI Dolibarr). Pour les propales validées/signées/facturées, Dolibarr peut
     cependant ignorer certains champs (dates, montants) ; la réponse relit la
@@ -4809,7 +5282,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
 
     Paramètres :
     - proposal_id : ID de la proposition à supprimer (obligatoire)
-    - force       : défaut False — seuls les BROUILLONS (statut 0) sont
+    - force       : défaut False - seuls les BROUILLONS (statut 0) sont
                     supprimables. Passer force=True pour supprimer malgré tout
                     une propale validée/signée/refusée/facturée (assumé par
                     l'appelant : liens commandes/factures potentiellement
@@ -4859,16 +5332,18 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
                     "proposal_id": proposal_id,
                     "error": "not_found",
                     "message": (
-                        f"Proposition {proposal_id} introuvable (404) — rien à supprimer."
+                        f"Proposition {proposal_id} introuvable (404) - rien à supprimer."
                     ),
                 })
-            snapshot_error = str(get_exc)
+            if get_exc.response.status_code in (401, 403):
+                return _format_error(get_exc)
+            snapshot_error = _format_error(get_exc)
         except Exception as get_exc:
             snapshot_error = str(get_exc)
 
         # Garde-fou : seuls les brouillons sont supprimables, sauf force=True.
         # (Cohérent avec update/delete_proposal_line ; évite de détruire une
-        # propale engagée — validée/signée/facturée — sur un simple appel.)
+        # propale engagée - validée/signée/facturée - sur un simple appel.)
         if not force:
             if snapshot_error is not None or not snapshot:
                 return _dumps({
@@ -4938,7 +5413,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
                         f"{proposal_id} AND targettype='propal';\n"
                         "     SELECT rowid FROM llx_propaldet WHERE fk_propal="
                         f"{proposal_id};\n"
-                        "  c. En dernier recours (irréversible — backup DB avant !) :\n"
+                        "  c. En dernier recours (irréversible - backup DB avant !) :\n"
                         f"     DELETE FROM llx_propal_extrafields WHERE fk_object={proposal_id};\n"
                         f"     DELETE FROM llx_propaldet WHERE fk_propal={proposal_id};\n"
                         f"     DELETE FROM llx_element_contact WHERE element_id={proposal_id} "
@@ -4981,7 +5456,7 @@ async def dolibarr_update_proposal_line(
     erreur. Repasser la propale en brouillon avant (UI : bouton « Modifier »),
     puis revalider.
 
-    Exemple — porter une remise de 15 % sur une ligne existante (au lieu d'une
+    Exemple - porter une remise de 15 % sur une ligne existante (au lieu d'une
     ligne de remise négative séparée) : fields={"remise_percent": 15}.
 
     Retourne : success, proposal_id, line_id, champs envoyés, et les totaux
@@ -5125,7 +5600,7 @@ async def dolibarr_set_proposal_draft(proposal_id: int) -> str:
     Confirmation utilisateur requise avant exécution.
 
     Nécessaire pour éditer/supprimer les lignes d'une propale déjà validée
-    (Dolibarr les verrouille sinon — voir dolibarr_update_proposal_line). Workflow
+    (Dolibarr les verrouille sinon - voir dolibarr_update_proposal_line). Workflow
     type pour corriger une ligne d'une propale validée :
       1. dolibarr_set_proposal_draft(id)            → statut 1→0
       2. dolibarr_update_proposal_line / dolibarr_delete_proposal_line
@@ -5223,11 +5698,11 @@ async def dolibarr_get_invoice_pdf_url(invoice_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Banque : comptes, écritures, rapprochement
+# Tools - Banque : comptes, écritures, rapprochement
 # ---------------------------------------------------------------------------
 
 #: Routes REST du module Banque (vérifiées sur api_bankaccounts.class.php 24.0.0).
-#: Attention : `BANK_LINE_ENDPOINT` n'est PAS imbriquée sous le compte — la route
+#: Attention : `BANK_LINE_ENDPOINT` n'est PAS imbriquée sous le compte - la route
 #: déclarée est `GET /bankaccounts/lines/{line_id}`, sans identifiant de compte.
 BANK_ACCOUNTS_ENDPOINT = "bankaccounts"
 BANK_ACCOUNT_ENDPOINT = "bankaccounts/{account_id}"
@@ -5238,10 +5713,10 @@ BANK_LINE_LINKS_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}/links"
 BANK_BALANCE_ENDPOINT = "bankaccounts/{account_id}/balance"
 PAYMENT_TYPES_ENDPOINT = "setup/dictionary/payment_types"
 
-#: llx_bank_account.courant — Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
+#: llx_bank_account.courant - Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
 BANK_ACCOUNT_TYPES = {"0": "épargne", "1": "compte courant", "2": "caisse"}
 BANK_ACCOUNT_TYPE_CASH = "2"
-#: llx_bank_account.clos — Account::STATUS_OPEN / STATUS_CLOSED.
+#: llx_bank_account.clos - Account::STATUS_OPEN / STATUS_CLOSED.
 BANK_ACCOUNT_STATUS = {"0": "ouvert", "1": "clos"}
 BANK_ACCOUNT_STATUS_OPEN = "0"
 
@@ -5249,7 +5724,7 @@ BANK_ACCOUNT_STATUS_OPEN = "0"
 #: n'est fournie. `GET /bankaccounts/{id}/lines` n'accepte NI limit NI page :
 #: Dolibarr instancie un AccountLine par ligne retournée, donc une requête sans
 #: borne basse relit tout l'historique du compte et finit en timeout. La fenêtre
-#: est renvoyée dans la réponse (`date_start`) — jamais appliquée en silence.
+#: est renvoyée dans la réponse (`date_start`) - jamais appliquée en silence.
 BANK_ENTRIES_DEFAULT_WINDOW_DAYS = 90
 
 #: Types de lien `llx_bank_url` qui désignent l'objet à l'origine de l'écriture.
@@ -5393,8 +5868,8 @@ def _format_bank_line(raw: dict) -> dict:
     """Formate une écriture bancaire (AccountLine) en dict lisible.
 
     `amount` est SIGNÉ dans llx_bank : positif = entrée d'argent (crédit),
-    négatif = sortie (débit). On expose les deux lectures — `amount` signé et
-    le couple `debit`/`credit` — parce qu'une erreur de signe sur une écriture
+    négatif = sortie (débit). On expose les deux lectures - `amount` signé et
+    le couple `debit`/`credit` - parce qu'une erreur de signe sur une écriture
     bancaire est silencieuse et coûteuse.
     """
     if not isinstance(raw, dict):
@@ -5466,8 +5941,8 @@ def _bank_date_filter(after: str = "", before: str = "", strict_after: bool = Fa
     """Construit le sqlfilters d'une plage de dates sur llx_bank.
 
     Piège : `GET /bankaccounts/{id}/lines` construit son SQL sur
-    `FROM llx_bank` SANS alias. Un critère préfixé `t.` — la forme employée
-    partout ailleurs dans ce serveur — produit un « unknown table t » et un
+    `FROM llx_bank` SANS alias. Un critère préfixé `t.` - la forme employée
+    partout ailleurs dans ce serveur - produit un « unknown table t » et un
     HTTP 503. Les critères doivent donc porter le nom de colonne nu.
     """
     clauses = []
@@ -5510,8 +5985,15 @@ def _sort_bank_lines(lines: list, descending: bool) -> list:
 
 
 @mcp.tool()
-async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
+async def dolibarr_list_bank_accounts(
+    include_closed: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les comptes bancaires avec leur solde courant.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     C'est la donnée qui alimente un suivi de trésorerie : libellé, type, numéro,
     solde, statut ouvert/clos et indicateur de rapprochement.
@@ -5528,7 +6010,7 @@ async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
     : il EXCLUT les écritures postdatées, pour coller au solde réel du compte.
     """
     try:
-        accounts = await api_get(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
+        accounts = await _scan_list(BANK_ACCOUNTS_ENDPOINT, {"limit": MAX_LIMIT})
         results = []
         total = 0.0
         for raw in accounts if isinstance(accounts, list) else []:
@@ -5540,16 +6022,15 @@ async def dolibarr_list_bank_accounts(include_closed: bool = False) -> str:
             results.append(acc)
             total += float(acc.get("balance") or 0)
 
-        return _dumps({
+        return _dumps(_export_payload({
             "count": len(results),
             "total_balance": round(total, 2),
             "include_closed": include_closed,
             "accounts": results,
-        })
+        }, "accounts", limit, cursor, scan=accounts))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_list_bank_entries(
@@ -5561,8 +6042,12 @@ async def dolibarr_list_bank_entries(
     sort: str = "desc",
     with_links: bool = True,
     reconciled: str = "",
+    cursor: str = "",
 ) -> str:
     """Écritures d'un compte bancaire sur une période, solde cumulé compris.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - account_id : ID du compte (obligatoire, cf. dolibarr_list_bank_accounts)
@@ -5617,6 +6102,7 @@ async def dolibarr_list_bank_entries(
             _sf_and(_bank_date_filter(after=window_start, before=date_end), flags[wanted]),
         )
 
+        window = _unique_rows(window)
         response: dict[str, Any] = {
             "account_id": account_id,
             "date_start": window_start,
@@ -5630,7 +6116,7 @@ async def dolibarr_list_bank_entries(
                 f"{BANK_ENTRIES_DEFAULT_WINDOW_DAYS} jours appliquée."
             )
         if not window:
-            response.update({"count": 0, "entries": []})
+            response.update(_export_payload({"entries": []}, "entries", limit, cursor))
             return _dumps(response)
 
         ascending = _sort_bank_lines(window, descending=False)
@@ -5672,8 +6158,10 @@ async def dolibarr_list_bank_entries(
                 running_note = f"Solde cumulé non calculé : {_format_error(exc)}"
 
         ordered = _sort_bank_lines(window, descending=not str(sort).lower().startswith("a"))
-        start = max(0, offset)
-        page = ordered[start:start + _clamp_limit(limit)]
+        paging = _export_payload({"entries": ordered}, "entries", limit, cursor, offset=offset)
+        start = paging["offset"]
+        page = paging.pop("entries")
+        response.update(paging)
 
         entries = []
         for raw in page:
@@ -5707,7 +6195,7 @@ async def _bank_account_detail(account_id: int) -> dict:
 
     `GET /bankaccounts/{id}` ne renseigne PAS `balance` : seule la route de
     liste appelle `Account::solde(1)`. L'objet rendu porte donc la valeur par
-    défaut de la classe, soit 0 — trompeur au possible dans une réponse dont
+    défaut de la classe, soit 0 - trompeur au possible dans une réponse dont
     l'objet affiché est justement le compte relu. On complète explicitement.
     """
     account = _format_bank_account(await api_get(BANK_ACCOUNT_ENDPOINT.format(account_id=account_id)))
@@ -5743,7 +6231,7 @@ async def dolibarr_get_bank_balance(account_id: int, date: str = "") -> str:
     Dolibarr n'expose que le solde courant (`GET /bankaccounts/{id}/balance`,
     somme des écritures dont la date d'opération est passée). Pour une autre
     date, ce solde est reporté en ajoutant ou retranchant les seules écritures
-    situées entre cette date et aujourd'hui — jamais en resommant tout
+    situées entre cette date et aujourd'hui - jamais en resommant tout
     l'historique, que l'API ne sait pas agréger.
 
     Retourne : solde, date d'arrêté, nombre d'écritures prises dans le report
@@ -5820,13 +6308,13 @@ async def dolibarr_create_bank_entry(
     - account_id   : ID du compte (obligatoire)
     - date         : date d'opération (YYYY-MM-DD, obligatoire)
     - label        : libellé de l'écriture (obligatoire)
-    - amount       : montant, TOUJOURS positif — le sens vient de `direction`
+    - amount       : montant, TOUJOURS positif - le sens vient de `direction`
     - direction    : 'credit' = entrée d'argent, 'debit' = sortie
     - payment_type : mode de règlement, code ou id (VIR, CHQ, LIQ, CB, PRE…)
     - num_payment  : numéro de chèque / référence de règlement (optionnel)
     - project_id   : projet à rattacher (optionnel)
 
-    Sens du montant — le piège à ne pas rejouer. Dans llx_bank le montant est
+    Sens du montant - le piège à ne pas rejouer. Dans llx_bank le montant est
     SIGNÉ : positif = crédit (entrée), négatif = débit (sortie). Le formulaire
     `compta/bank/various_payment/card.php` expose ce signe via un champ `sens`
     dont la valeur 1 vaut Crédit et 0 Débit (vérifié en production le
@@ -5834,13 +6322,13 @@ async def dolibarr_create_bank_entry(
     `sign = ($sens == '0' ? -1 : 1)`). Cet outil ne prend donc jamais un montant
     négatif : il refuse, plutôt que de risquer une double négation muette.
 
-    Écriture posée via `POST /bankaccounts/{id}/lines` — l'API REST expose la
+    Écriture posée via `POST /bankaccounts/{id}/lines` - l'API REST expose la
     route, aucun formulaire web n'est sollicité. Nuance à connaître : cette
     route appelle `Account::addline()` et crée une ligne de journal bancaire,
     pas un objet « paiement divers » (llx_payment_various). L'écriture apparaît
     donc au relevé et dans le solde, mais pas dans la liste des paiements
     divers, et elle ne porte pas de ventilation comptable. Le rattachement au
-    projet est posé comme lien `llx_bank_url` — le seul emplacement dont
+    projet est posé comme lien `llx_bank_url` - le seul emplacement dont
     dispose une ligne de journal, qui n'a pas de champ projet.
 
     Retourne l'écriture RELUE depuis Dolibarr, avec le solde du compte avant et
@@ -5896,7 +6384,7 @@ async def dolibarr_create_bank_entry(
         if not line_id:
             return _dumps({
                 "success": False,
-                "message": "Dolibarr n'a pas renvoyé d'identifiant d'écriture — rien de fiable à relire.",
+                "message": "Dolibarr n'a pas renvoyé d'identifiant d'écriture - rien de fiable à relire.",
             })
 
         project_warning: str | None = None
@@ -5979,7 +6467,7 @@ async def dolibarr_delete_bank_entry(account_id: int, entry_id: int) -> str:
 
     Deux refus systématiques, parce que la ligne bancaire n'est pas toujours
     l'objet d'origine :
-    1. une écriture RAPPROCHÉE n'est pas supprimée — elle est adossée à un
+    1. une écriture RAPPROCHÉE n'est pas supprimée - elle est adossée à un
        relevé, et la retirer désaccorde le rapprochement sans prévenir ;
     2. une écriture PORTANT UN LIEN de règlement (facture client ou
        fournisseur, paiement divers, virement interne, prélèvement…) n'est pas
@@ -5987,7 +6475,7 @@ async def dolibarr_delete_bank_entry(account_id: int, entry_id: int) -> str:
        de banque. C'est le règlement qu'il faut annuler, depuis Dolibarr.
 
     Restent donc supprimables les écritures saisies directement, typiquement
-    celles créées par dolibarr_create_bank_entry — dont les écritures de test.
+    celles créées par dolibarr_create_bank_entry - dont les écritures de test.
 
     Retourne le solde du compte avant et après : la variation doit être
     exactement l'opposé du montant supprimé.
@@ -6092,11 +6580,11 @@ async def dolibarr_set_bank_statement(
     le formulaire est donc contraint, et il est explicite : il exige
     DOLIBARR_WEB_LOGIN et DOLIBARR_WEB_PASSWORD dans la configuration du
     connecteur (compte disposant du droit « banque : rapprocher »). Sans eux,
-    l'outil refuse — il ne prétend jamais avoir rapproché.
+    l'outil refuse - il ne prétend jamais avoir rapproché.
 
     Garde-fous, dans l'ordre :
     1. le compte doit être rapprochable (`rappro` actif, hors caisse, non clos)
-       — sinon échec explicite, sans aucune écriture tentée ;
+       - sinon échec explicite, sans aucune écriture tentée ;
     2. chaque écriture doit appartenir à ce compte ;
     3. après le POST, chaque écriture est RELUE par l'API REST et son
        `num_releve` comparé à la valeur demandée. Un formulaire qui change de
@@ -6229,7 +6717,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
     (1 = rapprochement actif). Cet outil écrit `rappro` via
     `PUT /bankaccounts/{id}` : `enabled=True` pose bien rappro=1.
 
-    Retourne le compte RELU après écriture, `reconcilable` compris — un compte
+    Retourne le compte RELU après écriture, `reconcilable` compris - un compte
     de type caisse ou clos reste non rapprochable même avec rappro=1, et c'est
     visible dans la réponse plutôt que découvert au rapprochement suivant.
     """
@@ -6256,7 +6744,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
                 f"{account_id} ({after.get('label')})."
                 if persisted else
                 f"Le PUT a répondu sans erreur mais rappro vaut toujours "
-                f"{after.get('rappro')} après relecture — écriture non prise en compte "
+                f"{after.get('rappro')} après relecture - écriture non prise en compte "
                 "(droit « banque : configurer » manquant ?)."
             ),
         })
@@ -6266,7 +6754,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
 
 
 # ---------------------------------------------------------------------------
-# Tools — Règlements et lettrage
+# Tools - Règlements et lettrage
 # ---------------------------------------------------------------------------
 
 INVOICE_PAYMENTS_ENDPOINT = "invoices/{invoice_id}/payments"
@@ -6277,7 +6765,7 @@ SUPPLIER_INVOICE_LINES_ENDPOINT = "supplierinvoices/{invoice_id}/lines"
 
 #: `SupplierInvoices::postLine()` lit ses arguments en propriétés d'objet sans
 #: aucun `isset()`. Une clé absente déclenche un warning PHP et arrive en null
-#: dans `addline()` — la ligne est créée, mais amputée. On envoie donc toujours
+#: dans `addline()` - la ligne est créée, mais amputée. On envoie donc toujours
 #: le jeu complet, avec des valeurs neutres explicites.
 SUPPLIER_LINE_DEFAULTS: dict[str, Any] = {
     "description": "",
@@ -6310,12 +6798,13 @@ def _format_payment(raw: dict) -> dict:
     `fk_bank_line` est le rowid de l'écriture bancaire : c'est la clé du
     lettrage, celle qui relie une facture à une ligne de relevé.
     Le même tableau porte aussi les avoirs et acomptes imputés, qui n'ont pas
-    d'écriture bancaire — d'où `has_bank_line`, pour ne pas les confondre.
+    d'écriture bancaire - d'où `has_bank_line`, pour ne pas les confondre.
     """
     if not isinstance(raw, dict):
         return {}
     bank_line = _id_int(raw.get("fk_bank_line")) or None
     out = {
+        "id": _id_int(raw.get("id") or raw.get("rowid")),
         "ref": raw.get("ref"),
         "date": _ts_to_date(raw.get("date")),
         "amount": _num(raw.get("amount")),
@@ -6325,7 +6814,10 @@ def _format_payment(raw: dict) -> dict:
         "bank_line_id": bank_line,
         "has_bank_line": bank_line is not None,
     }
-    return {k: v for k, v in out.items() if v not in (None, "")}
+    result = {k: v for k, v in out.items() if v not in (None, "")}
+    result["amount"] = _num(raw.get("amount"))
+    result["unavailable_fields"] = [] if "amount" in raw else ["amount"]
+    return result
 
 
 async def _payable_invoice(invoice_id: int, supplier: bool) -> dict:
@@ -6364,7 +6856,7 @@ def _payment_key(payment: dict) -> tuple:
     L'API rend un identifiant de paiement, jamais l'écriture bancaire associée :
     le règlement créé se retrouve par différence avec la liste lue juste avant.
     L'identité ne peut pas se réduire à `bank_line_id`, absent des avoirs et
-    acomptes imputés — deux d'entre eux se confondraient.
+    acomptes imputés - deux d'entre eux se confondraient.
     """
     return (
         payment.get("ref"),
@@ -6381,13 +6873,23 @@ async def _invoice_payments(invoice_id: int, supplier: bool) -> list:
         SUPPLIER_INVOICE_PAYMENTS_ENDPOINT if supplier else INVOICE_PAYMENTS_ENDPOINT
     ).format(invoice_id=invoice_id)
     rows = await api_get(endpoint)
-    formatted = (_format_payment(r) for r in (rows or []) if isinstance(r, dict))
+    if not isinstance(rows, list):
+        raise ValueError("Réponse de paiements invalide : liste attendue.")
+    formatted = (_format_payment(r) for r in _unique_rows(rows))
     return [p for p in formatted if p]
 
 
 @mcp.tool()
-async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False) -> str:
+async def dolibarr_list_invoice_payments(
+    invoice_id: int,
+    supplier: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Règlements rattachés à une facture, et écriture bancaire de chacun.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - invoice_id : ID de la facture (obligatoire)
@@ -6395,7 +6897,7 @@ async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False
 
     Retourne pour chaque règlement : date, montant, mode, numéro, rowid de
     l'écriture bancaire (`bank_line_id`) et, quand cette écriture existe, le
-    compte bancaire mouvementé — savoir qu'une facture est payée ne dit pas sur
+    compte bancaire mouvementé - savoir qu'une facture est payée ne dit pas sur
     quelle ligne de relevé elle a été lettrée.
 
     Le tableau inclut aussi les avoirs et acomptes imputés sur la facture :
@@ -6421,18 +6923,18 @@ async def dolibarr_list_invoice_payments(invoice_id: int, supplier: bool = False
             except Exception as exc:
                 payment["bank_line_error"] = _format_error(exc)
 
-        total = round(sum(float(p.get("amount") or 0) for p in payments), 2)
-        return _dumps({
+        total = (round(sum(float(p["amount"]) for p in payments), 2)
+                 if all(p.get("amount") is not None for p in payments) else None)
+        return _dumps(_export_payload({
             "invoice_id": invoice_id,
             "supplier": supplier,
             "count": len(payments),
             "total_paid": total,
             "payments": payments,
-        })
+        }, "payments", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_add_invoice_payment(
@@ -6545,7 +7047,7 @@ async def dolibarr_add_supplier_invoice_payment(
     porte un montant négatif, et c'est le comportement attendu.
 
     Ici la route nominale `POST /supplierinvoices/{id}/payments` accepte bien un
-    `amount` — contrairement à son équivalent client. Elle est donc employée
+    `amount` - contrairement à son équivalent client. Elle est donc employée
     telle quelle, sans passer par une route distribuée.
 
     Retourne le règlement RELU depuis la facture, avec le solde bancaire avant
@@ -6813,7 +7315,7 @@ async def dolibarr_create_supplier_invoice(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Facturation client : création, lignes, reprise d'une propale
+# Tools - Facturation client : création, lignes, reprise d'une propale
 # ---------------------------------------------------------------------------
 
 INVOICES_ENDPOINT = "invoices"
@@ -6821,7 +7323,7 @@ INVOICE_LINES_ENDPOINT = "invoices/{invoice_id}/lines"
 INVOICE_LINE_ENDPOINT = "invoices/{invoice_id}/lines/{line_id}"
 
 #: `Invoices::postLine()` déréférence chacun de ses champs en propriété d'objet
-#: sans `isset()` — même piège que côté fournisseur. Une clé absente arrive en
+#: sans `isset()` - même piège que côté fournisseur. Une clé absente arrive en
 #: null dans `Facture::addline()` : la ligne est créée, mais amputée, et sans
 #: erreur. Le jeu ci-dessous reprend l'exemple de charge utile documenté en
 #: amont, avec des valeurs neutres explicites.
@@ -6861,7 +7363,7 @@ def _line_number(line: dict, keys: "tuple[str, ...]", default: float) -> float:
 
     Une clé PRÉSENTE mais nulle vaut « absente » : les lignes recopiées d'un
     autre document portent volontiers `tva_tx: None`, et un `float(None)` y
-    ferait échouer toute la ligne — donc une facture vide, assortie d'un
+    ferait échouer toute la ligne - donc une facture vide, assortie d'un
     avertissement, là où l'appelant attend une reprise fidèle.
     """
     for key in keys:
@@ -7021,7 +7523,7 @@ async def dolibarr_add_invoice_lines(invoice_id: int, lines: list[dict]) -> str:
         if not invoice_id:
             return "Veuillez fournir un invoice_id."
         if not lines:
-            return "La liste lines est vide — aucune ligne à ajouter."
+            return "La liste lines est vide - aucune ligne à ajouter."
 
         is_draft, status_label = await _invoice_is_draft(invoice_id)
         if not is_draft:
@@ -7168,7 +7670,7 @@ async def dolibarr_delete_invoice(invoice_id: int, supplier: bool = False) -> st
     une mise en abandon depuis Dolibarr.
 
     Retourne la confirmation, et vérifie par relecture que l'objet a bien
-    disparu — un DELETE accepté sans effet est signalé comme un échec.
+    disparu - un DELETE accepté sans effet est signalé comme un échec.
     """
     try:
         if not invoice_id:
@@ -7287,7 +7789,7 @@ async def dolibarr_create_invoice_from_proposal(
     proposition. Le connecteur relit donc la propale et recopie tiers, projet,
     référence client et lignes une à une. Conséquence à connaître : les lignes
     sont recréées, pas déplacées, et la facture est liée à la propale via
-    `linked_objects` — le lien remonte dans l'onglet « Éléments liés ».
+    `linked_objects` - le lien remonte dans l'onglet « Éléments liés ».
 
     Retourne la facture créée (brouillon), relue avec ses lignes.
     """
@@ -7369,7 +7871,7 @@ async def dolibarr_create_invoice_from_proposal(
         elif report.get("total_ht") != report.get("proposal_total_ht"):
             report["total_warning"] = (
                 f"Total HT facture ({report.get('total_ht')}) différent du total de la "
-                f"proposition ({report.get('proposal_total_ht')}) — remises ou arrondis à vérifier."
+                f"proposition ({report.get('proposal_total_ht')}) - remises ou arrondis à vérifier."
             )
 
         if mark_proposal_invoiced:
@@ -7389,13 +7891,13 @@ async def dolibarr_create_invoice_from_proposal(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Pièces jointes et génération de PDF
+# Tools - Pièces jointes et génération de PDF
 # ---------------------------------------------------------------------------
 
 #: `fetchObjectByElement()`, qui résout l'objet destinataire côté Dolibarr,
 #: raisonne en NOMS D'ÉLÉMENT internes, pas en noms de module REST. Les alias
 #: lisibles annoncés dans la documentation de l'API ('supplier_invoice') n'y
-#: sont pas reconnus et produisent un 404 — vérifié en production le
+#: sont pas reconnus et produisent un 404 - vérifié en production le
 #: 31/08/2026 sur SI2603-0085, facture fournisseur pourtant validée.
 DOCUMENT_MODULE_ALIASES = {
     "supplier_invoice": "facture_fournisseur",
@@ -7421,14 +7923,18 @@ DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024
 @mcp.tool()
 async def dolibarr_list_documents(
     module: str,
-    object_id: int = 0,
-    ref: str = "",
-    limit: int = DEFAULT_LIMIT,
+    object_id: int=0,
+    ref: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les pièces jointes d'un objet Dolibarr.
 
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
     Paramètres :
-    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+    - module    : type d'objet - 'invoice', 'supplier_invoice', 'proposal',
                   'order', 'project', 'project_task', 'thirdparty', 'member'…
     - object_id : ID de l'objet (fournir object_id OU ref)
     - ref       : référence de l'objet (ex. 'FA2608-0939')
@@ -7445,7 +7951,6 @@ async def dolibarr_list_documents(
 
         params: dict[str, Any] = {
             "modulepart": _document_module(module),
-            "limit": _clamp_limit(limit),
         }
         # `id` est plus sûr que `ref` : il évite la résolution par référence, qui
         # échoue sur les brouillons dont la ref porte des parenthèses.
@@ -7484,7 +7989,7 @@ async def dolibarr_list_documents(
             for row in (rows if isinstance(rows, list) else [])
             if isinstance(row, dict)
         ]
-        return _dumps({
+        return _dumps(_export_payload({
             "success": True,
             "module": module,
             "modulepart_sent": params["modulepart"],
@@ -7492,11 +7997,10 @@ async def dolibarr_list_documents(
             "ref": ref or None,
             "count": len(documents),
             "documents": documents,
-        })
+        }, "documents", limit, cursor, identity="relative_path"))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 @mcp.tool()
 async def dolibarr_upload_document(
@@ -7512,7 +8016,7 @@ async def dolibarr_upload_document(
 
     Paramètres :
     - file_path : chemin du fichier SUR LA MACHINE qui exécute le connecteur
-    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+    - module    : type d'objet - 'invoice', 'supplier_invoice', 'proposal',
                   'order', 'project', 'project_task', 'expensereport'…
     - ref       : référence de l'objet destinataire (ex. 'SI2608-0012'). C'est
                   elle qui détermine le sous-dossier de stockage.
@@ -7527,7 +8031,7 @@ async def dolibarr_upload_document(
     message que rien ne rattache au fichier envoyé.
 
     Retourne le nom stocké et le contenu de la liste des pièces jointes après
-    envoi — la vérification que le fichier est bien arrivé.
+    envoi - la vérification que le fichier est bien arrivé.
     """
     try:
         import base64
@@ -7564,7 +8068,7 @@ async def dolibarr_upload_document(
         })
 
         # Relecture : c'est elle qui distingue un dépôt réel d'un POST accepté
-        # sans effet. Elle peut échouer sans que le dépôt ait échoué — on le dit
+        # sans effet. Elle peut échouer sans que le dépôt ait échoué - on le dit
         # alors, plutôt que de rendre un `documents_after` nul et muet.
         listed, check_note = None, None
         if stored_ref:
@@ -7663,7 +8167,7 @@ async def dolibarr_build_document(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Référentiels (utilisateurs, produits, modes de règlement)
+# Tools - Référentiels (utilisateurs, produits, modes de règlement)
 # ---------------------------------------------------------------------------
 
 USERS_ENDPOINT = "users"
@@ -7672,11 +8176,15 @@ PRODUCTS_ENDPOINT = "products"
 
 @mcp.tool()
 async def dolibarr_list_users(
-    search: str = "",
-    include_disabled: bool = False,
-    limit: int = DEFAULT_LIMIT,
+    search: str='',
+    include_disabled: bool=False,
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les utilisateurs Dolibarr (identifiants internes).
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : filtre sur login, nom ou prénom (recherche partielle)
@@ -7699,7 +8207,7 @@ async def dolibarr_list_users(
         if not include_disabled:
             params["sqlfilters"] = "(t.statut:=:1)"
 
-        rows = await api_get(USERS_ENDPOINT, params)
+        rows = await _scan_list(USERS_ENDPOINT, params)
         needle = search.strip().lower()
         results = []
         for row in rows if isinstance(rows, list) else []:
@@ -7722,22 +8230,23 @@ async def dolibarr_list_users(
                 if needle not in haystack:
                     continue
             results.append({k: v for k, v in user.items() if v not in (None, "")})
-            if len(results) >= _clamp_limit(limit):
-                break
 
-        return _dumps({"count": len(results), "users": results})
+        return _dumps(_export_payload({"count": len(results), "users": results}, "users", limit, cursor, scan=rows))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 @mcp.tool()
 async def dolibarr_list_products(
-    search: str = "",
-    kind: str = "",
-    limit: int = DEFAULT_LIMIT,
+    search: str='',
+    kind: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Liste les produits et services du catalogue Dolibarr.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - search : filtre sur la référence ou le libellé (recherche partielle)
@@ -7766,7 +8275,7 @@ async def dolibarr_list_products(
             needle = _sf_like(search)
             params["sqlfilters"] = f"((t.ref:like:'%{needle}%') or (t.label:like:'%{needle}%'))"
 
-        rows = await api_get(PRODUCTS_ENDPOINT, params)
+        rows = await _scan_list(PRODUCTS_ENDPOINT, params)
         results = []
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
@@ -7782,35 +8291,39 @@ async def dolibarr_list_products(
                 "on_sell": str(row.get("status") or "0") == "1",
             }.items() if v not in (None, "")})
 
-        return _dumps({"count": len(results), "kind": wanted or "tous", "products": results})
+        return _dumps(_export_payload({"count": len(results), "kind": wanted or "tous", "products": results}, "products", limit, cursor, scan=rows))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 @mcp.tool()
-async def dolibarr_list_payment_types() -> str:
+async def dolibarr_list_payment_types(
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
+) -> str:
     """Liste les modes de règlement actifs de l'instance (dictionnaire c_paiement).
 
-    Sans paramètre. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+
+    limit et cursor paginent les résultats. Retourne pour chacun son code ('VIR', 'CHQ', 'LIQ', 'CB',
     'PRE'…), son identifiant numérique et son libellé.
 
     Les deux formes servent : les outils de règlement attendent l'identifiant,
     les écritures bancaires attendent le code. Le connecteur accepte l'une ou
-    l'autre partout et convertit — cet outil sert à savoir ce qui existe sur
+    l'autre partout et convertit - cet outil sert à savoir ce qui existe sur
     l'instance, dont la liste est configurable.
     """
     try:
         types = await _payment_types()
         rows = sorted(types["by_code"].values(), key=lambda t: t["code"])
-        return _dumps({"count": len(rows), "payment_types": rows})
+        return _dumps(_export_payload({"count": len(rows), "payment_types": rows}, "payment_types", limit, cursor))
 
     except Exception as exc:
         return _format_error(exc)
 
-
 # ---------------------------------------------------------------------------
-# Tools — Trésorerie : prévisionnel, virements internes, relevés
+# Tools - Trésorerie : prévisionnel, virements internes, relevés
 # ---------------------------------------------------------------------------
 
 BANK_TRANSFER_ENDPOINT = "bankaccounts/transfer"
@@ -7839,7 +8352,7 @@ async def dolibarr_cash_forecast(horizon_days: int = 90, include_supplier: bool 
     déjà en retard y sont comptées à l'échéance dépassée, donc immédiatement.
 
     Le reste à payer vient de `remaintopay` quand Dolibarr le fournit, et du
-    total TTC sinon — un règlement partiel non reflété gonflerait la prévision.
+    total TTC sinon - un règlement partiel non reflété gonflerait la prévision.
     """
     try:
         from datetime import datetime
@@ -8050,21 +8563,26 @@ async def dolibarr_transfer_between_accounts(
 @mcp.tool()
 async def dolibarr_list_bank_statements(
     account_id: int,
-    date_start: str = "",
-    date_end: str = "",
+    date_start: str='',
+    date_end: str='',
+    limit: int=DEFAULT_LIMIT,
+    cursor: str='',
 ) -> str:
     """Recense les relevés déjà posés sur un compte, et les écritures restantes.
+
+    Export : total, returned, count, truncated et next_cursor. Passer cursor
+    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
     - account_id : ID du compte (obligatoire)
     - date_start : début de la période inspectée (YYYY-MM-DD). Par défaut,
-      365 jours en arrière — l'API ne sait pas agréger, chaque écriture de la
+      365 jours en arrière - l'API ne sait pas agréger, chaque écriture de la
       période est relue.
     - date_end   : fin de la période inspectée (YYYY-MM-DD, optionnel)
 
     Retourne, par numéro de relevé : nombre d'écritures, première et dernière
     date, total mouvementé. Plus `unassigned`, le compte des écritures encore
-    sans relevé — celles que dolibarr_set_bank_statement reste à traiter.
+    sans relevé - celles que dolibarr_set_bank_statement reste à traiter.
     """
     try:
         if not account_id:
@@ -8101,7 +8619,7 @@ async def dolibarr_list_bank_statements(
             entry["last_date"] = max(entry["last_date"] or date, date or "")
 
         ordered = sorted(statements.values(), key=lambda s: s["last_date"], reverse=True)
-        return _dumps({
+        return _dumps(_export_payload({
             "account_id": account_id,
             "date_start": window_start,
             "date_end": date_end or None,
@@ -8111,11 +8629,10 @@ async def dolibarr_list_bank_statements(
             "unreconciled_entries": unreconciled,
             "last_statement": ordered[0]["num_releve"] if ordered else None,
             "statements": ordered,
-        })
+        }, "statements", limit, cursor, identity="num_releve"))
 
     except Exception as exc:
         return _format_error(exc)
-
 
 # ---------------------------------------------------------------------------
 # Point d'entrée

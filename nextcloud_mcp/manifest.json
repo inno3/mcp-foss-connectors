@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "nextcloud-mcp",
   "display_name": "Nextcloud",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "Connecteur Nextcloud : fichiers (WebDAV), partages (OCS), recherche, statut utilisateur.",
   "author": {
     "name": "inno³",
@@ -22,7 +22,9 @@
         "NEXTCLOUD_USER": "${user_config.nextcloud_user}",
         "NEXTCLOUD_APP_PASSWORD": "${user_config.nextcloud_app_password}",
         "NEXTCLOUD_DOWNLOAD_DIR": "${user_config.nextcloud_download_dir}",
-        "NEXTCLOUD_MAX_SAVE_BYTES": "${user_config.nextcloud_max_save_bytes}"
+        "NEXTCLOUD_MAX_SAVE_BYTES": "${user_config.nextcloud_max_save_bytes}",
+        "NEXTCLOUD_UPLOAD_DIR": "${user_config.nextcloud_upload_dir}",
+        "NEXTCLOUD_MAX_UPLOAD_BYTES": "${user_config.nextcloud_max_upload_bytes}"
       }
     }
   },
@@ -61,6 +63,21 @@
       "description": "Plafond par fichier enregistré localement. Le corps de la réponse étant bufferisé, ce plafond borne aussi la mémoire utilisée. Défaut : 26214400 (25 Mo).",
       "required": false,
       "sensitive": false
+    },
+    "nextcloud_upload_dir": {
+      "type": "string",
+      "title": "Dossier d'envoi local",
+      "description": "Seul dossier d'où nextcloud_upload_file peut lire un fichier local (local_path y est toujours relatif ; chemins absolus, '..' et symlinks sortants refusés). Vide = même dossier que les téléchargements.",
+      "required": false,
+      "sensitive": false,
+      "default": ""
+    },
+    "nextcloud_max_upload_bytes": {
+      "type": "string",
+      "title": "Plafond de téléversement (octets)",
+      "description": "Taille maximale d'un fichier envoyé par nextcloud_upload_file, toutes sources confondues. Vide = 26214400 (25 Mo).",
+      "required": false,
+      "sensitive": false
     }
   },
   "tools": [
@@ -78,7 +95,7 @@
     },
     {
       "name": "nextcloud_upload_file",
-      "description": "Crée ou remplace un fichier avec le contenu fourni"
+      "description": "Crée ou remplace un fichier : contenu texte, binaire en base64 (content_base64) ou fichier local (local_path, sous la racine d'envoi) ; plafond 25 Mo, overwrite explicite, contrôle de condensat sha256, dépôt relu côté serveur"
     },
     {
       "name": "nextcloud_create_folder",

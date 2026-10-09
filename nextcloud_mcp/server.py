@@ -9,13 +9,19 @@ APIs  : WebDAV (/remote.php/dav/files/{user}/) pour les fichiers,
 """
 
 import asyncio
+import base64
+import binascii
 import fnmatch
+import hashlib
+import html
 import json
 import logging
+import mimetypes
 import os
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -58,6 +64,32 @@ _NC_DOWNLOAD_DIR = os.environ.get("NEXTCLOUD_DOWNLOAD_DIR") or os.path.join(
 # que ce qui remonte dans le contexte. Le corps de la réponse étant bufferisé,
 # ce plafond borne aussi la RAM : d'où une valeur volontairement modeste.
 _MAX_SAVE_BYTES = int(os.environ.get("NEXTCLOUD_MAX_SAVE_BYTES") or 25 * 1024 * 1024)
+
+# Racine autorisée pour toute LECTURE locale (nextcloud_upload_file local_path).
+# Même garde-fou que pour l'écriture, dans l'autre sens : sans lui, un chemin
+# dicté par un modèle exfiltre n'importe quel fichier lisible par le processus
+# (~/.ssh/id_rsa, un .env) vers un dossier Nextcloud éventuellement partagé.
+# Par défaut la même racine que les téléchargements, pour n'avoir qu'un dossier
+# à surveiller.
+_NC_UPLOAD_DIR = os.environ.get("NEXTCLOUD_UPLOAD_DIR") or _NC_DOWNLOAD_DIR
+# Plafond par fichier téléversé, toutes sources confondues. Le corps du PUT
+# étant construit en mémoire, ce plafond borne aussi la RAM.
+_MAX_UPLOAD_BYTES = int(os.environ.get("NEXTCLOUD_MAX_UPLOAD_BYTES") or 25 * 1024 * 1024)
+
+# mimetypes lit les tables du système : sur un hôte minimal (conteneur), les
+# formats bureautiques peuvent manquer et tout finirait en octet-stream. Cette
+# table de repli rend la déduction indépendante de la machine.
+_EXTRA_MIME_TYPES = {
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".odg": "application/vnd.oasis.opendocument.graphics",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".pdf": "application/pdf",
+    ".md": "text/markdown",
+}
 
 # Plafond serveur de l'Unified Search : Nextcloud ramène tout `limit` supérieur
 # à cette valeur. Le demander explicitement permet de détecter la troncature
@@ -103,6 +135,129 @@ def _auth() -> tuple[str, str]:
     return (_NC_USER, _NC_PASSWORD)
 
 
+# Méthodes rejouables une fois la requête émise. PROPFIND en fait partie : il
+# porte un corps de requête, mais c'est la lecture de WebDAV. Les autres verbes
+# WebDAV ne se rejouent pas - un MOVE, un DELETE ou un MKCOL rejoué après une
+# réponse perdue répond 404 ou 405 sur une opération qui avait pourtant abouti,
+# et un POST de partage crée un SECOND lien public, avec son propre jeton.
+_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS", "PROPFIND"}
+
+#: Ce que signifie chaque famille d'exception httpx quand elle arrive sans
+#: message : c'est le cas courant (ReadError depuis une fin de flux, ReadTimeout
+#: depuis un TimeoutError nu), et « Erreur : » suivi de rien était tout ce que
+#: l'appelant recevait.
+_TRANSPORT_DEFAULT_DETAIL = {
+    "ReadError": "connexion coupée par le serveur avant la réponse",
+    "ReadTimeout": "délai de lecture dépassé",
+    "WriteTimeout": "délai d'écriture dépassé",
+    "ConnectTimeout": "délai de connexion dépassé",
+    "ConnectError": "connexion impossible",
+    "PoolTimeout": "délai d'attente d'une connexion dépassé",
+    "RemoteProtocolError": "réponse HTTP mal formée ou interrompue",
+    "WriteError": "connexion coupée pendant l'envoi de la requête",
+    "CloseError": "échec de fermeture de la connexion",
+    "LocalProtocolError": "requête HTTP mal formée",
+    "ProxyError": "échec de connexion au proxy",
+    "UnsupportedProtocol": "protocole HTTP non pris en charge",
+}
+
+# MCP lance chaque appel d'outil dans une tâche distincte. Une tâche enfant
+# hérite du contexte : l'identité de la tâche évite qu'elle hérite aussi des
+# écritures du parent et les attribue à tort à son propre appel.
+_applied_writes: ContextVar["tuple[asyncio.Task[Any], list[str]] | None"] = ContextVar(
+    "nextcloud_applied_writes", default=None,
+)
+
+
+def _write_journal() -> list[str]:
+    """Journal propre à l'appel d'outil, vide hors d'une tâche asyncio."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return []
+    if task is None:
+        return []
+    journal = _applied_writes.get()
+    if journal is None or journal[0] is not task:
+        journal = (task, [])
+        _applied_writes.set(journal)
+    return journal[1]
+
+
+#: Racine WebDAV d'un compte. Le nom d'utilisateur est reconnu par sa position
+#: et non comparé à `_NC_USER` : les deux sont les mêmes en pratique, mais le
+#: module lit la configuration une seule fois, à l'import, et faire dépendre
+#: un libellé de cette lecture le rend faux dès qu'elle change.
+_DAV_ROOT_RE = re.compile(r"^/remote\.php/dav/files/[^/]+")
+
+
+def _request_label(method: str, url: str) -> str:
+    """Nomme la requête par son chemin Nextcloud, sans l'hôte ni le préfixe DAV.
+
+    Un message d'erreur n'a pas à citer l'instance, et le chemin seul reste
+    lisible quand plusieurs écritures sont listées côte à côte.
+    """
+    path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+    if _DAV_ROOT_RE.match(path):
+        path = _DAV_ROOT_RE.sub("", path, count=1) or "/"
+    elif path.startswith("/ocs/"):
+        path = path[len("/ocs/"):]
+    return f"{method.upper()} {path or '/'}"
+
+
+def _append_sentence(base: str, extra: str) -> str:
+    """Enchaîne deux phrases sans les souder : un message sabre/DAV finit
+    rarement par un point, et « could not be located Etat » se lit mal."""
+    if not extra:
+        return base
+    base = base.rstrip()
+    if base and base[-1] not in ".!?;:":
+        base += "."
+    return base + extra
+
+
+def _write_state_message(write_state: str, label: str) -> str:
+    """Précise le risque de rejouer la requête qui vient d'échouer."""
+    if write_state == "non_appliquee":
+        return (f" Écriture {label} non appliquée : rejouer cette requête est sans "
+                "risque de doublon.")
+    if write_state == "inconnu":
+        return (f" État de l'écriture {label} inconnu : écriture non rejouée "
+                "automatiquement, Nextcloud a pu la traiter avant de perdre la "
+                "réponse ; relire la ressource avant de rejouer.")
+    return ""
+
+
+class NextcloudTransportError(RuntimeError):
+    """Échec réseau définitif, nommé même quand l'exception httpx est vide.
+
+    Sans elle, un `httpx.ReadError` vide ou un `ReadTimeout` sans message se
+    rendaient à l'appelant en « Erreur : » nu, et rien ne distinguait un mot de
+    passe d'application révoqué d'une connexion coupée.
+    """
+
+    def __init__(self, kind: str, label: str, attempts: int,
+                 replayable: bool, detail: str = ""):
+        self.kind = kind
+        self.label = label
+        self.attempts = attempts
+        self.replayable = replayable
+        self.detail = detail.strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        idempotent = label.split(" ", 1)[0] in _IDEMPOTENT_METHODS
+        self.write_state = (
+            "sans_objet" if idempotent
+            else "non_appliquee" if replayable else "inconnu"
+        )
+        tail = _write_state_message(self.write_state, label)
+        if self.write_state == "sans_objet":
+            tail = (" Rejouer l'appel plus tard, et vérifier la disponibilité de "
+                    "Nextcloud si l'erreur persiste.")
+        count = "tentative" if attempts == 1 else "tentatives"
+        super().__init__(
+            f"{kind} sur {label} ({self.detail}) après {attempts} {count}.{tail}")
+
+
 async def _request(
     method: str,
     url: str,
@@ -110,13 +265,33 @@ async def _request(
     raw_response: bool = False,
     **kwargs: Any,
 ) -> Any:
-    """Appel HTTP avec retry et backoff exponentiel."""
+    """Appel HTTP avec rejeu et backoff exponentiel.
+
+    Les lectures - GET, HEAD, OPTIONS et PROPFIND, qui est la lecture de WebDAV
+    malgré son corps de requête - sont rejouées après toute erreur de transport
+    et sur un HTTP 5xx. Une écriture n'est rejouée que si la connexion n'a
+    jamais abouti (ConnectError, ConnectTimeout) : une fois la requête partie,
+    Nextcloud a pu la traiter avant de perdre la réponse, et un POST de partage
+    rejoué crée un second lien public, avec son propre jeton, que personne ne
+    sait actif.
+
+    Limite : une écriture partie dont la réponse est perdue laisse un état que
+    le client ne peut pas trancher. Ni WebDAV ni OCS n'exposent de clef
+    d'idempotence ou d'identifiant de requête à vérifier ; il faut relire la
+    ressource - `nextcloud_get_file_info` pour un dépôt, `nextcloud_list_shares`
+    pour un partage - avant de rejouer, et c'est exactement ce que veut dire
+    « inconnu ». Le journal rappelle en outre les écritures déjà réussies dans
+    le même appel d'outil.
+    """
     headers = {
         "Accept": "application/json",
     }
     if extra_headers:
         headers.update(extra_headers)
 
+    label = _request_label(method, url)
+    idempotent = method.upper() in _IDEMPOTENT_METHODS
+    journal = _write_journal()
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -127,26 +302,44 @@ async def _request(
                 )
                 resp.raise_for_status()
                 if raw_response:
-                    return resp
-                if resp.content:
+                    data: Any = resp
+                elif resp.content:
                     ct = resp.headers.get("content-type", "")
                     if "json" in ct:
-                        return resp.json()
-                    if "xml" in ct or ct.startswith("application/xml") or ct.startswith("text/xml"):
-                        return resp.text
-                    # Réponse binaire ou texte brut
-                    return resp.content
-                return {}
-        except (httpx.ConnectError, httpx.ReadTimeout) as exc:
+                        data = resp.json()
+                    elif "xml" in ct or ct.startswith("application/xml") or ct.startswith("text/xml"):
+                        data = resp.text
+                    else:
+                        # Réponse binaire ou texte brut
+                        data = resp.content
+                else:
+                    data = {}
+            if not idempotent:
+                journal.append(label)
+            return data
+        except httpx.TransportError as exc:
+            # Seul un échec de connexion prouve que Nextcloud n'a rien reçu.
+            # Toute la famille est traitée : un ReadError, un WriteTimeout ou
+            # un RemoteProtocolError traversaient sans rejeu ni habillage.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            replayable = never_sent or idempotent
             last_exc = exc
-            if attempt < _MAX_RETRIES:
+            if replayable and attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAY * (2**attempt)
-                logger.warning("Retry %s dans %.1fs : %s", url, delay, exc)
+                logger.warning("Retry %s dans %.1fs (%s : %s)", url, delay,
+                               type(exc).__name__, exc)
                 await asyncio.sleep(delay)
             else:
-                raise
+                raise NextcloudTransportError(
+                    type(exc).__name__, label, attempt + 1, replayable, str(exc),
+                ) from exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
+            # Les outils inspectent le statut HTTP - nextcloud_upload_file
+            # distingue 412, 404 et 409 - : garder l'exception httpx d'origine
+            # tout en donnant au formateur le contexte de l'écriture.
+            exc.nc_label = label
+            exc.nc_mutating = not idempotent
+            if idempotent and exc.response.status_code >= 500 and attempt < _MAX_RETRIES:
                 last_exc = exc
                 delay = _RETRY_DELAY * (2**attempt)
                 logger.warning("Retry %s (HTTP %d) dans %.1fs", url, exc.response.status_code, delay)
@@ -331,17 +524,72 @@ def _parse_propfind(xml_text: str) -> list[dict]:
     return results
 
 
+def _dav_error_message(body: str) -> str | None:
+    """Extrait le `<s:message>` d'une erreur sabre/DAV, ou None.
+
+    Sans cela, le corps d'erreur WebDAV remonte en XML brut tronqué à 200
+    caractères : l'exception et le message utile sont coupés en plein milieu,
+    et le modèle comme le lecteur y perdent la seule information exploitable.
+    """
+    match = re.search(r"<s:message>(.*?)</s:message>", body or "", re.DOTALL)
+    if not match:
+        return None
+    msg = " ".join(html.unescape(match.group(1)).split())
+    return msg or None
+
+
 def _format_error(exc: Exception) -> str:
-    """Formate un message d'erreur lisible."""
-    if isinstance(exc, httpx.HTTPStatusError):
+    """Nomme le défaut, l'état de l'écriture et les écritures déjà appliquées.
+
+    Jamais un « Erreur : » nu : une exception sans message (httpx.ReadError,
+    ReadTimeout, RemoteProtocolError) garde son type et le sens de sa famille,
+    et l'appelant doit pouvoir distinguer une défaillance réseau d'un refus,
+    puis décider quoi relire.
+    """
+    if isinstance(exc, NextcloudTransportError):
+        message = f"Erreur réseau {exc}"
+    elif isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         try:
             body = exc.response.json()
             msg = body.get("message") or body.get("error") or str(body)[:200]
         except Exception:
-            msg = exc.response.text[:200]
-        return f"Erreur HTTP {status} : {msg}"
-    return f"Erreur : {exc}"
+            text = exc.response.text
+            msg = _dav_error_message(text) or text[:200]
+        message = f"Erreur HTTP {status} : {str(msg).strip() or 'sans message.'}"
+        if getattr(exc, "nc_mutating", False):
+            label = getattr(exc, "nc_label", "inconnue")
+            if status >= 500:
+                message = _append_sentence(
+                    message, _write_state_message("inconnu", label))
+            elif status >= 400 and status not in (401, 403, 404, 412):
+                # 401, 403 et 404 gardent leur message exact : une auth refusée
+                # n'écrit rien. Le 412 aussi, mais pour la raison inverse : il
+                # dit « la cible existe », ce qui peut vouloir dire qu'un essai
+                # précédent A écrit - nextcloud_upload_file le qualifie lui-même
+                # et le message générique ne doit pas le contredire.
+                message = _append_sentence(
+                    message,
+                    f" Écriture {label} non appliquée : la requête a été refusée "
+                    "avant exécution, corriger l'appel avant de rejouer.")
+    elif isinstance(exc, httpx.TransportError):
+        kind = type(exc).__name__
+        detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(
+            kind, "échec du transport HTTP")
+        message = f"Erreur réseau {kind} : {detail}."
+    elif isinstance(exc, json.JSONDecodeError):
+        message = f"Erreur JSON Nextcloud : {exc}"
+    else:
+        text = str(exc)
+        message = (f"Erreur : {text}" if text.strip()
+                   else f"Erreur {type(exc).__name__} : sans message.")
+    journal = _write_journal()
+    if journal:
+        message = _append_sentence(
+            message,
+            f" Écritures déjà appliquées dans cet appel d'outil : {', '.join(journal)}. "
+            "Relire les objets concernés avant de rejouer l'appel d'outil complet.")
+    return message
 
 
 def _compact(obj: Any) -> str:
@@ -361,40 +609,54 @@ def _extract_ocs_data(response: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_save_path(save_path: str) -> str:
-    """Résout un chemin d'écriture DANS la racine autorisée, ou lève ValueError.
+def _resolve_local_path(raw_path: str, root_dir: str, param: str, env_var: str) -> str:
+    """Résout un chemin local DANS la racine autorisée, ou lève ValueError.
 
-    Le chemin fourni est toujours traité comme relatif à _NC_DOWNLOAD_DIR : un
-    chemin absolu ou remontant (`..`, symlink sortant) est refusé. Sans ce
-    garde-fou, un simple save_path écrase n'importe quel fichier accessible au
-    processus, sur instruction d'un modèle et à partir d'un nom de fichier
-    Nextcloud qui n'est pas forcément de confiance.
+    Le chemin fourni est toujours traité comme relatif à `root_dir` : un chemin
+    absolu ou remontant (`..`, symlink sortant) est refusé. Sans ce garde-fou,
+    un simple chemin dicté par un modèle écrase (save_path) ou exfiltre
+    (local_path) n'importe quel fichier accessible au processus, à partir d'un
+    nom qui n'est pas forcément de confiance.
     """
-    raw = (save_path or "").strip()
+    raw = (raw_path or "").strip()
     if not raw:
-        raise ValueError("save_path vide")
+        raise ValueError(f"{param} vide")
     if os.path.isabs(raw) or raw.startswith("~"):
         raise ValueError(
-            f"save_path doit être relatif à {_NC_DOWNLOAD_DIR} "
-            "(chemin absolu refusé ; configurable via NEXTCLOUD_DOWNLOAD_DIR)"
+            f"{param} doit être relatif à {root_dir} "
+            f"(chemin absolu refusé ; configurable via {env_var})"
         )
     if any(part == ".." for part in re.split(r"[\\/]+", raw)):
-        raise ValueError("save_path ne peut pas contenir '..'")
+        raise ValueError(f"{param} ne peut pas contenir '..'")
 
-    root = os.path.realpath(_NC_DOWNLOAD_DIR)
+    root = os.path.realpath(root_dir)
     target = os.path.realpath(os.path.join(root, raw))
     # realpath des deux côtés : couvre aussi un symlink déjà en place qui
     # pointerait hors de la racine.
     if target != root and not target.startswith(root + os.sep):
-        raise ValueError("save_path sort de la racine autorisée")
+        raise ValueError(f"{param} sort de la racine autorisée")
     return target
+
+
+def _resolve_save_path(save_path: str) -> str:
+    """Résout un chemin d'écriture locale (téléchargement)."""
+    return _resolve_local_path(
+        save_path, _NC_DOWNLOAD_DIR, "save_path", "NEXTCLOUD_DOWNLOAD_DIR"
+    )
+
+
+def _resolve_upload_path(local_path: str) -> str:
+    """Résout un chemin de lecture locale (téléversement)."""
+    return _resolve_local_path(
+        local_path, _NC_UPLOAD_DIR, "local_path", "NEXTCLOUD_UPLOAD_DIR"
+    )
 
 
 def _write_local_file(target: str, payload: bytes, overwrite: bool) -> None:
     """Écrit le fichier de façon atomique, sans écraser par défaut."""
     if len(payload) > _MAX_SAVE_BYTES:
         raise ValueError(
-            f"contenu de {len(payload)} octets — au-delà du plafond "
+            f"contenu de {len(payload)} octets - au-delà du plafond "
             f"{_MAX_SAVE_BYTES} (NEXTCLOUD_MAX_SAVE_BYTES)"
         )
     if os.path.exists(target) and not overwrite:
@@ -410,6 +672,130 @@ def _write_local_file(target: str, payload: bytes, overwrite: bool) -> None:
     os.replace(tmp, target)
 
 
+def _read_local_file(target: str) -> bytes:
+    """Lit un fichier local destiné à Nextcloud, sous plafond de taille.
+
+    La taille est contrôlée avant la lecture (on ne charge pas 2 Go en RAM pour
+    ensuite les refuser) PUIS après : un fichier qui grossit entre le stat et
+    le read franchirait sinon le plafond sans être vu.
+    """
+    if not os.path.exists(target):
+        raise ValueError(f"{target} introuvable")
+    if not os.path.isfile(target):
+        raise ValueError(f"{target} n'est pas un fichier")
+    declared = os.path.getsize(target)
+    if declared > _MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"fichier de {declared} octets - au-delà du plafond "
+            f"{_MAX_UPLOAD_BYTES} (NEXTCLOUD_MAX_UPLOAD_BYTES)"
+        )
+    with open(target, "rb") as fh:
+        payload = fh.read(_MAX_UPLOAD_BYTES + 1)
+    if len(payload) > _MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"fichier au-delà du plafond {_MAX_UPLOAD_BYTES} octets "
+            "(NEXTCLOUD_MAX_UPLOAD_BYTES)"
+        )
+    return payload
+
+
+def _decode_base64(raw: str) -> bytes:
+    """Décode un contenu base64, espaces et retours à la ligne tolérés.
+
+    Le plafond est appliqué sur la taille décodée ESTIMÉE avant le décodage :
+    4 caractères base64 valent 3 octets, donc un refus n'a pas besoin de
+    matérialiser le binaire en mémoire.
+    """
+    compact = "".join((raw or "").split())
+    if not compact:
+        raise ValueError("content_base64 vide")
+    if len(compact) // 4 * 3 > _MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"contenu base64 au-delà du plafond {_MAX_UPLOAD_BYTES} octets "
+            "(NEXTCLOUD_MAX_UPLOAD_BYTES)"
+        )
+    try:
+        return base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        # Un base64 tronqué ou mal recopié doit se voir tout de suite : décodé
+        # en mode permissif, il produirait un fichier silencieusement amputé.
+        raise ValueError(f"content_base64 invalide : {exc}") from None
+
+
+def _check_declared_digest(payload: bytes, declared: str) -> str:
+    """Rend le sha256 du contenu, après contrôle du condensat déclaré.
+
+    Un base64 recopié dans la réponse d'un modèle peut perdre un quantum entier
+    (4 caractères = 3 octets) et rester parfaitement décodable : `validate=True`
+    l'accepte, le plafond ne bronche pas, et la relecture par taille confirme
+    l'octet près ce qui a été envoyé - pas ce qu'on voulait envoyer. Constaté le
+    25/09/2026 : 12 octets perdus au milieu d'un PDF, `size`, `verified_size` et
+    le serveur tous d'accord sur un fichier tronqué. Un condensat calculé à la
+    source est le seul contrôle qui traverse la transcription.
+    """
+    digest = hashlib.sha256(payload).hexdigest()
+    wanted = (declared or "").strip().lower()
+    if not wanted:
+        return digest
+    if not re.fullmatch(r"[0-9a-f]{64}", wanted):
+        raise ValueError(
+            "sha256 doit être un condensat hexadécimal de 64 caractères "
+            f"(reçu {len(wanted)} caractères)"
+        )
+    if wanted != digest:
+        raise ValueError(
+            f"condensat différent : {len(payload)} octets valent {digest}, "
+            f"le sha256 déclaré est {wanted}. Le contenu a été altéré en route, "
+            "rien n'a été déposé"
+        )
+    return digest
+
+
+def _guess_content_type(path: str) -> str:
+    """Déduit le type MIME du nom de fichier cible, octet-stream par défaut."""
+    guessed = mimetypes.guess_type(path)[0]
+    if not guessed:
+        ext = os.path.splitext(path)[1].lower()
+        guessed = _EXTRA_MIME_TYPES.get(ext)
+    return guessed or "application/octet-stream"
+
+
+_PROPFIND_BODY = b"""<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:displayname/>
+    <d:getcontenttype/>
+    <d:getcontentlength/>
+    <d:getlastmodified/>
+    <d:resourcetype/>
+  </d:prop>
+</d:propfind>"""
+
+
+async def _propfind_entry(path: str) -> dict | None:
+    """PROPFIND depth=0 sur une ressource, ou None si elle n'existe pas."""
+    xml_text = await _webdav(
+        "PROPFIND",
+        path,
+        extra_headers={"Depth": "0", "Content-Type": "application/xml"},
+        content=_PROPFIND_BODY,
+    )
+    if not isinstance(xml_text, str):
+        xml_text = xml_text.decode("utf-8") if isinstance(xml_text, bytes) else str(xml_text)
+    items = _parse_propfind(xml_text)
+    return items[0] if items else None
+
+
+async def _resource_exists(path: str) -> bool:
+    """Teste l'existence d'une ressource ; un 404 est une réponse, pas une erreur."""
+    try:
+        return await _propfind_entry(path) is not None
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (403, 404, 405):
+            return False
+        raise
+
+
 def _parse_content_range_total(value: str) -> int | None:
     """Extrait la taille totale d'un en-tête `Content-Range: bytes 0-99/12345`.
 
@@ -421,7 +807,7 @@ def _parse_content_range_total(value: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Opérations sur les fichiers (WebDAV)
+# Tools - Opérations sur les fichiers (WebDAV)
 # ---------------------------------------------------------------------------
 
 
@@ -440,14 +826,14 @@ async def nextcloud_list_files(
     récent d'abord), puis paginées.
 
     Params :
-      path           (str) — chemin absolu du dossier (défaut : racine).
-      depth          (int) — 1 = contenu du dossier, 0 = le dossier seul.
-      limit          (int) — nombre maximum d'entrées renvoyées (défaut 100,
+      path           (str) - chemin absolu du dossier (défaut : racine).
+      depth          (int) - 1 = contenu du dossier, 0 = le dossier seul.
+      limit          (int) - nombre maximum d'entrées renvoyées (défaut 100,
                              plafond 1000).
-      offset         (int) — nombre d'entrées sautées, pour paginer.
-      glob           (str) — motif fnmatch sur le NOM de fichier, insensible à
+      offset         (int) - nombre d'entrées sautées, pour paginer.
+      glob           (str) - motif fnmatch sur le NOM de fichier, insensible à
                              la casse (ex : `*.pdf`, `2026-*`).
-      modified_since (str) — ne garder que les entrées modifiées à partir de
+      modified_since (str) - ne garder que les entrées modifiées à partir de
                              cette date ISO (`2026-07-01` ou
                              `2026-07-01T08:00:00Z`).
 
@@ -495,7 +881,7 @@ async def nextcloud_list_files(
         items = _parse_propfind(xml_text)
 
         # Depth ≥ 1 : PROPFIND renvoie aussi le dossier interrogé lui-même. On
-        # l'identifie par son chemin, et avant le tri — le retirer par position
+        # l'identifie par son chemin, et avant le tri - le retirer par position
         # après tri retirerait une entrée au hasard.
         if depth >= 1 and items:
             wanted = _normalize_path(path)
@@ -541,33 +927,13 @@ async def nextcloud_list_files(
 async def nextcloud_get_file_info(path: str) -> str:
     """Retourne les métadonnées d'un fichier ou dossier (PROPFIND depth=0).
 
-    Params : path (str) — chemin absolu dans Nextcloud (ex: /Documents/rapport.pdf).
+    Params : path (str) - chemin absolu dans Nextcloud (ex: /Documents/rapport.pdf).
     """
     try:
-        xml_text = await _webdav(
-            "PROPFIND",
-            path,
-            extra_headers={
-                "Depth": "0",
-                "Content-Type": "application/xml",
-            },
-            content=b"""<?xml version="1.0" encoding="UTF-8"?>
-<d:propfind xmlns:d="DAV:">
-  <d:prop>
-    <d:displayname/>
-    <d:getcontenttype/>
-    <d:getcontentlength/>
-    <d:getlastmodified/>
-    <d:resourcetype/>
-  </d:prop>
-</d:propfind>""",
-        )
-        if not isinstance(xml_text, str):
-            xml_text = xml_text.decode("utf-8") if isinstance(xml_text, bytes) else str(xml_text)
-        items = _parse_propfind(xml_text)
-        if not items:
+        entry = await _propfind_entry(path)
+        if entry is None:
             return _compact({"error": "Ressource introuvable ou réponse vide."})
-        return _compact(items[0])
+        return _compact(entry)
     except Exception as exc:
         return _compact({"error": _format_error(exc)})
 
@@ -583,17 +949,17 @@ async def nextcloud_download_file(
     """Télécharge un fichier Nextcloud, dans le contexte ou sur le disque local.
 
     Params :
-      path      (str) — chemin absolu du fichier (ex: /Notes/todo.txt).
-      save_path (str) — si fourni, écrit le fichier sur le disque au lieu de
+      path      (str) - chemin absolu du fichier (ex: /Notes/todo.txt).
+      save_path (str) - si fourni, écrit le fichier sur le disque au lieu de
                         renvoyer son contenu. Chemin obligatoirement RELATIF à
                         la racine de téléchargement (NEXTCLOUD_DOWNLOAD_DIR,
                         défaut ~/Downloads) : absolu, `..` et symlink sortant
                         sont refusés. Seule voie pour un binaire ou un gros
                         fichier (plafond 25 Mo, NEXTCLOUD_MAX_SAVE_BYTES).
-      overwrite (bool) — autorise le remplacement d'un fichier existant
+      overwrite (bool) - autorise le remplacement d'un fichier existant
                         (défaut : False, l'écriture échoue).
-      offset    (int) — position de départ en octets (lecture par plage).
-      length    (int) — nombre d'octets à lire ; 0 = jusqu'au plafond.
+      offset    (int) - position de départ en octets (lecture par plage).
+      length    (int) - nombre d'octets à lire ; 0 = jusqu'au plafond.
 
     Sans save_path, le contenu doit être du texte UTF-8 et tenir dans 100 KB.
     La lecture est toujours bornée côté serveur via un en-tête Range, donc un
@@ -701,22 +1067,174 @@ async def nextcloud_download_file(
 
 
 @mcp.tool()
-async def nextcloud_upload_file(path: str, content: str) -> str:
-    """Crée ou remplace un fichier dans Nextcloud avec le contenu fourni.
+async def nextcloud_upload_file(
+    path: str,
+    content: str | None = None,
+    content_base64: str = "",
+    local_path: str = "",
+    content_type: str = "",
+    overwrite: bool = True,
+    sha256: str = "",
+) -> str:
+    """Crée ou remplace un fichier dans Nextcloud, en texte ou en binaire.
 
-    Params :
-      path    (str) — chemin absolu cible (ex: /Notes/todo.txt).
-      content (str) — contenu textuel du fichier.
+    Exactement UNE source doit être fournie :
+      content        (str) - contenu textuel, encodé en UTF-8 (mode historique).
+                             `content=""` écrit un fichier vide. Ne convient à
+                             AUCUN binaire : un PDF passé par là est réencodé,
+                             donc corrompu, sans qu'aucune erreur soit levée.
+      content_base64 (str) - contenu binaire encodé en base64 (PDF, ODT, XLSX,
+                             DOCX, image…). Espaces et retours à la ligne
+                             tolérés ; un base64 invalide est refusé, jamais
+                             décodé partiellement.
+      local_path     (str) - fichier LOCAL à téléverser, chemin obligatoirement
+                             RELATIF à la racine d'envoi NEXTCLOUD_UPLOAD_DIR
+                             (défaut : la racine de téléchargement
+                             NEXTCLOUD_DOWNLOAD_DIR, elle-même ~/Downloads par
+                             défaut). Absolu, `..` et symlink sortant sont
+                             refusés : sans ce garde-fou, l'outil recopie vers
+                             un dossier possiblement partagé n'importe quel
+                             fichier lisible par le processus.
+
+    Params complémentaires :
+      path         (str)  - chemin absolu cible dans Nextcloud (ex: /Notes/todo.txt).
+                            Le dossier parent doit exister (nextcloud_create_folder).
+      content_type (str)  - type MIME de l'en-tête PUT ; déduit de l'extension
+                            du chemin cible si vide, application/octet-stream
+                            en dernier recours.
+      overwrite    (bool) - True par défaut : un PUT remplace, c'est le
+                            comportement historique. À False, la cible existante
+                            est préservée et l'appel échoue (contrôle PROPFIND
+                            préalable, doublé d'un `If-None-Match: *` qui rend
+                            le refus atomique côté serveur).
+      sha256       (str)  - condensat hexadécimal du fichier tel qu'il est à la
+                            SOURCE. Fortement recommandé avec content_base64 :
+                            un base64 recopié peut perdre un quantum entier et
+                            rester décodable, auquel cas taille envoyée, taille
+                            relue et serveur s'accordent tous sur un fichier
+                            tronqué. En cas d'écart, rien n'est déposé. La
+                            réponse porte de toute façon le `sha256` de ce qui a
+                            été envoyé, à comparer à la source.
+
+    Plafond : 25 Mo par fichier quelle que soit la source, réglable par
+    NEXTCLOUD_MAX_UPLOAD_BYTES. Le contrôle a lieu AVANT tout appel réseau ;
+    au-delà, passer par le client de synchronisation.
+
+    Le dépôt est relu (PROPFIND) : `verified_size` et `verified_content_type`
+    viennent du serveur, `size_mismatch` signale un écart avec ce qui a été
+    envoyé, et `verify_warning` dit que la relecture a échoué plutôt que de
+    laisser passer un `ok` non vérifié.
     """
     try:
-        encoded = content.encode("utf-8")
-        await _webdav(
-            "PUT",
-            path,
-            extra_headers={"Content-Type": "application/octet-stream"},
-            content=encoded,
-        )
-        return _compact({"ok": True, "path": path, "size": len(encoded)})
+        given = [
+            name
+            for name, present in (
+                ("content", content is not None),
+                ("content_base64", bool((content_base64 or "").strip())),
+                ("local_path", bool((local_path or "").strip())),
+            )
+            if present
+        ]
+        if not given:
+            return _compact({
+                "error": "Aucune source fournie : content (texte), content_base64 "
+                         "(binaire) ou local_path (fichier local)."
+            })
+        if len(given) > 1:
+            return _compact({
+                "error": "content, content_base64 et local_path sont exclusifs "
+                         f"(reçus : {', '.join(given)})."
+            })
+
+        source = given[0]
+        try:
+            if source == "content":
+                payload = (content or "").encode("utf-8")
+            elif source == "content_base64":
+                payload = _decode_base64(content_base64)
+            else:
+                payload = _read_local_file(_resolve_upload_path(local_path))
+        except ValueError as exc:
+            refusal = {"error": str(exc)}
+            if source == "local_path":
+                refusal["upload_root"] = _NC_UPLOAD_DIR
+            return _compact(refusal)
+
+        if len(payload) > _MAX_UPLOAD_BYTES:
+            return _compact({
+                "error": f"contenu de {len(payload)} octets - au-delà du plafond "
+                         f"{_MAX_UPLOAD_BYTES} (NEXTCLOUD_MAX_UPLOAD_BYTES)."
+            })
+
+        try:
+            digest = _check_declared_digest(payload, sha256)
+        except ValueError as exc:
+            return _compact({"error": str(exc), "path": path})
+
+        ctype = (content_type or "").strip() or _guess_content_type(path)
+
+        if not overwrite and await _resource_exists(path):
+            return _compact({
+                "error": f"{path} existe déjà (passer overwrite=True pour remplacer).",
+                "path": path,
+            })
+
+        headers = {"Content-Type": ctype}
+        if not overwrite:
+            # Le contrôle ci-dessus laisse une fenêtre entre le PROPFIND et le
+            # PUT ; l'en-tête la referme côté serveur.
+            headers["If-None-Match"] = "*"
+        try:
+            await _webdav("PUT", path, extra_headers=headers, content=payload)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 412:
+                # Un PUT rejoué après une coupure réseau peut échouer ici alors
+                # que le premier essai a bien écrit : le 412 dit « la cible
+                # existe », pas « rien n'a été déposé ».
+                return _compact({
+                    "error": f"{path} existe déjà (refus du serveur, overwrite=False). "
+                             "Si l'appel a été rejoué après une coupure réseau, le dépôt a pu "
+                             "réussir au premier essai : vérifier avec nextcloud_get_file_info.",
+                    "path": path,
+                })
+            if status in (404, 409):
+                # Vérifié en production le 25/09/2026 : Nextcloud (sabre/dav)
+                # répond 404 Sabre\DAV\Exception\NotFound sur un dossier parent
+                # absent, là où la RFC laisse attendre un 409. Sans les deux, le
+                # cas le plus banal du dépôt remonte en XML brut.
+                parent = path.rsplit("/", 1)[0] or "/"
+                return _compact({
+                    "error": f"Erreur HTTP {status} : le dossier parent {parent} n'existe "
+                             "pas (le créer avec nextcloud_create_folder).",
+                    "path": path,
+                })
+            raise
+
+        result = {
+            "ok": True,
+            "path": path,
+            "size": len(payload),
+            "source": source,
+            "content_type": ctype,
+            "sha256": digest,
+        }
+        # Read-after-write : une taille annoncée par l'appelant ne prouve rien,
+        # c'est le serveur qui dit ce qu'il a stocké.
+        try:
+            entry = await _propfind_entry(path)
+        except Exception:
+            entry = None
+        if entry is None:
+            result["verify_warning"] = (
+                "relecture PROPFIND impossible : taille et type non vérifiés côté serveur"
+            )
+        else:
+            result["verified_size"] = entry.get("size", 0)
+            result["verified_content_type"] = entry.get("content_type", "")
+            if entry.get("size", 0) != len(payload):
+                result["size_mismatch"] = True
+        return _compact(result)
     except Exception as exc:
         return _compact({"error": _format_error(exc)})
 
@@ -725,7 +1243,7 @@ async def nextcloud_upload_file(path: str, content: str) -> str:
 async def nextcloud_create_folder(path: str) -> str:
     """Crée un dossier dans Nextcloud (MKCOL).
 
-    Params : path (str) — chemin absolu du dossier à créer (ex: /Projets/nouveau-dossier).
+    Params : path (str) - chemin absolu du dossier à créer (ex: /Projets/nouveau-dossier).
     Les dossiers parents doivent exister.
     """
     try:
@@ -739,7 +1257,7 @@ async def nextcloud_create_folder(path: str) -> str:
 async def nextcloud_delete(path: str) -> str:
     """Supprime un fichier ou un dossier dans Nextcloud (DELETE).
 
-    Params : path (str) — chemin absolu de la ressource à supprimer.
+    Params : path (str) - chemin absolu de la ressource à supprimer.
     Attention : la suppression d'un dossier est récursive.
     """
     try:
@@ -754,8 +1272,8 @@ async def nextcloud_move(source_path: str, destination_path: str) -> str:
     """Déplace ou renomme un fichier/dossier dans Nextcloud (MOVE).
 
     Params :
-      source_path      (str) — chemin source absolu.
-      destination_path (str) — chemin destination absolu.
+      source_path      (str) - chemin source absolu.
+      destination_path (str) - chemin destination absolu.
     """
     try:
         await _webdav(
@@ -773,8 +1291,8 @@ async def nextcloud_copy(source_path: str, destination_path: str) -> str:
     """Copie un fichier ou dossier dans Nextcloud (COPY).
 
     Params :
-      source_path      (str) — chemin source absolu.
-      destination_path (str) — chemin destination absolu.
+      source_path      (str) - chemin source absolu.
+      destination_path (str) - chemin destination absolu.
     """
     try:
         await _webdav(
@@ -788,7 +1306,7 @@ async def nextcloud_copy(source_path: str, destination_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Partage (OCS API)
+# Tools - Partage (OCS API)
 # ---------------------------------------------------------------------------
 
 
@@ -797,7 +1315,7 @@ async def nextcloud_list_shares(path: str = "") -> str:
     """Liste les partages Nextcloud, avec filtre optionnel par chemin.
 
     Params :
-      path (str, optionnel) — filtrer les partages sur ce chemin précis.
+      path (str, optionnel) - filtrer les partages sur ce chemin précis.
 
     Retourne pour chaque partage : id, share_type, share_with, path, permissions, url.
     Types de partage : 0=utilisateur, 1=groupe, 3=lien public, 4=e-mail, 6=dépôt fédéré.
@@ -839,11 +1357,11 @@ async def nextcloud_create_share(
     """Crée un partage Nextcloud.
 
     Params :
-      path        (str) — chemin absolu de la ressource à partager.
-      share_type  (int) — 0=utilisateur, 1=groupe, 3=lien public.
-      share_with  (str) — identifiant de l'utilisateur/groupe (ignoré pour lien public).
-      permissions (int) — permissions : 1=lecture, 17=lecture+partage, 31=tout (défaut: 1).
-      password    (str) — mot de passe pour les liens publics (optionnel).
+      path        (str) - chemin absolu de la ressource à partager.
+      share_type  (int) - 0=utilisateur, 1=groupe, 3=lien public.
+      share_with  (str) - identifiant de l'utilisateur/groupe (ignoré pour lien public).
+      permissions (int) - permissions : 1=lecture, 17=lecture+partage, 31=tout (défaut: 1).
+      password    (str) - mot de passe pour les liens publics (optionnel).
 
     Retourne l'id, le token et l'URL du partage créé.
     """
@@ -877,7 +1395,7 @@ async def nextcloud_delete_share(share_id: int) -> str:
     """Supprime un partage Nextcloud par son identifiant.
 
     Params :
-      share_id (int) — identifiant numérique du partage (obtenu via nextcloud_list_shares).
+      share_id (int) - identifiant numérique du partage (obtenu via nextcloud_list_shares).
     """
     try:
         await _ocs_delete(f"apps/files_sharing/api/v1/shares/{share_id}")
@@ -887,7 +1405,7 @@ async def nextcloud_delete_share(share_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Recherche et statut
+# Tools - Recherche et statut
 # ---------------------------------------------------------------------------
 
 
@@ -915,11 +1433,11 @@ async def nextcloud_search(query: str, path: str = "/", cursor: str = "") -> str
     racine plus courte (« transcript »), ou nextcloud_list_files avec un glob.
 
     Params :
-      query  (str) — sous-chaîne à chercher dans les noms de fichiers.
-      path   (str) — ne conserver que les résultats sous ce chemin. Le filtre
+      query  (str) - sous-chaîne à chercher dans les noms de fichiers.
+      path   (str) - ne conserver que les résultats sous ce chemin. Le filtre
                      est appliqué côté client : il s'exerce sur la page de
                      résultats renvoyée, pas sur l'index.
-      cursor (str) — curseur de pagination renvoyé par un appel précédent.
+      cursor (str) - curseur de pagination renvoyé par un appel précédent.
 
     Le serveur plafonne la page à 25 entrées : `truncated=true` signale que
     d'autres résultats existent et qu'il faut rappeler l'outil avec `cursor`.

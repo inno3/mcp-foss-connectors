@@ -46,6 +46,7 @@ from dolibarr_mcp.server import (
     dolibarr_create_project,
     dolibarr_create_supplier_invoice,
     dolibarr_create_task,
+    dolibarr_create_ticket,
     dolibarr_dashboard,
     dolibarr_delete_bank_entry,
     dolibarr_delete_invoice,
@@ -54,9 +55,11 @@ from dolibarr_mcp.server import (
     dolibarr_delete_time_entry,
     dolibarr_get_bank_balance,
     dolibarr_get_invoice,
+    dolibarr_get_project,
     dolibarr_get_proposal,
     dolibarr_get_revenue_summary,
     dolibarr_get_supplier_invoice,
+    dolibarr_get_thirdparty,
     dolibarr_get_ticket,
     dolibarr_list_bank_accounts,
     dolibarr_list_bank_entries,
@@ -116,7 +119,7 @@ class TestHelpers:
         exc = httpx.HTTPStatusError("", request=response.request, response=response)
         msg = _format_error(exc)
         assert "401" in msg
-        assert "clé API" in msg
+        assert "clef API" in msg
 
     def test_format_error_404(self) -> None:
         import httpx
@@ -163,7 +166,7 @@ class TestDolibarrProjects:
 
 @pytest.mark.asyncio
 class TestDolibarrCreateProject:
-    """Tests de dolibarr_create_project — contournement bug PROV-1.
+    """Tests de dolibarr_create_project - contournement bug PROV-1.
 
     Le bug PROV-1 : un POST /projects avec payload complet et status=1
     déclenche le renommage immédiat de ref PROV → PJ-YYMM-XXXX, mais la
@@ -191,7 +194,7 @@ class TestDolibarrCreateProject:
         mock_get.return_value = {"id": "249", "ref": "PJ2605-0192", "title": "Test"}
 
         result = await dolibarr_create_project(
-            title="GovTech Connect — DPG Sustainability",
+            title="GovTech Connect - DPG Sustainability",
             thirdparty_id=42,
             description="Acccompagnement sustainability",
             date_start="2026-05-12",
@@ -218,7 +221,7 @@ class TestDolibarrCreateProject:
         assert step1_args.args[0] == "projects"
         step1_payload = step1_args.args[1]
         assert step1_payload["ref"] == "PROV"
-        assert step1_payload["title"] == "GovTech Connect — DPG Sustainability"
+        assert step1_payload["title"] == "GovTech Connect - DPG Sustainability"
         assert step1_payload["fk_statut"] == "0"  # toujours 0 à la création
         assert step1_payload["socid"] == "42"
         # Pas de champs lourds en step 1
@@ -332,7 +335,7 @@ class TestDolibarrInvoices:
                 "remaintopay": "1200.00",
             }
         ]
-        result = await dolibarr_list_invoices(status="unpaid")
+        result = await dolibarr_list_invoices(status="unpaid", include_payments=False)
         data = json.loads(result)
         assert data["count"] == 1
         assert data["invoices"][0]["total_ttc"] == 1200.0
@@ -343,7 +346,7 @@ class TestDolibarrInvoices:
             {"id": "1", "ref": "FA01", "total_ttc": "100.00", "fk_statut": "1"},
             {"id": "2", "ref": "FA02", "total_ttc": "5000.00", "fk_statut": "1"},
         ]
-        result = await dolibarr_list_invoices(min_amount=1000)
+        result = await dolibarr_list_invoices(min_amount=1000, include_payments=False)
         data = json.loads(result)
         assert data["count"] == 1
         assert data["invoices"][0]["ref"] == "FA02"
@@ -376,7 +379,7 @@ class TestDolibarrDashboard:
 
 
 # ---------------------------------------------------------------------------
-# Régression : Réponses non-JSON et 404 "no results" — bug 14/05/2026
+# Régression : Réponses non-JSON et 404 "no results" - bug 14/05/2026
 # (cf. messages "Erreur : Expecting value: line 1 column 1 (char 0)" remontés
 # par list_thirdparties / list_projects pendant une tâche Cowork)
 # ---------------------------------------------------------------------------
@@ -474,7 +477,7 @@ class TestListEndpoint404AsEmpty:
 
 @pytest.mark.asyncio
 class TestBug20260521AddProposalLines:
-    """Bug #1 — dolibarr_add_proposal_lines envoyait un dict nu au lieu d'un tableau.
+    """Bug #1 - dolibarr_add_proposal_lines envoyait un dict nu au lieu d'un tableau.
 
     Cause racine (api_proposals.class.php::postLines, Dolibarr v23) :
 
@@ -527,7 +530,7 @@ class TestBug20260521AddProposalLines:
         assert mock_post.call_count == 1
         _, call_kwargs = mock_post.call_args
         positional_args = mock_post.call_args[0]
-        # api_post(endpoint, data) — le 2e arg doit être une liste
+        # api_post(endpoint, data) - le 2e arg doit être une liste
         payload = positional_args[1] if len(positional_args) > 1 else call_kwargs.get("data")
         assert isinstance(payload, list), (
             f"Bug #1 régression : api_post doit recevoir une liste [line_data], "
@@ -580,7 +583,7 @@ class TestBug20260521AddProposalLines:
 
 @pytest.mark.asyncio
 class TestBug20260521ValidateProposal:
-    """Bug #2 — dolibarr_validate_proposal envoyait {} sans notrigger.
+    """Bug #2 - dolibarr_validate_proposal envoyait {} sans notrigger.
     Dolibarr v23 exige notrigger comme entier (0 ou 1), HTTP 400 sinon.
     """
 
@@ -636,7 +639,7 @@ class TestBug20260521ValidateProposal:
 
 @pytest.mark.asyncio
 class TestBug20260521ValidateProject:
-    """Bug #3 — dolibarr_create_project : étape validate envoyait {} sans notrigger."""
+    """Bug #3 - dolibarr_create_project : étape validate envoyait {} sans notrigger."""
 
     @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
@@ -675,7 +678,7 @@ class TestBug20260521ValidateProject:
 
 @pytest.mark.asyncio
 class TestBug5CreateProposalDateValidity:
-    """Bug #5 — dolibarr_create_proposal n'exposait pas date_validity.
+    """Bug #5 - dolibarr_create_proposal n'exposait pas date_validity.
 
     Sans ce paramètre, Dolibarr peut afficher 15/02/1970 :
     quand date_creation est absente ou nulle, certaines versions calculent
@@ -743,7 +746,7 @@ class TestBug5CreateProposalDateValidity:
 
         result = await dolibarr_create_proposal(
             thirdparty_id=1,
-            date_validity="05/07/2026",  # format DD/MM/YYYY — invalide
+            date_validity="05/07/2026",  # format DD/MM/YYYY - invalide
         )
         assert "invalide" in result.lower() or "Format" in result
         assert "05/07/2026" in result
@@ -843,7 +846,7 @@ class TestListStatusLabels:
                 "date_lim_reglement": "1686182400",  # 2023-06-08
             }
         ]
-        data = json.loads(await dolibarr_list_invoices(status="unpaid"))
+        data = json.loads(await dolibarr_list_invoices(status="unpaid", include_payments=False))
         inv = data["invoices"][0]
         assert inv["status"] == "1"
         assert inv["status_label"] == "validée non payée"
@@ -855,7 +858,7 @@ class TestListStatusLabels:
             {"id": "1", "ref": "FA1", "socid": "1", "status": "1", "paye": "1",
              "total_ttc": "100", "total_ht": "100", "date": "1686096000"}
         ]
-        inv = json.loads(await dolibarr_list_invoices(status="all"))["invoices"][0]
+        inv = json.loads(await dolibarr_list_invoices(status="all", include_payments=False))["invoices"][0]
         assert inv["status_label"] == "payée"
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -864,7 +867,7 @@ class TestListStatusLabels:
             {"id": "5", "ref": "SI1", "ref_supplier": "X", "socid": "19",
              "status": "1", "paye": "0", "total_ttc": "6115.8", "date": "1740528000"}
         ]
-        inv = json.loads(await dolibarr_list_supplier_invoices())["invoices"][0]
+        inv = json.loads(await dolibarr_list_supplier_invoices( include_payments=False))["invoices"][0]
         assert inv["status_label"] == "validée non payée"
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -967,7 +970,7 @@ class TestGetDocumentLines:
             "lines": [{"id": str(i), "desc": f"L{i}", "qty": "1", "total_ht": "100"}
                       for i in range(25)],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         # plus de plafond à 20 : les 25 lignes sont présentes
         assert data["lines_count"] == 25
         assert len(data["lines"]) == 25
@@ -995,7 +998,7 @@ class TestGetDocumentLines:
             "lines": [{"id": "117", "desc": "Bilan 24h", "qty": "1",
                        "subprice": "2100", "total_ht": "2100", "product_type": "1"}],
         }
-        data = json.loads(await dolibarr_get_supplier_invoice(88))
+        data = json.loads(await dolibarr_get_supplier_invoice(88, include_payments=False))
         assert data["ref"] == "SI2602-0084"
         assert data["ref_supplier"] == "2026-89"
         assert data["label"] == "Bilan"
@@ -1011,14 +1014,14 @@ class TestGetDocumentLines:
             return {"id": "87", "ref": "SI2603-0085", "socid": "1",
                     "fk_statut": "1", "paye": "0", "lines": []}
         mock_api.side_effect = side_effect
-        data = json.loads(await dolibarr_get_supplier_invoice(0, "SI2603-0085"))
+        data = json.loads(await dolibarr_get_supplier_invoice(0, "SI2603-0085", include_payments=False))
         assert data["id"] == "87"
         assert data["lines_count"] == 0
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     async def test_get_supplier_invoice_not_found(self, mock_api: AsyncMock) -> None:
         mock_api.return_value = []
-        result = await dolibarr_get_supplier_invoice(0, "SI-INEXISTANT")
+        result = await dolibarr_get_supplier_invoice(0, "SI-INEXISTANT", include_payments=False)
         assert "Aucune facture fournisseur" in result
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -1027,10 +1030,251 @@ class TestGetDocumentLines:
             "id": "430", "ref": "FA1", "socid": "1", "fk_statut": "1", "paye": "0",
             "note_public": "Commande n&deg;655969&nbsp;<br>\nLimoges&nbsp;", "lines": [],
         }
-        data = json.loads(await dolibarr_get_invoice(430))
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
         assert "<br>" not in data["note_public"]
         assert "&nbsp;" not in data["note_public"]
         assert "Commande n°655969" in data["note_public"]
+
+
+@pytest.mark.asyncio
+class TestGetProposalNotePublic:
+    """dolibarr_get_proposal : la note publique est rendue entière, ou dit qu'elle est coupée.
+
+    Constat du 14/09/2026 sur la propale 172 : `note_public` revenait coupée à
+    exactement 300 caractères, sans marqueur de coupe ni longueur totale, avant
+    comme après un `dolibarr_update_proposal` réussi. Une note écrite pour être
+    relue était donc invérifiable, et la coupe se lisait comme une perte en base.
+    """
+
+    @staticmethod
+    def _proposal(note: object) -> dict:
+        return {
+            "id": "172", "ref": "PR2609-0172", "socid": "10", "fk_statut": "1",
+            "total_ht": "1000", "total_tva": "200", "total_ttc": "1200",
+            "note_public": note, "lines": [],
+        }
+
+    @staticmethod
+    def _long_note(lines: int) -> str:
+        # Une phrase par ligne, sans HTML ni espaces doubles : le texte nettoyé
+        # par _strip_html est identique au texte fourni, d'où une égalité exacte.
+        return "\n".join(
+            f"Clause {i + 1} : acompte de trente pour cent à la commande, solde à réception."
+            for i in range(lines)
+        )
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_a_note_longer_than_300_chars_comes_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        note = self._long_note(12)
+        assert len(note) > 300
+        mock_api.return_value = self._proposal(note)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert len(data["note_public"]) == len(note), (
+            f"note coupée à {len(data['note_public'])} caractères sur {len(note)}"
+        )
+        assert data["note_public"] == note
+        assert data["note_public_length"] == len(note)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_a_note_written_by_update_proposal_reads_back_identical(
+        self, mock_get: AsyncMock, mock_put: AsyncMock
+    ) -> None:
+        # Le scénario du constat : écrire la note, puis la relire pour vérifier.
+        from dolibarr_mcp.server import dolibarr_update_proposal
+
+        note = self._long_note(15)
+        stored = self._proposal("")
+
+        async def put(endpoint, data=None):
+            stored.update(data or {})
+            return 172
+
+        mock_put.side_effect = put
+        mock_get.return_value = stored
+
+        await dolibarr_update_proposal(172, note_public=note)
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert mock_put.call_args.args == ("proposals/172", {"note_public": note})
+        assert data["note_public"] == note
+        assert data["note_public_length"] == len(note)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_length_is_that_of_the_cleaned_text_not_of_the_html(
+        self, mock_api: AsyncMock
+    ) -> None:
+        # Dolibarr stocke la note en HTML ; la longueur annoncée est celle du
+        # texte rendu, pas celle du HTML brut.
+        html = "<p>Conditions&nbsp;:</p>" + "".join(
+            f"<p>Lot {i + 1}&nbsp;: livraison sous <b>quinze</b> jours ouvr&eacute;s.</p>"
+            for i in range(10)
+        )
+        expected = _strip_html(html)
+        assert 300 < len(expected) < len(html)
+        mock_api.return_value = self._proposal(html)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert data["note_public"] == expected
+        assert "<p>" not in data["note_public"]
+        assert data["note_public_length"] == len(expected)
+        assert data["note_public_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_beyond_the_ceiling_the_cut_is_announced(
+        self, mock_api: AsyncMock
+    ) -> None:
+        ceiling = server.DETAIL_NOTE_MAX_CHARS
+        note = self._long_note(ceiling // 40)
+        assert len(note) > ceiling
+        mock_api.return_value = self._proposal(note)
+
+        data = json.loads(await dolibarr_get_proposal(172))
+
+        assert data["note_public_truncated"] is True
+        assert data["note_public_length"] == len(note)
+        assert len(data["note_public"]) == ceiling
+        assert data["note_public"] == note[:ceiling]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_an_empty_note_is_empty_and_not_truncated(
+        self, mock_api: AsyncMock
+    ) -> None:
+        for raw in ("", None):
+            mock_api.return_value = self._proposal(raw)
+
+            data = json.loads(await dolibarr_get_proposal(172))
+
+            assert data["note_public"] == ""
+            assert data["note_public_length"] == 0
+            assert data["note_public_truncated"] is False
+
+
+@pytest.mark.asyncio
+class TestDetailNotesRenderedWhole:
+    """Les autres lectures de détail rendent leurs notes entières, ou disent qu'elles coupent.
+
+    Même défaut que sur dolibarr_get_proposal : `[:300]` muet sur get_invoice,
+    get_supplier_invoice et get_thirdparty, `[:500]` muet sur la description et
+    la note publique de get_project.
+    """
+
+    @staticmethod
+    def _note(lines: int) -> str:
+        return "\n".join(
+            f"Clause {i + 1} : acompte de trente pour cent à la commande, solde à réception."
+            for i in range(lines)
+        )
+
+    @staticmethod
+    def _assert_whole(data: dict, field: str, expected: str) -> None:
+        assert len(data[field]) == len(expected), (
+            f"{field} coupé à {len(data[field])} caractères sur {len(expected)}"
+        )
+        assert data[field] == expected
+        assert data[f"{field}_length"] == len(expected)
+        assert data[f"{field}_truncated"] is False
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_invoice_note_public_comes_back_whole(self, mock_api: AsyncMock) -> None:
+        note = self._note(12)
+        mock_api.return_value = {
+            "id": "430", "ref": "FA2609-0430", "socid": "1", "fk_statut": "1", "paye": "0",
+            "note_public": note, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_supplier_invoice_note_public_comes_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        note = self._note(12)
+        mock_api.return_value = {
+            "id": "88", "ref": "SI2609-0088", "ref_supplier": "2026-89", "socid": "194",
+            "fk_statut": "1", "paye": "0", "note_public": note, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_supplier_invoice(88, include_payments=False))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_thirdparty_note_public_comes_back_whole(self, mock_api: AsyncMock) -> None:
+        note = self._note(12)
+        mock_api.return_value = {"id": "120", "name": "Tiers", "note_public": note}
+        data = json.loads(await dolibarr_get_thirdparty(120))
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_project_description_and_note_come_back_whole(
+        self, mock_api: AsyncMock
+    ) -> None:
+        description = self._note(9)
+        note = self._note(9)
+        assert len(description) > 500 and len(note) > 500
+        mock_api.return_value = {
+            "id": "258", "ref": "PJ2609-0258", "title": "Projet", "fk_statut": "1",
+            "description": description, "note_public": note,
+        }
+        data = json.loads(await dolibarr_get_project(258))
+        self._assert_whole(data, "description", description)
+        self._assert_whole(data, "note_public", note)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_thirdparty_html_note_length_is_the_cleaned_one(
+        self, mock_api: AsyncMock
+    ) -> None:
+        html = "<p>Conditions&nbsp;:</p>" + "".join(
+            f"<p>Lot {i + 1}&nbsp;: livraison sous <b>quinze</b> jours ouvr&eacute;s.</p>"
+            for i in range(10)
+        )
+        expected = _strip_html(html)
+        assert 300 < len(expected) < len(html)
+        mock_api.return_value = {"id": "120", "name": "Tiers", "note_public": html}
+        data = json.loads(await dolibarr_get_thirdparty(120))
+        self._assert_whole(data, "note_public", expected)
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_get_project_beyond_the_ceiling_the_cut_is_announced(
+        self, mock_api: AsyncMock
+    ) -> None:
+        ceiling = server.DETAIL_NOTE_MAX_CHARS
+        long_text = self._note(ceiling // 40)
+        assert len(long_text) > ceiling
+        mock_api.return_value = {
+            "id": "258", "ref": "PJ2609-0258", "title": "Projet",
+            "description": long_text, "note_public": long_text,
+        }
+        data = json.loads(await dolibarr_get_project(258))
+        for field in ("description", "note_public"):
+            assert data[f"{field}_truncated"] is True
+            assert data[f"{field}_length"] == len(long_text)
+            assert len(data[field]) == ceiling
+            assert data[field] == long_text[:ceiling]
+
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
+    async def test_empty_notes_are_empty_and_not_truncated(self, mock_api: AsyncMock) -> None:
+        mock_api.return_value = {
+            "id": "430", "ref": "FA1", "socid": "1", "fk_statut": "1", "paye": "0",
+            "note_public": None, "lines": [],
+        }
+        data = json.loads(await dolibarr_get_invoice(430, include_payments=False))
+        assert data["note_public"] == ""
+        assert data["note_public_length"] == 0
+        assert data["note_public_truncated"] is False
+
+        mock_api.return_value = {"id": "258", "ref": "PJ1", "title": "Projet"}
+        data = json.loads(await dolibarr_get_project(258))
+        for field in ("description", "note_public"):
+            assert data[field] == ""
+            assert data[f"{field}_length"] == 0
+            assert data[f"{field}_truncated"] is False
 
 
 def _http_error(status: int, body: object | None = None) -> httpx.HTTPStatusError:
@@ -1106,7 +1350,7 @@ class TestLogTimeRouteAndConversion:
             await dolibarr_log_time(task_id=42, duration=1.5)
 
         payload = post.call_args[0][1]
-        assert payload["duration"] == 5400  # 1,5 h — l'API n'accepte que des secondes
+        assert payload["duration"] == 5400  # 1,5 h - l'API n'accepte que des secondes
         assert isinstance(payload["duration"], int)
 
     async def test_sends_the_field_names_dolibarr_expects(self) -> None:
@@ -1436,7 +1680,7 @@ class TestTaskContacts:
 
     async def test_both_forms_of_the_role_are_returned(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
-            get.return_value = [_contact(7), _contact(5, "TASKEXECUTIVE")]
+            get.return_value = [_contact(7), dict(_contact(5, "TASKEXECUTIVE"), rowid=56)]
             data = json.loads(await dolibarr_list_task_contacts(task_id=42))
 
         assert data["count"] == 2
@@ -1861,7 +2105,7 @@ class TestTaskDurationsExposedInHours:
 
 @pytest.mark.asyncio
 class TestUpdateInvoice:
-    """dolibarr_update_invoice — PUT /invoices/{id}.
+    """dolibarr_update_invoice - PUT /invoices/{id}.
 
     Le rattachement d'une facture à un projet a longtemps été fait à la main
     dans `card.php` faute d'outil. Vérifié en production le 11/08/2026 sur
@@ -2016,7 +2260,7 @@ class TestUpdateInvoice:
         assert "403" in out
 @pytest.mark.asyncio
 class TestUpdateProposal:
-    """dolibarr_update_proposal — rattachement projet (fk_project), conversions
+    """dolibarr_update_proposal - rattachement projet (fk_project), conversions
     de dates, read-after-write et warning de lien non persisté."""
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -2088,7 +2332,7 @@ class TestUpdateProposal:
 
 @pytest.mark.asyncio
 class TestDeleteProposal:
-    """dolibarr_delete_proposal — succès + diagnostic 500 (calqué delete_project)."""
+    """dolibarr_delete_proposal - succès + diagnostic 500 (calqué delete_project)."""
 
     @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -2327,7 +2571,7 @@ def _clear_payment_types_cache():
 
 
 class TestBankEntrySignConvention:
-    """dolibarr_create_bank_entry — le sens du montant.
+    """dolibarr_create_bank_entry - le sens du montant.
 
     Point couvert en priorité : dans llx_bank le montant est SIGNÉ, et le
     formulaire `various_payment/card.php` porte ce signe dans un champ `sens`
@@ -2473,7 +2717,7 @@ class TestBankEntrySignConvention:
 
 
 class TestListBankAccounts:
-    """dolibarr_list_bank_accounts — solde et rapprochabilité."""
+    """dolibarr_list_bank_accounts - solde et rapprochabilité."""
 
     async def test_reconcilable_matches_dolibarr_own_rule(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
@@ -2516,7 +2760,7 @@ class TestListBankAccounts:
 
 
 class TestListBankEntries:
-    """dolibarr_list_bank_entries — filtres, tri, solde cumulé."""
+    """dolibarr_list_bank_entries - filtres, tri, solde cumulé."""
 
     @staticmethod
     def _api(window: list, after: list | None = None, balance: str = "12500"):
@@ -2665,7 +2909,7 @@ class TestListBankEntries:
 
 
 class TestBankBalance:
-    """dolibarr_get_bank_balance — report à une date donnée."""
+    """dolibarr_get_bank_balance - report à une date donnée."""
 
     async def test_current_balance_uses_the_dedicated_route(self) -> None:
         async def fake_get(endpoint, params=None):
@@ -2707,7 +2951,7 @@ class TestBankBalance:
 
 
 class TestSetBankStatement:
-    """dolibarr_set_bank_statement — jamais de succès silencieux."""
+    """dolibarr_set_bank_statement - jamais de succès silencieux."""
 
     async def test_a_non_reconcilable_account_fails_without_writing(self) -> None:
         async def fake_get(endpoint, params=None):
@@ -2809,7 +3053,7 @@ class TestSetBankStatement:
 
 
 class TestToggleBankReconciliation:
-    """dolibarr_toggle_bank_reconciliation — champ `rappro`, pas `norappro`."""
+    """dolibarr_toggle_bank_reconciliation - champ `rappro`, pas `norappro`."""
 
     @staticmethod
     def _reads(before: str, after: str):
@@ -2850,7 +3094,7 @@ class TestToggleBankReconciliation:
 
 
 class TestInvoicePayments:
-    """dolibarr_list_invoice_payments — le lien facture ↔ écriture bancaire."""
+    """dolibarr_list_invoice_payments - le lien facture ↔ écriture bancaire."""
 
     async def test_bank_line_and_account_are_exposed(self) -> None:
         async def fake_get(endpoint, params=None):
@@ -2894,7 +3138,7 @@ class TestInvoicePayments:
 
 
 class TestAddInvoicePayment:
-    """dolibarr_add_invoice_payment — encaissement client et écriture bancaire."""
+    """dolibarr_add_invoice_payment - encaissement client et écriture bancaire."""
 
     @staticmethod
     def _api(before: list, after: list, balances: list, statut: str = "1"):
@@ -3060,7 +3304,7 @@ class TestAddInvoicePayment:
 
 
 class TestAddSupplierInvoicePayment:
-    """dolibarr_add_supplier_invoice_payment — le compte est DÉBITÉ."""
+    """dolibarr_add_supplier_invoice_payment - le compte est DÉBITÉ."""
 
     @staticmethod
     def _api(after: list, balances: list, statut: str = "1"):
@@ -3138,7 +3382,7 @@ class TestAddSupplierInvoicePayment:
 
 
 class TestCreateSupplierInvoice:
-    """dolibarr_create_supplier_invoice — le registre fournisseur redevient écrivable."""
+    """dolibarr_create_supplier_invoice - le registre fournisseur redevient écrivable."""
 
     @staticmethod
     async def _reread(endpoint, params=None):
@@ -3225,21 +3469,21 @@ class TestCreateSupplierInvoice:
 
 
 class TestInvoiceListFilters:
-    """dolibarr_list_invoices / _supplier_invoices — période, tri, recherche."""
+    """dolibarr_list_invoices / _supplier_invoices - période, tri, recherche."""
 
     async def test_sorting_is_descending_on_the_invoice_date(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all")
+            await dolibarr_list_invoices(status="all", include_payments=False)
 
         params = get.call_args[0][1]
-        assert params["sortfield"] == "t.datef"
+        assert params["sortfield"] == "t.datef,t.rowid"
         assert params["sortorder"] == "DESC"
 
     async def test_sort_asc_is_still_reachable(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", sort="asc")
+            await dolibarr_list_invoices(status="all", sort="asc", include_payments=False)
 
         assert get.call_args[0][1]["sortorder"] == "ASC"
 
@@ -3248,7 +3492,7 @@ class TestInvoiceListFilters:
             get.return_value = []
             await dolibarr_list_invoices(
                 status="all", date_start="2026-08-01", date_end="2026-08-31",
-            )
+             include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert "(t.datef:>=:'2026-08-01')" in criteria
@@ -3257,7 +3501,7 @@ class TestInvoiceListFilters:
     async def test_search_ref_is_a_partial_match(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", search_ref="2608-0939")
+            await dolibarr_list_invoices(status="all", search_ref="2608-0939", include_payments=False)
 
         assert "(t.ref:like:'%2608-0939%')" in get.call_args[0][1]["sqlfilters"]
 
@@ -3266,7 +3510,7 @@ class TestInvoiceListFilters:
             get.return_value = []
             await dolibarr_list_invoices(
                 status="unpaid", date_start="2026-01-01", search_ref="FA26",
-            )
+             include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert criteria.count(" and ") == 2
@@ -3276,7 +3520,7 @@ class TestInvoiceListFilters:
         """Le callback LIKE de Dolibarr rejette toute apostrophe dans la valeur."""
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_invoices(status="all", search_ref="O'Brien (2026)")
+            await dolibarr_list_invoices(status="all", search_ref="O'Brien (2026)", include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert criteria == "(t.ref:like:'%OBrien 2026%')"
@@ -3285,7 +3529,7 @@ class TestInvoiceListFilters:
     async def test_supplier_search_covers_the_supplier_own_reference(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_supplier_invoices(status="all", search_ref="F-2026")
+            await dolibarr_list_supplier_invoices(status="all", search_ref="F-2026", include_payments=False)
 
         criteria = get.call_args[0][1]["sqlfilters"]
         assert "(t.ref:like:'%F-2026%')" in criteria
@@ -3295,21 +3539,21 @@ class TestInvoiceListFilters:
     async def test_supplier_list_sorts_descending_by_default(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = []
-            await dolibarr_list_supplier_invoices(status="all")
+            await dolibarr_list_supplier_invoices(status="all", include_payments=False)
 
         params = get.call_args[0][1]
-        assert params["sortfield"] == "t.datef"
+        assert params["sortfield"] == "t.datef,t.rowid"
         assert params["sortorder"] == "DESC"
 
     async def test_a_malformed_period_is_refused(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
-            msg = await dolibarr_list_invoices(date_start="août 2026")
+            msg = await dolibarr_list_invoices(date_start="août 2026", include_payments=False)
         assert "YYYY-MM-DD" in msg
         get.assert_not_called()
 
 
 class TestRevenueSummaryBasis:
-    """dolibarr_get_revenue_summary — assiette explicite et balayage complet."""
+    """dolibarr_get_revenue_summary - assiette explicite et balayage complet."""
 
     @staticmethod
     def _invoice(date_ts: int, ht: str, ttc: str, statut: str = "1") -> dict:
@@ -3351,8 +3595,9 @@ class TestRevenueSummaryBasis:
         assert params["limit"] == server.REVENUE_SCAN_PAGE
 
     async def test_every_page_is_read(self) -> None:
-        page = [self._invoice(1787011200, "100.00", "120.00")] * server.REVENUE_SCAN_PAGE
-        pages = iter([page, page[:3], [], []])
+        page = [dict(self._invoice(1787011200, "100.00", "120.00"), id=i)
+                for i in range(server.REVENUE_SCAN_PAGE + 3)]
+        pages = iter([page[:server.REVENUE_SCAN_PAGE], page[server.REVENUE_SCAN_PAGE:], [], []])
 
         with patch("dolibarr_mcp.server._api_get_list",
                    new=AsyncMock(side_effect=lambda *a, **k: next(pages))):
@@ -3497,7 +3742,7 @@ def _customer_invoice(**over) -> dict:
 
 
 class TestCreateInvoice:
-    """dolibarr_create_invoice — le connecteur savait devis et pas facture."""
+    """dolibarr_create_invoice - le connecteur savait devis et pas facture."""
 
     async def test_the_invoice_is_created_then_reread(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get, \
@@ -3531,7 +3776,7 @@ class TestCreateInvoice:
         assert post.call_args_list[0][0][1]["date_lim_reglement"] == "2026-09-17"
 
     async def test_lines_carry_every_field_postline_dereferences(self) -> None:
-        """Invoices::postLine() lit ses champs sans isset() — même piège qu'en fournisseur."""
+        """Invoices::postLine() lit ses champs sans isset() - même piège qu'en fournisseur."""
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get, \
              patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
             get.return_value = _customer_invoice()
@@ -3583,7 +3828,7 @@ class TestCreateInvoice:
 
 
 class TestAddInvoiceLines:
-    """dolibarr_add_invoice_lines — Facture::addline() refuse hors brouillon."""
+    """dolibarr_add_invoice_lines - Facture::addline() refuse hors brouillon."""
 
     async def test_a_validated_invoice_is_refused_without_writing(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get, \
@@ -3617,7 +3862,7 @@ class TestAddInvoiceLines:
 
 
 class TestDeleteInvoiceLine:
-    """dolibarr_delete_invoice_line — hors brouillon, l'appel n'a aucun effet."""
+    """dolibarr_delete_invoice_line - hors brouillon, l'appel n'a aucun effet."""
 
     async def test_a_validated_invoice_is_refused(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get, \
@@ -3660,7 +3905,7 @@ class TestDeleteInvoiceLine:
 
 
 class TestCreateInvoiceFromProposal:
-    """dolibarr_create_invoice_from_proposal — Dolibarr n'a pas de route propale → facture."""
+    """dolibarr_create_invoice_from_proposal - Dolibarr n'a pas de route propale → facture."""
 
     @staticmethod
     def _proposal(**over) -> dict:
@@ -3932,7 +4177,7 @@ class TestReferenceLists:
 
 
 class TestCashForecast:
-    """dolibarr_cash_forecast — la synthèse que le pilotage recoupait à la main."""
+    """dolibarr_cash_forecast - la synthèse que le pilotage recoupait à la main."""
 
     @staticmethod
     def _api(customer: list, supplier: list, accounts: list | None = None):
@@ -4044,7 +4289,7 @@ class TestCashForecast:
 
 
 class TestTransferBetweenAccounts:
-    """dolibarr_transfer_between_accounts — la trésorerie totale ne bouge pas."""
+    """dolibarr_transfer_between_accounts - la trésorerie totale ne bouge pas."""
 
     @staticmethod
     def _balances(seq: list):
@@ -4105,7 +4350,7 @@ class TestTransferBetweenAccounts:
 
 
 class TestBankStatements:
-    """dolibarr_list_bank_statements — état d'avancement du rapprochement."""
+    """dolibarr_list_bank_statements - état d'avancement du rapprochement."""
 
     async def test_entries_are_grouped_by_statement_number(self) -> None:
         lines = [
@@ -4184,7 +4429,7 @@ class TestBankEntriesReconciledFilter:
 
 
 class TestDeleteBankEntry:
-    """dolibarr_delete_bank_entry — refuse tout ce qui n'est pas une saisie isolée."""
+    """dolibarr_delete_bank_entry - refuse tout ce qui n'est pas une saisie isolée."""
 
     @staticmethod
     def _api(line: dict, links: list, balances: list | None = None):
@@ -4275,8 +4520,8 @@ class TestCreditNotesAreNeverHidden:
     Constaté en production le 31/08/2026 : `min_amount` valant 0 par défaut, la
     comparaison `total_ttc < min_amount` écartait tout avoir. 13 des 100
     dernières factures de l'instance disparaissaient sans le moindre signal, et
-    le CA d'août reconstitué depuis cette liste passait de 6 350 € — le chiffre
-    juste, net des avoirs AV2608-0651 et AV2608-0652 — à 52 400 €.
+    le CA d'août reconstitué depuis cette liste passait de 6 350 € - le chiffre
+    juste, net des avoirs AV2608-0651 et AV2608-0652 - à 52 400 €.
     """
 
     @staticmethod
@@ -4293,7 +4538,7 @@ class TestCreditNotesAreNeverHidden:
     async def test_the_default_keeps_every_credit_note(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = self._rows()
-            data = json.loads(await dolibarr_list_invoices(status="all"))
+            data = json.loads(await dolibarr_list_invoices(status="all", include_payments=False))
 
         assert data["count"] == 3
         assert {i["ref"] for i in data["invoices"]} == {
@@ -4304,7 +4549,7 @@ class TestCreditNotesAreNeverHidden:
     async def test_an_explicit_threshold_still_filters(self) -> None:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = self._rows()
-            data = json.loads(await dolibarr_list_invoices(status="all", min_amount=1000))
+            data = json.loads(await dolibarr_list_invoices(status="all", min_amount=1000, include_payments=False))
 
         assert [i["ref"] for i in data["invoices"]] == ["FA2608-0940"]
 
@@ -4312,7 +4557,7 @@ class TestCreditNotesAreNeverHidden:
         with patch("dolibarr_mcp.server._api_get_list", new_callable=AsyncMock) as get:
             get.return_value = [{"id": "1", "ref": "SI1", "total_ttc": "-500.00",
                                  "fk_statut": "2"}]
-            data = json.loads(await dolibarr_list_supplier_invoices(status="all"))
+            data = json.loads(await dolibarr_list_supplier_invoices(status="all", include_payments=False))
 
         assert data["count"] == 1
 
@@ -4428,7 +4673,7 @@ class TestAccountBalanceIsTheRealOne:
 
 
 class TestDeleteInvoice:
-    """dolibarr_delete_invoice — seuls les brouillons."""
+    """dolibarr_delete_invoice - seuls les brouillons."""
 
     async def test_a_validated_invoice_is_refused(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get, \
@@ -4568,7 +4813,7 @@ class TestResolveEmailCoversInternalUsers:
 
 
 # ---------------------------------------------------------------------------
-# Tickets — clôture, messages, mise à jour, suppression
+# Tickets - clôture, messages, mise à jour, suppression
 # ---------------------------------------------------------------------------
 
 
@@ -4589,7 +4834,7 @@ def _ticket(**over) -> dict:
 
 @pytest.mark.asyncio
 class TestCloseTicket:
-    """dolibarr_close_ticket — PUT /tickets/{id}.
+    """dolibarr_close_ticket - PUT /tickets/{id}.
 
     L'API REST n'a pas d'endpoint de clôture, et Ticket::update() écrit la
     colonne fk_statut depuis $this->status (Dolibarr récents) : un PUT ne
@@ -4770,7 +5015,7 @@ class TestGetTicketMessages:
 
 @pytest.mark.asyncio
 class TestAddTicketMessage:
-    """dolibarr_add_ticket_message — POST /tickets/newmessage (track_id)."""
+    """dolibarr_add_ticket_message - POST /tickets/newmessage (track_id)."""
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
@@ -4794,7 +5039,7 @@ class TestAddTicketMessage:
 
 @pytest.mark.asyncio
 class TestUpdateTicket:
-    """dolibarr_update_ticket — PUT /tickets/{id}, champs fournis seulement."""
+    """dolibarr_update_ticket - PUT /tickets/{id}, champs fournis seulement."""
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_put", new_callable=AsyncMock)
@@ -4828,7 +5073,7 @@ class TestUpdateTicket:
 
 @pytest.mark.asyncio
 class TestDeleteTicket:
-    """dolibarr_delete_ticket — DELETE /tickets/{id}, irréversible."""
+    """dolibarr_delete_ticket - DELETE /tickets/{id}, irréversible."""
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_delete", new_callable=AsyncMock)
@@ -4846,3 +5091,212 @@ class TestDeleteTicket:
     async def test_no_identifier_is_refused(self) -> None:
         out = await dolibarr_delete_ticket()
         assert "ticket_id ou ref" in out
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _observer(fn):
+    """Installe un observateur de création de ticket, et le retire après.
+
+    Les observateurs sont un état de module : sans retrait, un test en
+    contaminerait un autre.
+    """
+    server.TICKET_CREATE_OBSERVERS.append(fn)
+    try:
+        yield fn
+    finally:
+        server.TICKET_CREATE_OBSERVERS.remove(fn)
+
+
+@pytest.mark.asyncio
+class TestCreateTicketReportsSideEffects:
+    """dolibarr_create_ticket - ce qu'un module tiers écrit au passage est dit.
+
+    Reproduction du défaut du 18/09/2026 : sur l'instance inno³, le module
+    maison `supportcredits` débite un carnet client sur TICKET_CREATE. Onze
+    tickets créés par cet outil ont débité onze unités sur deux carnets, et le
+    retour de l'outil n'en disait rien : l'écriture ne s'est vue qu'au refus du
+    `consume` suivant (« statut=2, restant=0 »). Le connecteur ne peut pas
+    empêcher ce débit - il est gouverné côté serveur - mais il doit le NOMMER.
+    """
+
+    async def test_the_answer_says_whether_side_effects_were_looked_for(self) -> None:
+        # Sans observateur installé, le connecteur n'a rien regardé. Le dire est
+        # autre chose que d'affirmer qu'il ne s'est rien passé.
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            data = json.loads(
+                await dolibarr_create_ticket(
+                    subject="s", message="m", thirdparty_id=37, project_id=73,
+                    type_code="SUPPORT",
+                )
+            )
+
+        assert data["side_effects_checked"] is False
+        assert data["side_effects"] == []
+
+    async def test_an_observed_debit_is_named_in_the_answer(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            return {
+                "module": "supportcredits",
+                "debited": True,
+                "carnet_ref": "CARNET-2026-00045",
+                "units": 1,
+                "message": "1 unité débitée sur le carnet CARNET-2026-00045.",
+            }
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(
+                        subject="s", message="m", thirdparty_id=37,
+                    )
+                )
+
+        assert data["side_effects_checked"] is True
+        assert data["side_effects"][0]["carnet_ref"] == "CARNET-2026-00045"
+        assert "CARNET-2026-00045" in data["message"]
+
+    async def test_the_docstring_documents_the_supportcredits_debit(self) -> None:
+        doc = dolibarr_create_ticket.__doc__ or ""
+        assert "supportcredits" in doc
+        assert "side_effects" in doc
+
+    async def test_the_docstring_prices_the_severity_parameter(self) -> None:
+        # `severity` ne choisit pas qu'un libellé : sur une instance en débit
+        # automatique il fixe le nombre d'unités prélevées au client, et rien
+        # dans son nom ne le laisse deviner.
+        doc = dolibarr_create_ticket.__doc__ or ""
+        assert "5" in doc and "unités" in doc
+        assert "SUPPORTCREDITS_CONSUME_MODE" in doc
+
+    async def test_a_broken_observer_never_fails_the_creation(self) -> None:
+        # Le ticket est créé : une panne d'observateur ne doit pas se lire
+        # comme un échec d'écriture. Mais elle doit se voir.
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            raise RuntimeError("boom")
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        assert data["success"] is True
+        assert data["ticket_id"] == 512
+        assert data["side_effects"][0]["error"].startswith("RuntimeError")
+        assert "n'a PAS été vérifié" in data["side_effects"][0]["message"]
+
+    async def test_an_observer_with_nothing_to_say_adds_no_line(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        # Regardé, et rien trouvé : ce n'est pas la même chose que pas regardé.
+        assert data["side_effects_checked"] is True
+        assert data["side_effects"] == []
+        assert data["message"] == "Ticket créé avec succès (ID 512)."
+
+    async def test_the_observer_receives_the_new_ticket_id_and_the_thirdparty(self) -> None:
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append((ticket_id, thirdparty_id))
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = "512"
+            with _observer(observer):
+                await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+
+        # L'API rend l'id comme une chaîne sur certaines instances : un
+        # observateur doit recevoir un entier, pas à le deviner.
+        assert seen == [(512, 37)]
+
+    async def test_a_ticket_without_thirdparty_still_calls_the_observer(self) -> None:
+        # thirdparty_id = 0 : c'est à l'observateur de décider qu'il n'a rien à
+        # chercher, pas au coeur de le supposer.
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append((ticket_id, thirdparty_id))
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = 512
+            with _observer(observer):
+                await dolibarr_create_ticket(subject="s", message="m")
+
+        assert seen == [(512, 0)]
+
+    async def test_registering_twice_reports_the_debit_once(self) -> None:
+        async def observer(ticket_id: int, thirdparty_id: int) -> dict:
+            return {"module": "supportcredits", "units": 1, "message": "1 unité débitée."}
+
+        server.register_ticket_create_observer(observer)
+        server.register_ticket_create_observer(observer)
+        try:
+            with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+                post.return_value = 512
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+        finally:
+            server.TICKET_CREATE_OBSERVERS.remove(observer)
+
+        assert len(data["side_effects"]) == 1
+        assert data["message"].count("1 unité débitée.") == 1
+
+    async def test_an_unparsable_id_does_not_break_the_creation(self) -> None:
+        seen: list = []
+
+        async def observer(ticket_id: int, thirdparty_id: int) -> None:
+            seen.append(ticket_id)
+            return None
+
+        with patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock) as post:
+            post.return_value = {"unexpected": "shape"}
+            with _observer(observer):
+                data = json.loads(
+                    await dolibarr_create_ticket(subject="s", message="m", thirdparty_id=37)
+                )
+
+        assert data["success"] is True
+        assert seen == [0]
+
+
+@pytest.mark.asyncio
+class TestLogTimeDocstringMatchesReality:
+    """dolibarr_log_time - la docstring ne doit pas annoncer une route morte.
+
+    Reproduction du défaut du 18/09/2026 : la docstring affirmait « sur
+    Dolibarr 23.0.x cette route est CASSÉE EN AMONT et tout appel échoue ».
+    Dix-sept imputations ont pourtant été écrites et relues ce jour-là. Une
+    limite périmée coûte autant qu'une limite tue : elle a fait envisager un
+    contournement navigateur pour rien.
+    """
+
+    async def test_the_docstring_does_not_claim_every_call_fails(self) -> None:
+        doc = dolibarr_log_time.__doc__ or ""
+        assert "tout appel échoue" not in doc
+        assert "CASSÉE EN AMONT" not in doc
+        # Et elle dit l'état réel, pas seulement l'absence de l'ancien
+        # verdict : une docstring qui se tait laisse le doute intact.
+        assert "fonctionne" in doc
+
+    async def test_the_docstring_still_names_the_known_upstream_bug(self) -> None:
+        # La fatale existe sur certaines 23.0.x : la supprimer serait retomber
+        # dans l'erreur inverse.
+        doc = dolibarr_log_time.__doc__ or ""
+        assert "addtimespent" in doc
+        assert "23" in doc

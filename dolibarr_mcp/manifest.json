@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "dolibarr-mcp",
   "display_name": "Dolibarr ERP",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "Connecteur Dolibarr ERP/CRM : projets, tâches, temps, tiers, contacts, factures clients et fournisseurs, propositions, banque, règlements, trésorerie, pièces jointes, tickets, comptes-rendus. API REST Dolibarr 16+.",
   "author": {
     "name": "inno³",
@@ -43,7 +43,7 @@
     "dolibarr_web_login": {
       "type": "string",
       "title": "Identifiant web Dolibarr (optionnel)",
-      "description": "Login d'un utilisateur Dolibarr, utilisé UNIQUEMENT pour les écritures que l'API REST n'expose pas — à ce jour le seul rapprochement bancaire (dolibarr_set_bank_statement). Laisser vide désactive ce repli : l'outil concerné refuse alors explicitement au lieu de simuler un succès.",
+      "description": "Login d'un utilisateur Dolibarr, utilisé UNIQUEMENT pour les écritures que l'API REST n'expose pas - à ce jour le seul rapprochement bancaire (dolibarr_set_bank_statement). Laisser vide désactive ce repli : l'outil concerné refuse alors explicitement au lieu de simuler un succès.",
       "required": false,
       "default": "",
       "sensitive": false
