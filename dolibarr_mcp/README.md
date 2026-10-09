@@ -1,3 +1,18 @@
+## Lot A : lectures bornees de temps (1.8.2, non installe)
+
+`dolibarr_list_time_entries` accepte `task_limit` (20 par defaut, 100 maximum)
+et `time_budget` (20 secondes par defaut, 25 maximum). `next_cursor` reprend
+au premier element non rendu, sans relire les taches terminees. La decouverte
+des taches et les attentes reseau sont comprises dans le budget.
+
+`truncated`, `reason`, `tasks_scanned` et `aggregates_complete` distinguent
+une fin de parcours d'un arret sur limite, erreur ou budget. `total` vaut null
+si le perimetre complet n'a pas ete observe. Les agregats couvrent les taches
+lues dans cet appel, y compris les ecritures non rendues d'une tache partielle.
+Ne pas additionner ces agregats de page : additionner les ecritures exportees.
+Ordre par ID de tache puis ID d'ecriture, donnees supposees stables entre pages.
+Les anciens curseurs numeriques doivent etre remplaces par un nouveau parcours.
+
 # Dolibarr ERP connector (`dolibarr-mcp`)
 
 MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolibarr **16+**). Projects, tasks, time logging, third parties, contacts, customer and supplier invoicing, proposals, bank accounts, payment settlement, cash forecasting, attachments and support tickets.

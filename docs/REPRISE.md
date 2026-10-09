@@ -1,3 +1,19 @@
+## Point 5 du lot A termine
+
+Version 1.8.2 : budget global 20 s, maximum 25 s, pagination par tache et
+curseur avec perimetre verifie. Les erreurs ne perdent pas les lignes deja
+collectees. Six tests rouges avant, sept verts apres (annulation comprise).
+Les totaux partiels sont nommes comme tels et ne doivent pas etre additionnes
+lorsqu'une tache est relue a cause d'une limite d'ecritures.
+
+Production en GET uniquement : project_id=300, 436 taches. Appel par defaut :
+20 taches, 1,027 s, truncated=true et curseur. Parcours par pages de 100 taches :
+8,806 s ; 9,003 s ; 14,731 s ; 9,547 s ; 8,710 s (derniere page de 36).
+Chaque appel reste sous 30 s. L'API n'a renvoye aucune ecriture sur les 436
+lectures : cela ne prouve pas l'absence de temps en base ni dans Kanboard.
+Cette donnee source reste a examiner si des temps sont attendus. Rien n'a
+ete modifie pour tenter de les reconstituer.
+
 ## Point 3 du lot A termine
 
 Echeance fournisseur partagee entre liste et projection, version 1.8.1.
