@@ -1,3 +1,35 @@
+# Etat final du lot A au 09/10/2026
+
+Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/a-mcp-foss-connectors`. Branche : `codex/2026-10-10-dolibarr-nextcloud`.
+Base : main, sans reprise d'etat non commite. Copies de travail d'origine
+preservees. Commits locaux uniquement, aucune installation ni aucun push.
+
+Le rapport transversal et les commandes de verification sont dans
+[le compte rendu du lot A](LOT_A_2026-10-09.md).
+
+Commits fonctionnels utiles avant le compte rendu final :
+
+```text
+0077f99 fix(nextcloud 1.4.1): annoncer la racine locale resolue des envois
+3818b79 fix(dolibarr 1.8.2): borner et paginer la lecture des temps par tache
+d689ac5 test(dolibarr): comparer liste et projection sur les trois echeances
+05dfc5f fix(dolibarr 1.8.1): partager la lecture des echeances fournisseurs
+0211d5e chore(connecteurs): reprendre les bases Dolibarr et Nextcloud verifiees
+```
+
+Les tests de regression simules passent et les lectures reelles ont ete
+consignees ci-dessous. Les codes installes ont les memes empreintes Git
+qu'au debut du lot. Aucun secret ni payload client conserve dans les rapports.
+
+En attente de Benjamin : revue et integration des branches, construction et
+installation des extensions, deploiement du module, activation de la creation
+sur facture et produit configure. Toute recette en ecriture reste a faire sur
+une instance isolee. PROV92 n'a pas ete supprime. L'absence de temps renvoyes
+par l'API du projet 300 reste a examiner si des temps sont attendus.
+
+Les sections suivantes conservent les mesures et decisions par etape ; les
+consignes de production du week-end priment sur tous les historiques.
+
 ## Point 8 du lot A termine
 
 Nextcloud 1.4.1 : upload_root est resolu et upload_root_configured preserve
@@ -52,4 +84,3 @@ Prochaines actions : tests des defauts restants, correctifs locaux, controles
 en lecture seule, documentation de reprise et commits locaux par sujet.
 
 ## Historique anterieur au lot A
-

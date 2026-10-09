@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -186,7 +187,8 @@ async def test_protocol_initialize_and_list_tools_in_memory(capsys):
             async with ClientSession(client_read, client_write) as session:
                 result = await session.initialize()
                 tools = await session.list_tools()
-                assert result.serverInfo.version == "1.8.0"
+                manifest = json.loads((Path(__file__).resolve().parents[1] / "dolibarr_mcp" / "manifest.json").read_text())
+                assert result.serverInfo.version == manifest["version"]
                 assert len(tools.tools) == 78
                 assert len({tool.name for tool in tools.tools}) == 78
                 proposal = next(t for t in tools.tools if t.name == "dolibarr_list_proposals")
