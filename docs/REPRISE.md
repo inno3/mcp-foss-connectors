@@ -1,3 +1,10 @@
+## Point 8 du lot A termine
+
+Nextcloud 1.4.1 : upload_root est resolu et upload_root_configured preserve
+la valeur configuree. La docstring explique que le fichier est sur le poste
+executant le connecteur. Regression reproduite avec un lien Downloads et un
+fichier absent, puis corrigee. Aucune requete Nextcloud ni fichier televerse.
+
 ## Point 5 du lot A termine
 
 Version 1.8.2 : budget global 20 s, maximum 25 s, pagination par tache et

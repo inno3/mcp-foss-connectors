@@ -1,3 +1,12 @@
+## Diagnostic des chemins locaux (1.4.1, non installe)
+
+`local_path` est relatif a NEXTCLOUD_UPLOAD_DIR sur le poste executant le
+connecteur, et non au conteneur de la session appelante. Les erreurs rendent
+`upload_root` resolu et `upload_root_configured` tel que configure. Les deux
+peuvent differer lorsque Downloads est un lien symbolique.
+Les protections contre les chemins absolus, .. et les liens sortants restent
+actives. Le test du fichier absent n'effectue aucune requete Nextcloud.
+
 # Nextcloud connector (`nextcloud-mcp`)
 
 MCP server for [Nextcloud](https://nextcloud.com/) via WebDAV (files) and the OCS API (shares). List/upload/download/move/copy/delete files, manage shares and search.
