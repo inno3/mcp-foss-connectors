@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.14.2",
+  "version": "0.16.0",
   "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
   "author": {
     "name": "inno³",
@@ -50,7 +50,7 @@
     "kanboard_user_alt": {
       "type": "string",
       "title": "Compte agent - Utilisateur (optionnel)",
-      "description": "Login Kanboard d'un compte secondaire dédié à un agent IA (ex: bot). Laisser vide pour fallback sur le compte primary.",
+      "description": "Login Kanboard d'un compte secondaire dédié à un agent IA (ex: bot). Laisser vide si l'assistant n'a pas de compte propre : as_user='agent' est alors refuse, jamais substitue par le compte primary.",
       "default": "",
       "required": false
     },
@@ -277,7 +277,7 @@
     },
     {
       "name": "kanboard_create_task_link",
-      "description": "Crée un lien entre deux tâches (jalon, blocage…) — lien inverse automatique"
+      "description": "Crée un lien entre deux tâches (jalon, blocage…) - lien inverse automatique"
     },
     {
       "name": "kanboard_remove_task_link",

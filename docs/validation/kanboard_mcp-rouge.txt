@@ -1,0 +1,85 @@
+FFFFFF                                                                   [100%]
+=================================== FAILURES ===================================
+______ test_agent_absent_ne_declenche_aucune_ecriture[KANBOARD_USER_ALT] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79b561294770>
+wire = {'author': 84, 'calls': ['createTask'], 'identity': {'id': 84, 'username': 'bot'}}
+missing = 'KANBOARD_USER_ALT'
+
+    @pytest.mark.parametrize("missing", ["KANBOARD_USER_ALT", "KANBOARD_TOKEN_ALT"])
+    async def test_agent_absent_ne_declenche_aucune_ecriture(monkeypatch, wire, missing):
+        monkeypatch.setattr(server, missing, "")
+        result = await server.kanboard_create_task(project_id=1, title="Test", as_user="agent")
+>       assert "createTask" not in wire["calls"]
+E       AssertionError: assert 'createTask' not in ['createTask']
+
+tests/test_kanboard_weekend_regression.py:51: AssertionError
+______ test_agent_absent_ne_declenche_aucune_ecriture[KANBOARD_TOKEN_ALT] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79b55fc826c0>
+wire = {'author': 84, 'calls': ['createTask'], 'identity': {'id': 84, 'username': 'bot'}}
+missing = 'KANBOARD_TOKEN_ALT'
+
+    @pytest.mark.parametrize("missing", ["KANBOARD_USER_ALT", "KANBOARD_TOKEN_ALT"])
+    async def test_agent_absent_ne_declenche_aucune_ecriture(monkeypatch, wire, missing):
+        monkeypatch.setattr(server, missing, "")
+        result = await server.kanboard_create_task(project_id=1, title="Test", as_user="agent")
+>       assert "createTask" not in wire["calls"]
+E       AssertionError: assert 'createTask' not in ['createTask']
+
+tests/test_kanboard_weekend_regression.py:51: AssertionError
+___________________ test_token_primary_refuse_avant_creation ___________________
+
+wire = {'author': 84, 'calls': ['createTask'], 'identity': {'id': 4, 'username': 'human'}}
+
+    async def test_token_primary_refuse_avant_creation(wire):
+        wire["identity"] = {"id": 4, "username": "human"}
+        result = await server.kanboard_create_task(project_id=1, title="Test", as_user="agent")
+>       assert "createTask" not in wire["calls"]
+E       AssertionError: assert 'createTask' not in ['createTask']
+
+tests/test_kanboard_weekend_regression.py:58: AssertionError
+___________________ test_getme_absent_refuse_avant_creation ____________________
+
+wire = {'author': 84, 'calls': ['createTask'], 'identity': None}
+
+    async def test_getme_absent_refuse_avant_creation(wire):
+        wire["identity"] = None
+        await server.kanboard_create_task(project_id=1, title="Test", as_user="agent")
+>       assert "createTask" not in wire["calls"]
+E       AssertionError: assert 'createTask' not in ['createTask']
+
+tests/test_kanboard_weekend_regression.py:65: AssertionError
+_______________ test_identite_verifiee_avant_creation_et_cachee ________________
+
+wire = {'author': 84, 'calls': ['createTask'], 'identity': {'id': 84, 'username': 'bot'}}
+
+    async def test_identite_verifiee_avant_creation_et_cachee(wire):
+        for _ in range(2):
+            out = json.loads(await server.kanboard_create_task(project_id=1, title="Test", as_user="agent"))
+>           assert out["creator_id"] == 84
+                   ^^^^^^^^^^^^^^^^^
+E           KeyError: 'creator_id'
+
+tests/test_kanboard_weekend_regression.py:71: KeyError
+__________________ test_auteur_reel_est_relu_et_ecart_signale __________________
+
+wire = {'author': 4, 'calls': ['createTask'], 'identity': {'id': 84, 'username': 'bot'}}
+
+    async def test_auteur_reel_est_relu_et_ecart_signale(wire):
+        wire["author"] = 4
+        out = json.loads(await server.kanboard_create_task(project_id=1, title="Test", as_user="agent"))
+>       assert out["creator_id"] == 4
+               ^^^^^^^^^^^^^^^^^
+E       KeyError: 'creator_id'
+
+tests/test_kanboard_weekend_regression.py:81: KeyError
+=========================== short test summary info ============================
+FAILED tests/test_kanboard_weekend_regression.py::test_agent_absent_ne_declenche_aucune_ecriture[KANBOARD_USER_ALT]
+FAILED tests/test_kanboard_weekend_regression.py::test_agent_absent_ne_declenche_aucune_ecriture[KANBOARD_TOKEN_ALT]
+FAILED tests/test_kanboard_weekend_regression.py::test_token_primary_refuse_avant_creation
+FAILED tests/test_kanboard_weekend_regression.py::test_getme_absent_refuse_avant_creation
+FAILED tests/test_kanboard_weekend_regression.py::test_identite_verifiee_avant_creation_et_cachee
+FAILED tests/test_kanboard_weekend_regression.py::test_auteur_reel_est_relu_et_ecart_signale
+6 failed in 0.60s
+Aucune tentative de connexion réseau pendant les tests.

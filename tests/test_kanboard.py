@@ -182,7 +182,7 @@ class TestHelpers:
         assert _ts_to_date(None) == ""
 
     def test_ts_to_date_converts(self) -> None:
-        # 2021-01-01 00:00:00 UTC-ish — assert it formats to a YYYY-MM-DD string
+        # 2021-01-01 00:00:00 UTC-ish - assert it formats to a YYYY-MM-DD string
         out = _ts_to_date(1609459200)
         assert len(out) == 10 and out[4] == "-"
 
@@ -310,7 +310,7 @@ class TestListTasks:
     Constate en production le 02/09/2026 sur le projet 29 : un appel
     `status=0, limit=100` rendait 100 cartes fermees sur 109, sous la forme
     d'une liste JSON nue. Rien dans la reponse ne distinguait « 100 cartes,
-    c'est tout » de « 100 cartes, et 9 que tu ne verras jamais » — et aucun
+    c'est tout » de « 100 cartes, et 9 que tu ne verras jamais » - et aucun
     parametre ne permettait d'atteindre les 9 restantes.
     """
 
@@ -778,8 +778,13 @@ class TestUpdateComment:
     async def test_single_account_setup_does_not_suggest_a_phantom_account(self) -> None:
         """Sans compte agent, "reessayer avec l'autre" enverrait sur une fausse piste.
 
-        Tout retombe sur primary : le refus signifie alors que le commentaire
-        appartient a un utilisateur Kanboard tiers.
+        Le refus signifie alors que le commentaire appartient a un utilisateur
+        Kanboard tiers, hors de portee de ce connecteur.
+
+        Ce test demandait "agent" jusqu'a la 0.15.0 et verifiait que primary avait
+        signe : ce repli est precisement le defaut corrige par la 0.16.0 (cf.
+        tests/test_kanboard_identite_agent.py). Le cas utile reste le meme, sur le
+        seul compte configure.
         """
 
         async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
@@ -799,12 +804,36 @@ class TestUpdateComment:
             ),
         ):
             data = json.loads(
-                await kanboard_update_comment(comment_id=7, comment="x", as_user="agent")
+                await kanboard_update_comment(comment_id=7, comment="x", as_user="primary")
             )
-        # "agent" demande mais non configure : c'est primary qui a signe.
         assert data["attempted_as_user"] == "primary"
         assert "as_user=" not in data["hint"]
         assert "Aucun second compte" in data["hint"]
+
+    async def test_single_account_setup_refuses_an_agent_write(self) -> None:
+        """Sans compte agent configure, "agent" est refuse, pas substitue.
+
+        C'est le pendant du test ci-dessus : l'ancien contrat signait l'ecriture
+        avec le compte humain et annoncait un refus de permission, ce qui faisait
+        chercher un probleme de droits la ou il y avait un probleme d'identite.
+        """
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            raise AssertionError(f"aucun appel ne doit partir : {method}")
+
+        with (
+            patch("kanboard_mcp.server.KANBOARD_USER_ALT", ""),
+            patch("kanboard_mcp.server.KANBOARD_TOKEN_ALT", ""),
+            patch(
+                "kanboard_mcp.server.kb_call",
+                new_callable=AsyncMock,
+                side_effect=_dispatch,
+            ),
+        ):
+            out = await kanboard_update_comment(comment_id=7, comment="x", as_user="agent")
+        assert "Refus" in out
+        assert "KANBOARD_USER_ALT" in out
+        assert "permission_denied" not in out
 
 
 @pytest.mark.asyncio
@@ -1612,7 +1641,7 @@ class TestHasMoreResultsNeverContradictsTheWarning:
     """Deux champs voisins se contredisaient dans la meme reponse.
 
     Constate a la seconde passe : count=20, total_matches=21, scan_warning
-    present — et has_more_results=false. Un appelant qui se fie au booleen
+    present - et has_more_results=false. Un appelant qui se fie au booleen
     conclut qu'il a tout vu.
     """
 
@@ -1859,7 +1888,7 @@ class TestMyOverdueUsesTheDedicatedProcedure:
 
 
 # ---------------------------------------------------------------------------
-# Non-regression : recette du 02/09/2026 — resolution par nom
+# Non-regression : recette du 02/09/2026 - resolution par nom
 # ---------------------------------------------------------------------------
 
 

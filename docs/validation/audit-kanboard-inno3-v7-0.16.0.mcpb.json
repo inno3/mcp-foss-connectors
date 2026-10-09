@@ -1,0 +1,18 @@
+{
+  "archive": "/home/jean/ssd_data/jean/RepoGit/_codex_wt/C-mcp-foss-connectors/archives/kanboard-inno3-v7-0.16.0.mcpb",
+  "extraction": "/tmp/lot-c-paquet-oviikzb1",
+  "sha256": "57e239280b4ef67f2fb58904726fdfc1f851b405d706fba7ea8f85c6ffe735c2",
+  "changed_entries": [
+    "manifest.json",
+    "src/server.py"
+  ],
+  "import": {
+    "tools": 53,
+    "mcp": "1.29.1",
+    "version": "0.16.0",
+    "server_version": null
+  },
+  "base": "/home/jean/.config/Claude/Claude Extensions/local.mcpb.inno.kanboard-inno3-v7",
+  "presentation_punctuation": "ASCII dans les descriptions ; configuration inchangée",
+  "final_manifest_checked": true
+}
