@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -571,6 +571,12 @@ def _export_payload(payload: dict, key: str, limit: int, cursor: str = "",
     if not complete:
         payload["scan_note"] = getattr(scan, "scan_note", "Balayage incomplet.")
     return payload
+
+
+def _invoice_due_date(invoice: dict, supplier: bool = False) -> str:
+    """Meme lecture de l'echeance dans les listes et la projection."""
+    value = _first_present(invoice, "date_echeance", "date_lim_reglement") if supplier else invoice.get("date_lim_reglement")
+    return _ts_to_date(value)
 
 
 def _first_present(row: dict, *keys: str):
@@ -2130,7 +2136,7 @@ async def dolibarr_list_invoices(
             if min_amount and total_ttc < min_amount:
                 continue
 
-            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
+            date_lim = _invoice_due_date(inv, supplier=True)
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -2232,7 +2238,7 @@ async def dolibarr_list_supplier_invoices(
         today = datetime.now().strftime("%Y-%m-%d")
         results = []
         for inv in invoices:
-            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
+            date_lim = _invoice_due_date(inv, supplier=True)
             date_inv = _ts_to_date(inv.get("date"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
@@ -8402,7 +8408,7 @@ async def dolibarr_cash_forecast(horizon_days: int = 90, include_supplier: bool 
         def _digest(rows: list, supplier: bool) -> tuple:
             items, buckets = [], {}
             for inv in rows:
-                due = _ts_to_date(inv.get("date_lim_reglement"))
+                due = _invoice_due_date(inv, supplier=supplier)
                 total = float(inv.get("total_ttc") or 0)
                 remaining = inv.get("remaintopay")
                 amount = float(remaining) if remaining not in (None, "") else total

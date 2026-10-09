@@ -1,3 +1,10 @@
+## Point 3 du lot A termine
+
+Echeance fournisseur partagee entre liste et projection, version 1.8.1.
+Tests : deux variantes de champ, dont une rouge avant correction.
+Lecture de production : les trois dates concordent pour les references
+fournies dans la mission. Aucun reglement ni facture modifie.
+
 # Lot A du week-end du 09/10/2026
 
 Reprise courante dans `/home/jean/ssd_data/jean/RepoGit/_codex_wt/a-mcp-foss-connectors`, branche `codex/2026-10-10-dolibarr-nextcloud`, creee depuis `main`.
