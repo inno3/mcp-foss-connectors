@@ -1,6 +1,6 @@
 # Reprise : connecteur Kanboard
 
-Mise a jour : 29/09/2026.
+Mise a jour : 10/10/2026.
 
 Document de reprise au sens des consignes inno3 : de quoi reprendre sans
 l'historique de conversation. Ni secret, ni donnee client, ni transcription.
@@ -86,10 +86,12 @@ Rupture assumee : sur une installation a un seul compte, un appel explicite
 
 ### Limites connues
 
-- Le processus MCP de Claude Desktop est lance au demarrage du client :
-  **la 0.16.0 installee n'est pas celle qui tourne dans la session en cours**.
-  Verifie le 29/09 : `kanboard_who_am_i(as_user="agent")` ne rend pas encore
-  `identity_verified`. La recette exige un redemarrage du client.
+- Le processus MCP de Claude Desktop est lance au demarrage du client : le
+  29/09, **la 0.16.0 installee n'etait pas celle qui tournait dans la session**,
+  et `kanboard_who_am_i(as_user="agent")` ne rendait pas encore
+  `identity_verified`. **Leve le 10/10/2026** : apres redemarrage, c'est bien
+  le nouveau code qui repond, et la recette ci-dessous est verte. La limite
+  vaut toujours pour toute installation future.
 - `tests/` couvre les refus sur faux serveur. Le comportement reel de Kanboard
   sur `getMe` avec un token applicatif n'est pas verifie ici : il est deduit du
   fait que `getUserByLoginName` repond deja `-32601` sur ce serveur.
@@ -99,7 +101,36 @@ Rupture assumee : sur une installation a un seul compte, un appel explicite
   (`kanboard-mcp`, vendor-neutre) : l'installer tel quel creerait un doublon
   d'extension au lieu d'une mise a jour.
 
-### Recette a jouer apres redemarrage de Claude Desktop
+### Recette, jouee le 10/10/2026 : verte
+
+Mesures de ce jour, par les outils MCP de la session :
+
+- etape 1 : `identity_verified: true`, `effective_account: "agent"`,
+  `resolved_user_id: 84`, et `getMe` qui repond `claude`/84. Le refus documente
+  sur `getUserByLoginName` (`-32601`) apparait bien comme une verification
+  manquante declaree, pas comme un echec d'identite ;
+- etape 2 : `identity_verified: true`, `resolved_user_id: 4`, `getMe` repond
+  `bjean`/4 ;
+- etape 3 : `kanboard_list_accounts()` rend les deux comptes en
+  `status: "configured"`, aucun `fallback_to_primary` ;
+- etape 4 : commentaire 2670 pose sur la carte 8010 du projet 262 en
+  `as_user="agent"`. Reponse d'ecriture : `author_user_id: 84`,
+  `author_user_id_recorded: 84`, sans `author_mismatch`. Relu **depuis le
+  compte primary**, le commentaire est enregistre sous `user_id: 84`,
+  `username: "claude"` : la confirmation vient de Kanboard, pas du connecteur.
+  La carte 8010 est la carte de suivi du chantier, pas une carte jetable ; si
+  une recette sur carte dediee est voulue, elle reste a designer.
+
+La rupture assumee n'a produit aucun effet de bord observe : aucun appel de la
+session n'a ete refuse pour identite non etablie.
+
+Un ecart de libelle, sans effet sur l'identite : la recette d'origine attendait
+un commentaire signe `Claude (Assistant IA)`. Sur cette instance, l'utilisateur
+84 porte `username: "claude"` et `name: "agent"` ; c'est donc « agent » qui
+s'affiche. L'uid est le bon, le nom affiche est une donnee de l'instance, pas du
+connecteur. A corriger dans Kanboard si la signature longue est voulue.
+
+### Recette d'origine, pour memoire
 
 1. `kanboard_who_am_i(as_user="agent")` doit rendre `identity_verified: true`,
    `effective_account: "agent"` et `resolved_user_id: 84`.
@@ -115,10 +146,13 @@ Rupture assumee : sur une installation a un seul compte, un appel explicite
 
 ### Prochaines actions
 
-1. Redemarrer Claude Desktop, jouer la recette ci-dessus.
+1. ~~Redemarrer Claude Desktop, jouer la recette ci-dessus.~~ Fait, et vert, le
+   10/10/2026. Le chantier 0.16.0 est clos cote recette.
 2. Decider du sort de `fix/dolibarr-exports-complets` : la 0.15.0 installee en
    venait, et cette branche reste la seule a porter le travail Dolibarr 1.8.0.
 3. Pousser quand demande. Rien n'a ete pousse.
+4. Le poste porte toujours la 0.16.0 : la 0.17.0 de la section suivante n'est ni
+   construite ni installee. C'est la seule marche restante sur ce connecteur.
 
 ## Perimetre du board et rendu des textes
 
