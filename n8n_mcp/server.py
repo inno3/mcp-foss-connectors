@@ -47,7 +47,7 @@ _RETRY_DELAY = 1.0  # seconds, doubles each retry
 # Champs autorisés dans un PUT /api/v1/workflows/{id}
 # Les champs id, versionId, tags, updatedAt, createdAt, shared, active sont read-only
 _WORKFLOW_PUT_ALLOWED = {"name", "nodes", "connections", "settings", "staticData", "pinData"}
-# Note: "meta" exclu — l'API n8n le considère read-only même quand non-null
+# Note: "meta" exclu : l'API n8n le considère read-only même quand non-null
 
 # Dans settings, seuls ces champs sont acceptés par PUT (binaryMode, availableInMCP sont GET-only)
 _SETTINGS_ALLOWED = {
@@ -213,7 +213,7 @@ async def _api_request(method: str, path: str, **kwargs: Any) -> Any:
     d'idempotence ni identifiant de requête à vérifier ; il faut relire le
     workflow ou l'exécution avant de rejouer, et c'est exactement ce que veut
     dire « inconnu ». Le journal rappelle en outre les écritures déjà réussies
-    dans le même appel d'outil — plusieurs outils enchaînent une réécriture et
+    dans le même appel d'outil : plusieurs outils enchaînent une réécriture et
     une (dés)activation.
     """
     url = f"{N8N_BASE_URL}/api/v1/{path}"
@@ -397,7 +397,7 @@ def _nodes_summary(nodes: list) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Workflows
+# Tools : Workflows
 # ---------------------------------------------------------------------------
 
 
@@ -469,7 +469,7 @@ async def n8n_update_workflow_code(
     Récupère le workflow complet, trouve le nœud par son nom, met à jour
     le champ jsCode, puis sauvegarde via PUT.
 
-    Attention — règles Code nodes n8n :
+    Attention : règles Code nodes n8n :
     - Pas de template literals (backticks)
     - Pas de for...of → utiliser .filter().map() ou forEach()
     - Pas de continue dans forEach → utiliser return
@@ -522,7 +522,8 @@ async def n8n_activate_workflow(workflow_id: str) -> str:
     Retourne : confirmation avec le statut actif.
     """
     try:
-        result = await api_patch(f"workflows/{workflow_id}/activate")
+        # L'API publique n8n accepte POST sur cette route (PATCH renvoie 405).
+        result = await api_post(f"workflows/{workflow_id}/activate", {})
         return _dumps({
             "success": True,
             "workflow_id": workflow_id,
@@ -543,7 +544,8 @@ async def n8n_deactivate_workflow(workflow_id: str) -> str:
     Retourne : confirmation avec le statut désactivé.
     """
     try:
-        result = await api_patch(f"workflows/{workflow_id}/deactivate")
+        # L'API publique n8n accepte POST sur cette route (PATCH renvoie 405).
+        result = await api_post(f"workflows/{workflow_id}/deactivate", {})
         return _dumps({
             "success": True,
             "workflow_id": workflow_id,
@@ -555,7 +557,7 @@ async def n8n_deactivate_workflow(workflow_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Exécutions
+# Tools : Exécutions
 # ---------------------------------------------------------------------------
 
 
@@ -589,7 +591,7 @@ async def n8n_get_executions(
     `GET /executions` ne renvoie pas le champ `data`, si bien que l'extraction
     qui y était tentée ne trouvait jamais rien et laissait `error` absent malgré
     la promesse de la docstring. La cause est donc relue par exécution en
-    échec — un appel chacune, plafonné, le dépassement étant signalé.
+    échec : un appel chacune, plafonné, le dépassement étant signalé.
 
     Sans `workflow_id`, un workflow déclenché toutes les deux minutes occupe à
     lui seul la première page : l'appel rend alors l'historique d'un workflow,
@@ -600,7 +602,7 @@ async def n8n_get_executions(
 
     Limite d'instance : certaines instances (dont celle d'inno³) refusent
     `startedAfter` / `startedBefore` sur /executions et répondent 400. Le
-    filtrage est alors fait côté client, SUR LA PAGE DEMANDÉE UNIQUEMENT — la
+    filtrage est alors fait côté client, SUR LA PAGE DEMANDÉE UNIQUEMENT : la
     réponse porte alors `note`. Pour une fenêtre temporelle réellement
     parcourue, utiliser n8n_list_failures, qui pagine jusqu'à sa borne.
 
@@ -678,7 +680,7 @@ async def n8n_get_execution_detail(
     erreurs nœud par nœud, et nombre d'items produits. La version précédente
     joignait systématiquement le premier item complet de chaque nœud : sur
     l'exécution 31027 de cette instance, cela produisait 195 000 caractères,
-    au-delà de ce qu'un client MCP peut ingérer — l'outil de diagnostic
+    au-delà de ce qu'un client MCP peut ingérer : l'outil de diagnostic
     devenait inutilisable précisément sur les cas à diagnostiquer.
 
     Avec `include_output`, chaque aperçu est borné et sa coupe est annoncée
@@ -779,7 +781,7 @@ async def n8n_trigger_workflow(workflow_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Credentials
+# Tools : Credentials
 # ---------------------------------------------------------------------------
 
 
@@ -826,7 +828,7 @@ async def n8n_update_node_credentials(
 
     Paramètres :
     - workflow_id : identifiant du workflow
-    - node_name : nom exact du nœud (ex: 'API Dolibarr — Factures')
+    - node_name : nom exact du nœud (ex: 'API Dolibarr : Factures')
     - credential_type : type de credential (ex: 'httpHeaderAuth', 'smtp')
     - credential_id : ID du credential n8n (obtenu via n8n_list_credentials)
     - credential_name : nom du credential (ex: 'Header Auth account 2')
@@ -870,7 +872,7 @@ async def n8n_update_node_credentials(
 
 
 # ---------------------------------------------------------------------------
-# Tool — Mise à jour complète d'un workflow (nodes + connections + code)
+# Tool : Mise à jour complète d'un workflow (nodes + connections + code)
 # ---------------------------------------------------------------------------
 
 
@@ -920,7 +922,7 @@ async def n8n_patch_workflow_nodes(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Inspection et mise à jour avancée
+# Tools : Inspection et mise à jour avancée
 # ---------------------------------------------------------------------------
 
 
@@ -956,7 +958,7 @@ async def n8n_update_node_params(
 
     Paramètres :
     - workflow_id : identifiant du workflow
-    - node_name : nom exact du nœud (ex: 'Envoi Matrix', 'Matrix — Notifier')
+    - node_name : nom exact du nœud (ex: 'Envoi Matrix', 'Matrix : Notifier')
     - params_json : objet JSON des paramètres à mettre à jour (merge sur parameters existants)
 
     Exemple params_json pour changer l'URL d'un nœud httpRequest :
@@ -1003,7 +1005,7 @@ async def n8n_update_node_params(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Variables globales n8n
+# Tools : Variables globales n8n
 # ---------------------------------------------------------------------------
 
 
@@ -1027,7 +1029,7 @@ async def n8n_create_variable(key: str, value: str) -> str:
     """Crée une variable globale n8n (référençable via {{ $vars.KEY }} dans tous les workflows).
 
     Paramètres :
-    - key : nom de la variable (ex: MATRIX_GENERAL) — sans espaces, sans caractères spéciaux
+    - key : nom de la variable (ex: MATRIX_GENERAL) : sans espaces, sans caractères spéciaux
     - value : valeur de la variable (ex: !roomid:matrix.example.org)
 
     Retourne : confirmation avec l'id et la clé de la variable créée.
@@ -1068,7 +1070,7 @@ async def n8n_create_workflow(
     Particularités API n8n :
     - Le payload POST exige `name`, `nodes`, `connections`, `settings`. Sans nodes,
       l'API rejette avec 400. On force un nœud manuel vide si nodes_json est vide
-      pour que la création passe — il faudra ensuite remplir le workflow via
+      pour que la création passe : il faudra ensuite remplir le workflow via
       n8n_update_workflow_code ou via l'UI.
     - L'API renvoie l'objet workflow complet avec son `id` et `versionId`.
 
@@ -1160,7 +1162,7 @@ async def n8n_create_workflow(
 async def n8n_delete_workflow(workflow_id: str) -> str:
     """Supprime un workflow n8n via DELETE /api/v1/workflows/{id}.
 
-    ⚠️ DESTRUCTIF — confirmation utilisateur requise avant exécution.
+    ⚠️ DESTRUCTIF : confirmation utilisateur requise avant exécution.
 
     L'API n8n refuse la suppression d'un workflow actif → désactive d'abord
     automatiquement si nécessaire (POST /workflows/{id}/deactivate).
@@ -1244,7 +1246,7 @@ EXEC_ERROR_CHARS = 400
 #: Taille de page demandée lors d'un parcours paginé (plafond de l'API).
 EXEC_PAGE_SIZE = 250
 #: Garde-fou : nombre maximal de pages parcourues pour couvrir une fenêtre.
-#: Atteindre ce plafond n'est jamais silencieux — la réponse porte alors
+#: Atteindre ce plafond n'est jamais silencieux : la réponse porte alors
 #: `window_complete: false`, et les comptes rendus sont des minorants.
 EXEC_MAX_PAGES = 20
 #: Profondeur maximale remontée par workflow pour dater le dernier succès.
@@ -1401,7 +1403,7 @@ async def _fetch_executions_window(
 
     Une page n'est pas une fenêtre. Tant qu'on se contente de la première,
     « les 168 dernières heures » veut dire « les N derniers échecs, puis
-    filtrés par date » — et le compte obtenu varie avec `limit` sans que rien
+    filtrés par date » : et le compte obtenu varie avec `limit` sans que rien
     ne le signale. On enchaîne donc les pages jusqu'à sortir de la fenêtre,
     épuiser l'historique, ou atteindre le garde-fou `EXEC_MAX_PAGES`.
 
@@ -1538,7 +1540,7 @@ async def _workflow_history(
     conservé par n8n, ou jusqu'à `HEALTH_MAX_DEPTH`.
 
     Retourne (lignes, historique épuisé). `historique épuisé` distingue
-    « n'a jamais réussi » de « dernier succès hors de la profondeur lue » —
+    « n'a jamais réussi » de « dernier succès hors de la profondeur lue » :
     deux situations que `last_success_at = null` confondait.
     """
     depth = max(1, int(max_depth or HEALTH_MAX_DEPTH))
@@ -1579,7 +1581,7 @@ async def _attach_errors(rows: list, budget: int = EXEC_ERROR_LOOKUP_MAX) -> "tu
     `GET /executions` ne renvoie PAS le champ `data` : la version précédente y
     cherchait pourtant l'erreur, si bien que le champ `error` promis par la
     docstring n'était jamais rempli. Le message ne s'obtient qu'en relisant
-    chaque exécution avec `includeData=true` — d'où un appel par échec, borné.
+    chaque exécution avec `includeData=true` : d'où un appel par échec, borné.
     """
     looked_up = 0
     for row in rows:
@@ -1622,8 +1624,8 @@ async def n8n_list_failures(
     - include_crashed : inclure le statut `crashed` en plus de `error`
 
     C'est la réponse à « qu'est-ce qui a échoué cette nuit ? ». Jusqu'ici il
-    fallait interroger chaque workflow séparément — dix-sept appels sur cette
-    instance — puis relire chaque exécution pour en obtenir la cause.
+    fallait interroger chaque workflow séparément : dix-sept appels sur cette
+    instance : puis relire chaque exécution pour en obtenir la cause.
 
     Chaque échec détaillé est rendu avec le nom de son workflow ET son message
     d'erreur, résolu par relecture de l'exécution. Les échecs sont regroupés par
@@ -1679,8 +1681,8 @@ async def n8n_list_failures(
 
         all_rows.sort(key=lambda r: str(r.get("startedAt") or ""), reverse=True)
         summaries = [_exec_summary(r) for r in all_rows]
-        # `executions` reste borné par `limit` — une revue d'incidents n'a pas
-        # besoin de six cents lignes — mais la coupe ne touche QUE le détail.
+        # `executions` reste borné par `limit` : une revue d'incidents n'a pas
+        # besoin de six cents lignes : mais la coupe ne touche QUE le détail.
         detailed = summaries[:capped]
         detailed, looked_up = await _attach_errors(detailed)
 
@@ -1769,7 +1771,7 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
 
     Pour chaque workflow : statut de la dernière exécution, date du dernier
     succès, nombre d'échecs CONSÉCUTIFS et cause du dernier. C'est ce compteur
-    qui distingue un incident isolé d'un workflow cassé depuis des jours —
+    qui distingue un incident isolé d'un workflow cassé depuis des jours :
     celui qui échoue toutes les nuits sans que personne ne le voie. Sa valeur
     n'est donc utile que si elle est atteignable : une panne de neuf jours ne
     doit pas se lire « 5 » parce que l'affichage s'arrête là.
@@ -1779,7 +1781,7 @@ async def n8n_workflows_health(active_only: bool = True, per_workflow: int = 5) 
     - `inspected` : profondeur réellement lue
     - `oldest_failure_at` : date du plus ancien échec de la série vue
     - `consecutive_failures_at_least` : présent SI la série dépasse
-      HEALTH_MAX_DEPTH — le compte est alors un minorant
+      HEALTH_MAX_DEPTH : le compte est alors un minorant
     - `last_success_at` : null est désambiguïsé par `never_succeeded`
       (aucun succès dans l'historique conservé par n8n) ou
       `last_success_unknown` (dernier succès au-delà de la profondeur lue)
