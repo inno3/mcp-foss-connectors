@@ -1,19 +1,23 @@
 # mcp-foss-connectors
 
 Vendor-neutral [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
-servers that let MCP clients — Claude Desktop, Cowork, or any other MCP host —
+servers that let MCP clients : Claude Desktop, Cowork, or any other MCP host :
 read from and act on the **free and open-source tools** that run a typical
 back office: ERP, project board, CMS, automation, chat, file storage, notes and
 code forge.
 
 Every server is a single, self-contained Python file. It is configured
-**entirely through environment variables** — no hostname, login or secret is
-ever baked into the code — so it works against *any* instance of the target
+**entirely through environment variables** : no hostname, login or secret is
+ever baked into the code : so it works against *any* instance of the target
 tool, whether self-hosted or managed.
 
 > Origin: these connectors were built and battle-tested at
 > [inno³](https://inno3.fr) against its own information system, then generalised
 > and released under Apache-2.0. See [Origin & attribution](#origin--attribution).
+
+La [provenance canonique](docs/PROVENANCE_CONNECTEURS.md) identifie les sources,
+les copies installées et les différences avec les copies privées conservées.
+Le constructeur refuse les paquets extérieurs, y compris via un lien symbolique.
 
 ---
 
@@ -91,11 +95,11 @@ known gotchas.
 
 ### Download pre-built bundles
 
-You don't have to build them yourself — pre-built `.mcpb` bundles for every
+You don't have to build them yourself : pre-built `.mcpb` bundles for every
 connector are attached to each tagged
 [**release**](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases).
 
-Latest — [**v0.1.0**](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/tag/v0.1.0):
+Latest : [**v0.1.0**](https://code.inno3.eu/contrib-OS/mcp-foss-connectors/releases/tag/v0.1.0):
 
 | Connector | Download |
 |---|---|
@@ -152,7 +156,7 @@ When that package is installed next to `mcp-foss-connectors`, its tools appear
 automatically; uninstall it and the connector falls back to the generic core.
 No environment flag, no patch to this repository.
 
-inno³ ships its own such add-on — `inno3-mcp-extensions` — for tools that depend on its
+inno³ ships its own such add-on : `inno3-mcp-extensions` : for tools that depend on its
 custom Dolibarr modules (MeetingNotes, signed client/support-credits portal
 URLs). It is **not** part of this repo, which keeps the public core strictly
 generic.
@@ -165,7 +169,7 @@ generic.
 pytest
 ```
 
-All tests are **offline unit tests** — every HTTP call is mocked, so the suite
+All tests are **offline unit tests** : every HTTP call is mocked, so the suite
 runs with no network and no real credentials. Each connector has a
 `tests/test_<tool>.py`.
 
@@ -179,8 +183,8 @@ compliance. inno³ runs its own back office entirely on the free/open-source
 tools these connectors target, and originally wrote them to drive that system
 from MCP clients.
 
-The code was then generalised — stripped of any inno³-specific host, identifier
-or module — and published here under the **Apache License 2.0** so that:
+The code was then generalised : stripped of any inno³-specific host, identifier
+or module : and published here under the **Apache License 2.0** so that:
 
 - any organisation running these tools can reuse the connectors as-is, and
 - inno³ can migrate its own usage onto this public, community-maintainable code
@@ -188,7 +192,7 @@ or module — and published here under the **Apache License 2.0** so that:
 
 Organisation-specific helpers (tools tied to inno³'s own Dolibarr modules) are
 kept **entirely out** of this repository and published as a separate add-on
-package — see [Optional extensions](#optional-extensions).
+package : see [Optional extensions](#optional-extensions).
 
 Please keep the [`NOTICE`](NOTICE) file when redistributing, as required by the
 Apache-2.0 license. "inno³" is a trademark of inno³; the tool names above belong
@@ -198,4 +202,4 @@ to their respective projects, which do not endorse this work.
 
 ## License
 
-[Apache License 2.0](LICENSE) — © 2026 inno³ and contributors.
+[Apache License 2.0](LICENSE) : © 2026 inno³ and contributors.

@@ -22,7 +22,7 @@ Usage:
 ``--with-extension`` vendors an extra package into ``src/lib`` so the connector
 discovers its tools at startup through the ``dolibarr_mcp.extensions``
 entry-point group. The package is installed with pip, hence *with* its
-``.dist-info`` — without which ``importlib.metadata.entry_points()`` returns
+``.dist-info`` : without which ``importlib.metadata.entry_points()`` returns
 nothing and the extra tools are silently absent from the bundle.
 
 Requires ``pip`` on PATH. Bundles are written to ``dist/`` and are NOT committed.
@@ -100,6 +100,11 @@ def build(name: str, pkg: Path, output_dir: Path,
           extensions: "list[Path] | None" = None,
           bundle_name: "str | None" = None,
           display_name: "str | None" = None) -> Path:
+    canonical = _connectors().get(name)
+    if (canonical is None or pkg.resolve() != canonical.resolve()
+            or pkg.resolve() != ROOT.resolve() / f"{name}_mcp"
+            or (pkg / "server.py").resolve() != pkg.resolve() / "server.py"):
+        raise ValueError("Source non canonique : utiliser le paquet de ce dépôt public")
     manifest_path = pkg / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     bundle_name = bundle_name or manifest["name"]  # e.g. "gitlab-mcp"
@@ -140,7 +145,7 @@ def build(name: str, pkg: Path, output_dir: Path,
                 continue
             shutil.copy2(py, src / py.name)
 
-        # 3. Vendored dependencies (with .dist-info — required by
+        # 3. Vendored dependencies (with .dist-info : required by
         #    importlib.metadata.version("mcp") at runtime).
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet",
