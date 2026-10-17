@@ -884,3 +884,12 @@ rendues avant la page), `total_exact`, `total_lower_bound` et `scan_truncated`.
 des tâches lues dans cet appel. `scan_truncated` signale ces agrégats partiels,
 y compris à la fin du parcours, tandis que `truncated` indique uniquement une
 suite à lire. `scan_note` explique cette différence. Ces minorants ne se somment pas.
+
+## Modulepart non servis par le cœur (1.8.4)
+
+L'API documents de Dolibarr code en dur les modulepart qu'elle connaît. Un
+module maison n'en fait pas partie : `dolibarr_list_documents(module="meetingnotes")`
+reçoit un 500 « Modulepart meetingnotes not implemented yet ». L'outil le rend
+désormais comme `unsupported_modulepart: true`, sans le confondre avec un objet
+absent. Les comptes rendus se listent par `dolibarr_list_meetingnote_documents`
+(extension inno³, module meetingnotes 4.45.0-alpha.72).

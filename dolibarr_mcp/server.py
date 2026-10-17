@@ -8496,6 +8496,14 @@ async def dolibarr_list_documents(
     - ref       : référence de l'objet (ex. 'FA2608-0939')
     - limit     : nombre max de fichiers
 
+    Seuls les modulepart que l'API documents du cœur Dolibarr connaît sont
+    servis : leur liste y est codée en dur. Les modules maison n'en font pas
+    partie, en particulier « meetingnotes » (comptes rendus), qui n'est pas
+    supporté tant que ce modulepart n'existe pas côté Dolibarr : l'API répond
+    500 « Modulepart meetingnotes not implemented yet ». Pour les comptes
+    rendus, utiliser dolibarr_list_meetingnote_documents (extension inno³,
+    module meetingnotes 4.45.0-alpha.72 ou plus récent).
+
     Retourne nom, chemin relatif, taille, type et date de chaque fichier. Le
     chemin relatif est celui qu'attend dolibarr_build_document.
     """
@@ -8530,6 +8538,22 @@ async def dolibarr_list_documents(
                     "ref": ref or None,
                     "message": (
                         f"Objet introuvable pour modulepart={params['modulepart']!r}. "
+                        f"Détail Dolibarr : {_error_body(exc)}"
+                    ),
+                })
+            if exc.response.status_code == 500 and "not implemented" in str(_error_body(exc)):
+                # Le cœur ne connaît pas ce modulepart : ce n'est ni un objet
+                # absent ni une panne, c'est une capacité manquante de l'API.
+                return _dumps({
+                    "success": False,
+                    "module": module,
+                    "modulepart_sent": params["modulepart"],
+                    "unsupported_modulepart": True,
+                    "message": (
+                        f"L'API documents de Dolibarr ne sait pas servir "
+                        f"modulepart={params['modulepart']!r}. Un module maison peut exposer "
+                        "sa propre route : pour les comptes rendus, "
+                        "dolibarr_list_meetingnote_documents. "
                         f"Détail Dolibarr : {_error_body(exc)}"
                     ),
                 })
