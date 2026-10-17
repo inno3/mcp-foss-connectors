@@ -1,4 +1,52 @@
+# 17/10/2026 — lot K2 : fiabiliser l'identité Kanboard 0.17.2
+
+## Objectif et état de reprise
+
+Corriger le diagnostic primary sans changer de version, compléter les contrats
+d'auteur des commentaires, supprimer l'injection d'un auteur égal à zéro et
+garder les fichiers d'entrée limités au renvoi vers ce document.
+
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/K-mcp-foss-connectors`.
+- Branche existante vérifiée : `codex/2026-10-17-kanboard-0.17.2` ; départ K2
+  **`bff1697`**, arbre initial propre. Aucun autre worktree consulté.
+- Venv partagé : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+- Sans réseau, installation, changement de branche, tag ni push ; travail seul.
+- Les trois branches à archiver indiquées dans le lot K existent toujours.
+- Source de vérité : ce document ; historique du lot K conservé ci-dessous.
+  Les JSON `validation/kanboard-0172-comparison.json` et
+  `validation/kanboard-0172-known-limits.json` décrivent **`bff1697`**, pas les
+  corrections K2. Leurs empreintes et limites ne décrivent plus le HEAD courant.
+
+## Avancée K2 et vérifications
+
+La suite initiale complète donne **1 352 réussis, 1 ignoré**, en **5,54 s** ;
+aucun test rouge préexistant. Ruff initial propre sur `kanboard_mcp/`,
+`tests/test_kanboard_agent_identity.py` et `tests/test_kanboard_compat_016.py`.
+
+Point 1 : le diagnostic conserve le `verified` réel de la garde. Un login
+différent renvoyé par `getMe` est refusé pour primary aussi, y compris pendant
+sa sonde avant une écriture agent. Une sonde primary indisponible reste tolérée ;
+l'agent doit toujours établir sa propre identité, sans repli. Les neuf nouveaux
+cas HTTP synthétiques donnent avant correction **5 échecs, 4 réussites,
+39 désélectionnés**, en **0,13 s**, **0 tentative réseau**.
+Après correction, les suites identité, compatibilité 0.16 et régression publique
+donnent **63 réussis**, en **0,24 s**, **0 tentative réseau**. Un passage
+intermédiaire donnait **1 échec, 62 réussites** : le libellé de refus agent
+attendu par un contrat historique avait changé ; le marqueur `identite
+incoherente` est conservé dans le message corrigé. Ruff et `git diff --check`+sont propres sur le périmètre modifié.
+
+## Prochaines actions K2
+
+1. Point 1 vérifié ; son commit accompagne cette mise à jour.
+2. Renforcer les contrats `author_read_error` et `author_mismatch` des commentaires.
+3. Vérifier l'injection des auteurs zéro et la corriger séparément si nécessaire.
+4. Retirer les paragraphes propres au lot K de `AGENTS.md` et `CLAUDE.md`.
+5. Exécuter la suite complète, Ruff et le contrôle de diff ; finaliser la reprise
+   et `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K2.rapport.md`.
+
 # 17/10/2026 — lot K : réunir Kanboard en 0.17.2
+
+**Historique au commit `bff1697` ; la section K2 ci-dessus fait foi pour la suite.**
 
 ## Objectif et décisions
 

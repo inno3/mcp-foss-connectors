@@ -18,6 +18,8 @@ environment variables — no host, login or secret is baked into the code.
 
 ## Version 0.17.2: board status, dates and readable text
 
+The [changelog](CHANGELOG.md) also tracks the identity corrections in 0.17.2.
+
 `kanboard_get_board` shows active cards by default. Pass `status=0` for closed
 cards or `status=-1` for the former scope, including both. Filtering precedes
 the per-column limit; `task_count`, `total` and the cards shown share that scope.
@@ -186,6 +188,10 @@ and a matching `getMe` identity. They never fall back to primary. The logins mus
 differ; when both identities can be established, their user IDs must differ too.
 An unavailable primary `getMe` does not block a verified agent, and primary
 writes remain possible when their own `getMe` is unavailable.
+In that case, `kanboard_who_am_i` reports `identity_verified: false`, even if
+the user directory resolves an ID. A different login returned by `getMe`
+refuses the write, including for primary and during its probe before an agent
+write.
 
 The identity cache is tied to the endpoint, login and token, in memory only.
 Concurrent first writes share the same probe. Reads keep the 0.17.1 fallback to

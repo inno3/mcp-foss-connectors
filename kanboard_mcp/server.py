@@ -93,7 +93,8 @@ async def _ensure_write_identity(as_user: str) -> dict[str, Any]:
         `required` est vrai pour une ecriture agent : c'est le cas que la garde
         existe pour couvrir. Il est faux pour primary, qui gardait en 0.16 le
         droit d'ecrire en declarant la verification manquante, et faux pour le
-        sondage de primary qui ne sert qu'a exclure un UID partage.
+        sondage de primary qui ne sert qu'a exclure un UID partage. Un login
+        different est toujours un refus, meme si la sonde est facultative.
         """
         key = _identity_key(which)
         if key in _identity_cache:
@@ -115,8 +116,7 @@ async def _ensure_write_identity(as_user: str) -> dict[str, Any]:
             isinstance(raw_uid, str) and raw_uid.isascii() and raw_uid.isdecimal()
         )
         uid = int(raw_uid) if valid_uid else 0
-        if (uid <= 0 or not isinstance(username, str)
-                or username.strip().casefold() != key[1].strip().casefold()):
+        if uid <= 0 or not isinstance(username, str) or not username.strip():
             if required:
                 _identity_refusal(
                     which, "identite incoherente ou absente dans getMe.",
@@ -124,6 +124,11 @@ async def _ensure_write_identity(as_user: str) -> dict[str, Any]:
                 )
             logger.warning("Identite %s non verifiee : getMe incoherent", which)
             return None
+        if username.strip().casefold() != key[1].strip().casefold():
+            _identity_refusal(
+                which, "identite incoherente : le login rendu par getMe differe du login configure.",
+                "Verifier le login et le token personnel du compte.",
+            )
         # Le nom d'affichage de la 0.16 vient de getMe.name ; le login ne le
         # remplace pas, sinon list_accounts.resolved_name change apres ecriture.
         return {
@@ -569,7 +574,7 @@ async def _ensure_account_identity(account: str) -> dict[str, Any]:
         identity = await _ensure_write_identity(account)
     except ValueError as exc:
         raise KanboardIdentityError(account, str(exc), "Verifier les tokens personnels.") from exc
-    return {**identity, "verified": True, "fatal": False}
+    return {**identity, "verified": identity.get("verified", True), "fatal": False}
 
 
 async def kb_call(method: str, params: dict | None = None, as_user: str = "") -> Any:

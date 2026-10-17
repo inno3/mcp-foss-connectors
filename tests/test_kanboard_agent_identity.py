@@ -17,6 +17,7 @@ class Rpc:
             "human": {"id": "4", "username": "human"},
             "robot": {"id": "84", "username": "robot"},
         }
+        self.directory = {login: dict(identity) for login, identity in self.identities.items()}
         self.author = 84
         self.read_error = False
 
@@ -30,6 +31,8 @@ class Rpc:
             result = self.identities[user]
             if isinstance(result, Exception):
                 raise result
+        elif method == "getUserByLoginName":
+            result = self.directory.get(params["login"])
         elif method == "getComment":
             result = None if self.read_error else {"id": 901, "user_id": str(self.author)}
         elif method == "getTask":
@@ -135,6 +138,70 @@ async def test_first_concurrent_writes_share_verified_identity(rpc):
 async def test_primary_is_explicitly_allowed_and_verified(rpc):
     await kb.kb_call("closeTask", {"task_id": 902}, as_user="primary")
     assert [(u, m) for u, m, _ in rpc.calls] == [("human", "getMe"), ("human", "closeTask")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [None, RuntimeError("getMe unavailable")])
+async def test_primary_diagnostic_does_not_verify_an_unavailable_getme(rpc, identity):
+    rpc.identities["human"] = identity
+    diagnostic = json.loads(await kb.kanboard_who_am_i(as_user="primary"))
+    # La resolution par annuaire n'est pas une preuve du porteur du token.
+    assert diagnostic["resolved_user_id"] == 4
+    assert diagnostic["identity_verified"] is False
+    assert diagnostic["identity_note"]
+    assert "identity_error" not in diagnostic
+    account = await kb._ensure_account_identity("primary")
+    assert account["verified"] is False
+    assert account["fatal"] is False
+    assert kb._identity_cache == {}
+    assert rpc.writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account,user", [("primary", "human"), ("agent", "robot")])
+async def test_matching_identity_stays_verified_in_diagnostic_and_cache(rpc, account, user):
+    rpc.identities[user]["username"] = f" {user.upper()} "
+    for _ in range(2):
+        assert (await kb._ensure_account_identity(account))["verified"] is True
+        diagnostic = json.loads(await kb.kanboard_who_am_i(as_user=account))
+        assert diagnostic["identity_verified"] is True
+        assert "identity_error" not in diagnostic
+        assert "identity_note" not in diagnostic
+    assert rpc.writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["diagnostic", "write"])
+async def test_primary_login_mismatch_is_refused(rpc, operation):
+    rpc.identities["human"] = {"id": "85", "username": "stranger"}
+    if operation == "diagnostic":
+        diagnostic = json.loads(await kb.kanboard_who_am_i(as_user="primary"))
+        assert diagnostic["identity_verified"] is False
+        assert diagnostic["identity_error"]
+    else:
+        with pytest.raises(kb.KanboardIdentityError) as error:
+            await kb.kb_call("closeTask", {"task_id": 902}, as_user="primary")
+        assert error.value.account == "primary"
+        assert error.value.write_state == "non_appliquee"
+    assert kb._identity_cache == {}
+    assert rpc.writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [None, RuntimeError("getMe unavailable")])
+async def test_verified_agent_can_write_when_primary_getme_is_unavailable(rpc, identity):
+    rpc.identities["human"] = identity
+    await kb.kb_call("createTask", {"title": "Temoin"}, as_user="agent")
+    assert rpc.writes == [("robot", "createTask", {"title": "Temoin", "creator_id": 84})]
+
+
+@pytest.mark.asyncio
+async def test_agent_write_is_refused_when_primary_probe_returns_another_login(rpc):
+    rpc.identities["human"] = {"id": "85", "username": "stranger"}
+    with pytest.raises(kb.KanboardIdentityError):
+        await kb.kb_call("createTask", {"title": "Temoin"}, as_user="agent")
+    assert kb._identity_cache == {}
+    assert rpc.writes == []
 
 
 @pytest.mark.asyncio
