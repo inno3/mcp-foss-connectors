@@ -595,20 +595,27 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     journal rappelle aussi les écritures déjà réussies dans cet appel d'outil.
 
     Avant la PREMIÈRE écriture d'un compte dans le processus, l'identité du token
-    est établie par `getMe` (cf. `_ensure_account_identity()`). Une identité non
-    établie interdit l'écriture, sans repli : rien ne part sur le réseau. Les
-    lectures ne déclenchent pas cette vérification, elles gardent le repli vers primary si les identifiants agent manquent.
+    est sondée par `getMe` (cf. `_ensure_write_identity()`). Une identité agent
+    non établie interdit l'écriture, sans repli. Primary peut écrire si sa sonde
+    est indisponible, sans imposer d'auteur à la création ; un login différent
+    reste un refus. Les lectures ne déclenchent pas cette vérification, elles
+    gardent le repli vers primary si les identifiants agent manquent.
     """
     journal = _write_journal()
     mutating = _is_mutating_method(method)
     user, token, account = _get_credentials(as_user, for_write=mutating)
     if mutating:
-        # Levée volontairement AVANT toute requête : une écriture dont on ne peut
-        # pas nommer l'auteur ne doit pas exister.
+        # La garde refuse une identité incohérente avant la requête d'écriture.
         identity = await _ensure_write_identity(as_user)
         author_field = {"createTask": "creator_id", "createComment": "user_id"}.get(method)
         if author_field:
-            params = {**(params or {}), author_field: identity["user_id"]}
+            params = dict(params or {})
+            if identity.get("verified", True) and identity["user_id"] > 0:
+                params[author_field] = identity["user_id"]
+            else:
+                # Primary sans getMe : Kanboard attribue l'auteur, sans zéro
+                # ni identifiant supposé fourni par un cache ou un appelant.
+                params.pop(author_field, None)
     global _request_id
     _request_id += 1
     auth = base64.b64encode(f"{user}:{token}".encode()).decode()
@@ -2263,11 +2270,10 @@ async def kanboard_add_comment(
         return "Erreur : comment est obligatoire."
     try:
         identity = await _ensure_write_identity(as_user)
-        uid = identity["user_id"]
+        uid = identity["user_id"] if identity.get("verified", True) else None
 
         comment_id = await kb_call("createComment", {
             "task_id": task_id,
-            "user_id": uid,
             "content": comment,
         }, as_user=as_user)
 

@@ -36,7 +36,7 @@ attendu par un contrat historique avait changé ; le marqueur `identite
 incoherente` est conservé dans le message corrigé. Ruff et `git diff --check`
 sont propres sur le périmètre modifié.
 
-Point 2 : les tests historiques comportaient déjà une assertion minimale pour
+Point 2, commit **`e9b4a8a`** : les tests historiques comportaient déjà une assertion minimale pour
 chacun des champs `author_read_error` et `author_mismatch` sur les commentaires.
 Ces assertions sont renforcées : succès maintenu, auteur relu ou inconnu,
 preuve absente, cause conservée, aucun champ contradictoire et aucun rejeu de
@@ -45,11 +45,25 @@ absent, un auteur illisible et un booléen. Aucun changement serveur nécessaire
 La suite de compatibilité donne **13 réussis**, en **0,07 s**, avec **0 tentative
 réseau** ; Ruff et `git diff --check` propres.
 
+Point 3 : l'injection de zéro persistait après le point 1. Les 24 nouveaux cas
+donnent avant correction **20 échecs, 4 réussites, 48 désélectionnés**, en
+**0,30 s**, **0 tentative réseau**. Sans identité primary prouvée, `kb_call`
+omet désormais `creator_id` / `user_id`, même si un appelant fournit un auteur ;
+il n'utilise pas le cache de résolution. `kanboard_add_comment` laisse cette
+attribution à `kb_call` et ne compare plus l'auteur relu au zéro d'une identité
+absente. Un auteur relu à zéro reste non vérifié. Les identités prouvées primary
+et agent continuent à imposer leur ID, sans muter les paramètres de l'appelant.
+Après correction, identité, compatibilité, régression publique et transport
+donnent **141 réussis**, en **0,36 s**, **0 tentative réseau**.
+La suite complète donne **1 389 réussis, 1 ignoré**, en **5,65 s** (`-rs`) ;
+le seul ignoré reste l'intégration Dolibarr qui exige un service réel.
+`ruff check --no-cache . --output-format concise` est propre sur tout le dépôt.
+
 ## Prochaines actions K2
 
 1. Point 1 committé en `3a045f1`.
-2. Point 2 vérifié ; son commit accompagne cette mise à jour.
-3. Vérifier l'injection des auteurs zéro et la corriger séparément si nécessaire.
+2. Point 2 committé en `e9b4a8a`.
+3. Point 3 vérifié ; son commit accompagne cette mise à jour.
 4. Retirer les paragraphes propres au lot K de `AGENTS.md` et `CLAUDE.md`.
 5. Exécuter la suite complète, Ruff et le contrôle de diff ; finaliser la reprise
    et `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K2.rapport.md`.

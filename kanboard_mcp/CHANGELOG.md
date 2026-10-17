@@ -14,6 +14,11 @@
   d'une relecture échouée ou indique un auteur absent/illisible ;
   `author_mismatch` accompagne l'auteur relu lorsqu'il diffère de l'identité
   vérifiée. La création réussie n'est pas rejouée et aucun auteur n'est inventé.
+- Sans identité primary vérifiée, les créations omettent `creator_id` et
+  `user_id` pour laisser Kanboard attribuer l'auteur. Aucun zéro ni ID issu du
+  cache de résolution ou fourni à `kb_call` n'est envoyé comme auteur supposé.
+  Un auteur relu à zéro ne devient pas une preuve d'identité. Pour une identité
+  vérifiée, l'ID prouvé reste imposé sur les créations primary et agent.
 
 ### Lot K
 

@@ -205,6 +205,61 @@ async def test_agent_write_is_refused_when_primary_probe_returns_another_login(r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [None, RuntimeError("getMe unavailable")])
+@pytest.mark.parametrize("method,field", [("createTask", "creator_id"), ("createComment", "user_id")])
+@pytest.mark.parametrize("supplied_author", [None, 0, 777])
+async def test_primary_without_getme_omits_rpc_author(rpc, identity, method, field, supplied_author):
+    rpc.identities["human"] = identity
+    kb._my_id_cache["primary"] = 4
+    params = {"title": "Temoin"} if method == "createTask" else {"task_id": 902, "content": "Temoin"}
+    expected = dict(params)
+    if supplied_author is not None:
+        params[field] = supplied_author
+    original = dict(params)
+    assert await kb.kb_call(method, params, as_user="primary") == 902
+    assert rpc.writes == [("human", method, expected)]
+    assert params == original
+    assert kb._identity_cache == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [None, RuntimeError("getMe unavailable")])
+@pytest.mark.parametrize("kind", ["task", "comment"])
+@pytest.mark.parametrize("recorded", [4, 0])
+async def test_primary_creation_without_getme_leaves_author_to_kanboard(rpc, identity, kind, recorded):
+    rpc.identities["human"] = identity
+    rpc.author = recorded
+    kb._my_id_cache["primary"] = 4
+    if kind == "task":
+        data = json.loads(await kb.kanboard_create_task(project_id=262, title="Temoin", as_user="primary"))
+        method, field, legacy = "createTask", "creator_id", "creator_id"
+        expected = {"project_id": 262, "title": "Temoin"}
+    else:
+        data = json.loads(await kb.kanboard_add_comment(task_id=902, comment="Temoin", as_user="primary"))
+        method, field, legacy = "createComment", "user_id", "author_user_id_recorded"
+        expected = {"task_id": 902, "content": "Temoin"}
+    assert data["success"] is True
+    assert data["as_user"] == "primary"
+    assert data["author_user_id"] == data[legacy] == recorded
+    assert data["author_verified"] is False
+    assert data["author_warning"]
+    assert "author_mismatch" not in data
+    assert rpc.writes == [("human", method, expected)]
+    assert field not in rpc.writes[0][2]
+    assert kb._identity_cache == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account,user,uid", [("primary", "human", 4), ("agent", "robot", 84)])
+@pytest.mark.parametrize("method,field", [("createTask", "creator_id"), ("createComment", "user_id")])
+async def test_verified_creation_overrides_supplied_author(rpc, account, user, uid, method, field):
+    params = {field: 777, "title": "Temoin"}
+    await kb.kb_call(method, params, as_user=account)
+    assert rpc.writes == [(user, method, {field: uid, "title": "Temoin"})]
+    assert params == {field: 777, "title": "Temoin"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("account,user", [("primary", "human"), ("agent", "robot")])
 async def test_display_name_decodes_once_after_write_identity_probe(rpc, account, user):
     """La garde 0.17.1 alimente aussi le cache de noms decode en 0.17.2."""

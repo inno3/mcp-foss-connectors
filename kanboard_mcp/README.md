@@ -192,6 +192,9 @@ In that case, `kanboard_who_am_i` reports `identity_verified: false`, even if
 the user directory resolves an ID. A different login returned by `getMe`
 refuses the write, including for primary and during its probe before an agent
 write.
+When primary cannot be verified, task and comment creation omit the author
+parameter so Kanboard can assign it. The connector reads the recorded author
+back, but keeps `author_verified: false` without a proven identity to compare.
 
 The identity cache is tied to the endpoint, login and token, in memory only.
 Concurrent first writes share the same probe. Reads keep the 0.17.1 fallback to
