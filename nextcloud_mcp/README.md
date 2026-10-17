@@ -5,6 +5,8 @@ MCP server for [Nextcloud](https://nextcloud.com/) via WebDAV (files) and the OC
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
+**Version courante : 1.4.1.** Voir le [CHANGELOG](CHANGELOG.md).
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -86,3 +88,12 @@ to check against, so `inconnu` means exactly that — re-read the resource with
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
+
+## Diagnostic des chemins locaux depuis 1.4.1
+
+`local_path` est relatif à `NEXTCLOUD_UPLOAD_DIR` sur le poste exécutant le
+connecteur. Les erreurs rendent `upload_root` résolu et
+`upload_root_configured` tel que configuré. Les deux peuvent différer lorsque
+le dossier d'envoi est un lien symbolique.
+Les protections contre les chemins absolus, `..` et les liens sortants restent
+actives. Le test du fichier absent n'effectue aucune requête Nextcloud.

@@ -25,7 +25,9 @@ Décisions et état courant :
   désormais cette URL avant son import, comme les tests existants.
 - Temps après correction de l’import : **416 réussis, 1 ignoré**, sur les tests
   temps, Dolibarr, exports et manifestes.
-- À intégrer ensuite : diagnostic local Nextcloud (`0077f99`). Les documents
+- Dolibarr 1.8.2 commité : `8f98923`. Nextcloud 1.4.1 reprend le diagnostic
+  local de `0077f99` ; racines résolue et configurée sont rendues sans changer
+  les protections de chemins ni le transport de `main`. Les documents
   historiques ne valent pas vérification actuelle.
 
 Vérifications réellement exécutées, hors ligne :
@@ -35,6 +37,7 @@ Vérifications réellement exécutées, hors ligne :
   **1 échec, 1 réussite**, sur `date_echeance` ignoré par la projection.
 - Première intégration ciblée : **489 réussis, 1 ignoré, 1 échec** ; le test MCP
   attendait encore la version source 1.9.0. Il compare désormais au manifeste.
+- Nextcloud, transport et manifestes après reprise : **189 réussis**.
 - Après correction et ajout des cas de priorité des alias : **1 307 réussis,
   1 ignoré** sur toute la suite. Ruff ciblé et `git diff --check` propres.
 
