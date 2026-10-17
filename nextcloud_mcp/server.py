@@ -1089,6 +1089,8 @@ async def nextcloud_upload_file(
                              décodé partiellement.
       local_path     (str) — fichier LOCAL à téléverser, chemin obligatoirement
                              RELATIF à la racine d'envoi NEXTCLOUD_UPLOAD_DIR
+                             du poste qui execute le connecteur, pas au
+                             conteneur de la session appelante
                              (défaut : la racine de téléchargement
                              NEXTCLOUD_DOWNLOAD_DIR, elle-même ~/Downloads par
                              défaut). Absolu, `..` et symlink sortant sont
@@ -1157,7 +1159,8 @@ async def nextcloud_upload_file(
         except ValueError as exc:
             refusal = {"error": str(exc)}
             if source == "local_path":
-                refusal["upload_root"] = _NC_UPLOAD_DIR
+                refusal["upload_root"] = os.path.realpath(_NC_UPLOAD_DIR)
+                refusal["upload_root_configured"] = _NC_UPLOAD_DIR
             return _compact(refusal)
 
         if len(payload) > _MAX_UPLOAD_BYTES:

@@ -5,6 +5,8 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
+**Version courante : 1.8.3.** Voir le [CHANGELOG](CHANGELOG.md).
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -628,6 +630,8 @@ python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions \
 Toutes les listes ci-dessous acceptent `limit` (20 par défaut, de 1 à 100)
 et `cursor` (vide au premier appel). Réutiliser `next_cursor` avec les mêmes
 filtres et le même tri. Le curseur est un décalage dans la liste dédoublonnée.
+Exception depuis 1.8.2 : les temps utilisent un curseur opaque par tâche,
+avec budget global et agrégats sur les seules tâches lues (voir ci-dessous).
 Chaque appel relit les données. Il faut donc exporter une période stable pour
 obtenir une union reproductible, sans création ou suppression concurrente.
 
@@ -656,7 +660,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
 | `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet |
 | `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
-| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, collections complètes par tâche, agrégats sur toute la sélection |
+| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues |
 | `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
 | `list_supplier_invoices` | `invoices`, id, ref, ref_supplier, total_ttc, échéance, statut, retard | mêmes statuts, thirdparty_id, search_ref sur les deux références | mêmes bornes et tri que les factures clients |
 | `list_proposals` | `proposals`, id, ref, tiers, total_ht, total_ttc, date_validity, status | status vide tous, 0 brouillon, 1 validé, 2 signé, 3 refusé, 4 facturé, thirdparty_id | Toutes dates, datep décroissante, REST paginé |
@@ -696,6 +700,47 @@ inexistante ou invalide rend `payments=null`, avec `payments_error` et un
 champ indisponible explicite. `include_payments=false` évite ces appels
 supplémentaires et signale que les paiements n'ont pas été demandés.
 
+### Conditions de règlement depuis 1.8.1
+
+`dolibarr_list_invoices`, `dolibarr_list_supplier_invoices`,
+`dolibarr_get_invoice` et `dolibarr_get_supplier_invoice` rendent désormais
+`cond_reglement_id`, `cond_reglement_code`, `cond_reglement_label` pour la
+facture, et les trois champs préfixés par `thirdparty_` pour son tiers.
+La condition du tiers ne remplace jamais celle de la facture. Hors erreur de
+lecture signalée, `null` sur les deux conditions signifie qu'aucune condition
+de règlement n'est paramétrée dans Dolibarr. `dolibarr_get_thirdparty` rend
+aussi les trois champs : tous à `null`, ils indiquent l'absence de condition
+paramétrée sur le tiers, à l'origine d'échéances par défaut sur ses factures.
+
+`date_due` peut être une valeur par défaut Dolibarr (date de facture + 1 jour),
+sans échéance négociée. `date_due_is_default` signale cette heuristique :
+`true` pour cet intervalle à vérifier, `false` pour un autre intervalle, `null` si l'une des
+dates manque ou est illisible. Sur une échéance par défaut, `days_late` mesure
+l'ancienneté de la facture, pas un retard de règlement ; son calcul reste
+inchangé. Les listes donnent `date_due_default_count` sur la seule page rendue
+et `payment_terms_note` seulement si ce nombre est non nul. Cette même note
+accompagne le détail d'une facture dont `date_due_is_default=true`.
+
+`include_payment_terms=true` par défaut ajoute une lecture de
+`thirdparties/{id}` par tiers distinct de la page rendue, après pagination.
+Le dictionnaire `setup/dictionary/payment_terms` est lu une seule fois par
+session, échec compris, avec les libellés `label`, `libelle` ou
+`libelle_facture`. Un dictionnaire inaccessible donne
+`payment_terms_unavailable` ; un tiers inaccessible donne
+`thirdparty_payment_terms_error` sur la facture. Ces échecs ne bloquent pas
+la lecture des factures : les champs impossibles à résoudre restent `null`
+et figurent dans `unavailable_fields`. Les données déjà portées par la
+facture restent disponibles. Redémarrer le serveur pour relire un dictionnaire
+après correction des droits ou modification des conditions.
+
+`include_payment_terms=false` supprime ces appels complémentaires et rend les
+sept champs, y compris `date_due_is_default`, à `null`, avec
+`payment_terms_error` et leur présence dans `unavailable_fields`. Dans ce cas,
+`date_due_default_count=0` signifie qu'aucun défaut n'a été détecté, sans
+certifier les échéances puisque leur contrôle a été désactivé.
+
+### Avoirs de la page rendue
+
 La liste client contient aussi `credit_notes`, les objets avoirs de la page
 rendue, avec leur facture source quand elle est connue. `credit_notes_count`
 compte ces objets. Ce tableau suit les mêmes filtres que `invoices` et n'est
@@ -734,3 +779,34 @@ refuse également un montant ou une date absents. Pour les encaissements,
 `unresolved_entries` signale les liens bancaires illisibles et rend le résultat
 tronqué. Les appels MCP réussis ne produisent plus de journaux INFO sur stderr.
 Les avertissements et erreurs restent visibles.
+
+### Échéances cohérentes depuis 1.8.1
+
+La liste des factures, leur détail et la projection de trésorerie partagent
+la même lecture : `date_echeance` prime sur `date_lim_reglement`, même quand
+sa valeur est explicitement nulle. Le signal `date_due_is_default` est une
+heuristique (facture + un jour), pas une preuve de l'absence d'accord ; vérifier
+les conditions avant une relance.
+
+### Lecture des temps bornée depuis 1.8.2
+
+`dolibarr_list_time_entries` accepte `task_limit` (20 par défaut, 100 maximum)
+et `time_budget` (20 secondes par défaut, 25 maximum). `next_cursor` reprend
+au premier élément non rendu, sans relire les tâches terminées. La découverte
+des tâches et les attentes réseau sont comprises dans le budget.
+
+`truncated`, `reason`, `tasks_scanned` et `aggregates_complete` distinguent
+une fin de parcours d'un arrêt sur limite, erreur ou budget. `total` vaut null
+si le périmètre complet n'a pas été observé. Les agrégats couvrent les tâches
+lues dans cet appel, y compris les écritures non rendues d'une tâche partielle.
+Ne pas additionner ces agrégats de page : additionner les écritures exportées.
+Ordre par ID de tâche puis ID d'écriture, données supposées stables entre pages.
+Les anciens curseurs numériques et ceux du prototype 1.8.2 doivent être remplacés
+par un nouveau parcours : le curseur v2 de 1.8.3 conserve aussi le décalage cumulé.
+
+Les métadonnées d'export de 1.8.0 sont conservées : `limit`, `offset` (écritures
+rendues avant la page), `total_exact`, `total_lower_bound` et `scan_truncated`.
+`total_exact` suit `aggregates_complete` ; `total_lower_bound` compte les lignes
+des tâches lues dans cet appel. `scan_truncated` signale ces agrégats partiels,
+y compris à la fin du parcours, tandis que `truncated` indique uniquement une
+suite à lire. `scan_note` explique cette différence. Ces minorants ne se somment pas.

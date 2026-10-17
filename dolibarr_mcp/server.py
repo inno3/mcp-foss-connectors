@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.0"
+__version__ = "1.8.3"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -578,6 +578,12 @@ def _first_present(row: dict, *keys: str):
     return next((row[key] for key in keys if key in row), None)
 
 
+def _invoice_due_date(invoice: dict) -> str | None:
+    """Même échéance en liste, en détail et en projection, y compris si elle est nulle."""
+    value = _first_present(invoice, "date_echeance", "date_lim_reglement")
+    return _ts_to_date(value) if value is not None else None
+
+
 def _financial_fields(row: dict, *, proposal: bool = False) -> dict:
     """Projection financière et distinction entre un champ absent et null."""
     fields = {
@@ -599,7 +605,9 @@ def _financial_fields(row: dict, *, proposal: bool = False) -> dict:
         if not any(alias in row for alias in aliases):
             result["unavailable_fields"].append(field)
         if value is not None:
-            if field in ("date_due", "date_validity"):
+            if field == "date_due":
+                value = _invoice_due_date(row)
+            elif field == "date_validity":
                 value = _ts_to_date(value)
             elif field == "status":
                 value = str(value)
@@ -632,11 +640,126 @@ async def _with_invoice_payments(row: dict, supplier: bool, include_payments: bo
     row.setdefault("unavailable_fields", []).append("payments")
 
 
+PAYMENT_TERMS_NOTE = (
+    "Une échéance à date de facture + 1 jour peut être un défaut Dolibarr : "
+    "vérifier la condition négociée avant une relance. Dans ce cas, "
+    "days_late surévalue le retard de règlement."
+)
+
+
+def _due_date_is_default(date_invoice: str, date_due: str) -> bool | None:
+    """Une date illisible ne permet pas d'écarter une échéance par défaut."""
+    from datetime import date
+
+    try:
+        return (date.fromisoformat(date_due) - date.fromisoformat(date_invoice)).days == 1
+    except (TypeError, ValueError):
+        return None
+
+
+def _payment_term_values(row: dict, dictionnaire: dict) -> dict:
+    """Résout la condition portée par l'objet, sans hériter de celle d'un autre objet."""
+    identifiant = _first_present(row, "cond_reglement_id", "cond_reglement", "fk_cond_reglement")
+    code = _first_present(row, "cond_reglement_code") or None
+    libelle = _first_present(row, "cond_reglement_label", "cond_reglement_doc") or None
+    valeurs = {
+        "cond_reglement_id": _id_int(identifiant) or None,
+        "cond_reglement_code": code,
+        "cond_reglement_label": libelle,
+    }
+    entree = dictionnaire["by_id"].get(str(valeurs["cond_reglement_id"]))
+    if entree is None and code:
+        entree = dictionnaire["by_code"].get(str(code).upper())
+    if entree:
+        for champ in ("id", "code", "label"):
+            clef = "cond_reglement_" + champ
+            if valeurs[clef] is None:
+                valeurs[clef] = entree[champ] or None
+    # L'absence de condition sur un objet lu est connue. Une condition partielle
+    # reste en revanche incomplète si le dictionnaire ne permet pas de la résoudre.
+    valeurs["unavailable_fields"] = (
+        [clef for clef, valeur in valeurs.items() if valeur is None]
+        if identifiant not in (None, "", 0, "0") or code or libelle else []
+    )
+    return valeurs
+
+
+async def _payment_terms_fields(row: dict, thirdparty_cache: dict, include: bool) -> dict:
+    """Une lecture complémentaire refusée ne doit pas masquer la facture elle-même."""
+    champs = ("cond_reglement_id", "cond_reglement_code", "cond_reglement_label")
+    resultat = dict.fromkeys((*champs, *("thirdparty_" + clef for clef in champs),
+                              "date_due_is_default"))
+    resultat["unavailable_fields"] = []
+    if not include:
+        resultat["unavailable_fields"] = [c for c in resultat if c != "unavailable_fields"]
+        resultat["payment_terms_error"] = "Lecture non demandée (include_payment_terms=false)."
+        return resultat
+
+    dictionnaire = await _payment_terms()
+    resultat.update(_payment_term_values(row, dictionnaire))
+    if dictionnaire["error"]:
+        resultat["payment_terms_unavailable"] = dictionnaire["error"]
+    resultat["date_due_is_default"] = _due_date_is_default(
+        _ts_to_date(_first_present(row, "date", "datef")),
+        _invoice_due_date(row),
+    )
+    if resultat["date_due_is_default"] is None:
+        resultat["unavailable_fields"].append("date_due_is_default")
+    elif resultat["date_due_is_default"]:
+        resultat["payment_terms_note"] = PAYMENT_TERMS_NOTE
+
+    identifiant_tiers = _id_int(_first_present(row, "socid", "thirdparty_id", "fk_soc"))
+    if not identifiant_tiers:
+        resultat["thirdparty_payment_terms_error"] = "Identifiant de tiers absent ou illisible."
+    else:
+        if identifiant_tiers not in thirdparty_cache:
+            try:
+                tiers = await api_get(f"thirdparties/{identifiant_tiers}")
+                if not isinstance(tiers, dict) or "error" in tiers:
+                    raise ValueError("Réponse tiers illisible.")
+                thirdparty_cache[identifiant_tiers] = (
+                    _payment_term_values(tiers, dictionnaire), None,
+                )
+            except Exception as exc:
+                thirdparty_cache[identifiant_tiers] = (None, _format_error(exc))
+        valeurs, erreur = thirdparty_cache[identifiant_tiers]
+        if erreur:
+            resultat["thirdparty_payment_terms_error"] = erreur
+        else:
+            resultat.update({"thirdparty_" + clef: valeurs[clef] for clef in champs})
+            resultat["unavailable_fields"].extend(
+                "thirdparty_" + clef for clef in valeurs["unavailable_fields"]
+            )
+    if "thirdparty_payment_terms_error" in resultat:
+        resultat["unavailable_fields"].extend("thirdparty_" + clef for clef in champs)
+    return resultat
+
+
+async def _with_invoice_payment_terms(resultat: dict, source: dict, cache: dict,
+                                      include: bool) -> None:
+    """Préserve les indisponibilités financières lors de l'ajout des conditions."""
+    champs = await _payment_terms_fields(source, cache, include)
+    resultat.setdefault("unavailable_fields", []).extend(champs.pop("unavailable_fields"))
+    resultat.update(champs)
+
+
 async def _invoice_export(payload: dict, limit: int, cursor: str, scan,
-                          supplier: bool, include_payments: bool) -> str:
+                          supplier: bool, include_payments: bool,
+                          include_payment_terms: bool) -> str:
     payload = _export_payload(payload, "invoices", limit, cursor, scan=scan)
+    cache_tiers = {}
     for row in payload["invoices"]:
+        # Garder la source jusqu'ici évite de perdre ses alias avant la pagination.
+        source = row.pop("_payment_terms_source")
+        await _with_invoice_payment_terms(row, source, cache_tiers, include_payment_terms)
+        if row.get("payment_terms_unavailable"):
+            payload["payment_terms_unavailable"] = row["payment_terms_unavailable"]
         await _with_invoice_payments(row, supplier, include_payments)
+    payload["date_due_default_count"] = sum(
+        row["date_due_is_default"] is True for row in payload["invoices"]
+    )
+    if payload["date_due_default_count"]:
+        payload["payment_terms_note"] = PAYMENT_TERMS_NOTE
     if not supplier:
         credits = [r for r in payload["invoices"]
                    if str(r.get("type")) == "2" or (r.get("total_ttc") or 0) < 0]
@@ -1652,7 +1775,7 @@ async def _fetch_time_entries(task_id: int) -> list[dict]:
     """Écritures de temps d'une tâche, normalisées. Liste vide si aucune."""
     raw = await api_get(TIMESPENT_LIST_ENDPOINT.format(task_id=task_id))
     if not isinstance(raw, list):
-        return []
+        raise ValueError("Reponse de temps illisible : liste attendue.")
     return [_format_time_entry(e) for e in raw if isinstance(e, dict)]
 
 
@@ -1665,88 +1788,162 @@ async def dolibarr_list_time_entries(
     date_end: str = "",
     limit: int = DEFAULT_LIMIT,
     cursor: str = "",
+    task_limit: int = 20,
+    time_budget: float = 20.0,
 ) -> str:
-    """Liste les écritures de temps d'une tâche ou de tout un projet.
+    """Liste les temps avec pagination par tache et budget global explicite.
 
-    Export : total, returned, count, truncated et next_cursor. Passer cursor
-    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+    task_id ou project_id obligatoire. Filtres user_id et dates YYYY-MM-DD
+    incluses. limit borne les ecritures rendues (100 maximum), task_limit les
+    taches lues (20 par defaut, 100 maximum). time_budget inclut la decouverte
+    des taches, les requetes et leurs reprises : 20 s par defaut, 25 s maximum.
 
-    Paramètres :
-    - task_id : ID d'une tâche (task_id OU project_id est obligatoire)
-    - project_id : ID d'un projet, pour agréger toutes ses tâches
-    - user_id : ne garder que les écritures de cet utilisateur
-    - date_start / date_end : bornes incluses, format YYYY-MM-DD
-    - limit : nombre max d'écritures RETOURNÉES (les totaux, eux, portent sur
-      l'intégralité des écritures filtrées)
+    Reprendre next_cursor avec les memes filtres. Ordre par ID de tache puis
+    ID d'ecriture. Une tache terminee n'est pas relue ; la tache partiellement
+    rendue est relue a la page suivante. Le curseur suppose des temps stables
+    pendant le parcours. Les anciens curseurs numeriques ne sont plus valides.
 
-    Retourne, pour chaque écriture : `entry_id` (rowid de llx_element_time,
-    à passer à dolibarr_update_time_entry / dolibarr_delete_time_entry), date,
-    horodatage, durée en `hours` ET en `seconds`, utilisateur, note, et la
-    tâche de rattachement. Plus les totaux `total_hours` / `total_seconds`,
-    et une ventilation par utilisateur (`by_user`) et par tâche (`by_task`).
+    truncated annonce toute suite, y compris apres erreur ou expiration.
+    tasks_scanned compte les taches lues dans CET appel, reason explique l'arret.
+    total est inconnu tant que le projet entier n'a pas ete lu dans cet appel.
+    Les agregats portent sur les taches lues, y compris la partie non rendue
+    d'une tache tronquee : ne pas additionner les totaux de pages qui relisent
+    la meme tache. aggregates_complete dit si ces totaux couvrent le perimetre.
+    Pour un export, additionner les ecritures rendues, dedupliquees par entry_id.
+    total_exact suit aggregates_complete ; total_lower_bound compte les lignes
+    des tâches lues dans cet appel. scan_truncated signale ces agrégats partiels,
+    même en dernière page. offset compte les écritures rendues avant cette page.
 
-    `matched` compte les écritures filtrées, `returned` celles effectivement
-    rendues : quand `truncated` vaut true, la liste est tronquée mais les
-    totaux restent complets.
+    Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
+    Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
     """
+    import base64
+    import math
+
     try:
         if not task_id and not project_id:
             return "Fournir un task_id ou un project_id."
-
-        task_ids: list[int] = []
-        if task_id:
-            task_ids = [int(task_id)]
-        else:
-            tasks = await api_get(f"projects/{project_id}/tasks", {})
-            task_ids = [int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")]
-
-        entries: list[dict] = []
-        for tid in task_ids:
-            entries.extend(await _fetch_time_entries(tid))
-
-        if user_id:
-            entries = [e for e in entries if e["user_id"] == user_id]
-        if date_start:
-            entries = [e for e in entries if e["date"] and e["date"] >= date_start]
-        if date_end:
-            entries = [e for e in entries if e["date"] and e["date"] <= date_end]
-
-        entries = _unique_rows(entries)
-        entries.sort(key=lambda e: (e["date"] or "", e["entry_id"] or 0))
-
-        total_seconds = sum(e["seconds"] or 0 for e in entries)
-        by_user: dict[str, int] = {}
-        by_task: dict[str, int] = {}
-        for e in entries:
-            by_user[str(e["user_id"])] = by_user.get(str(e["user_id"]), 0) + (e["seconds"] or 0)
-            key = e["task_ref"] or str(e["task_id"])
-            by_task[key] = by_task.get(key, 0) + (e["seconds"] or 0)
-
+        invalid = _valid_dates(date_start=date_start, date_end=date_end)
+        if invalid:
+            return invalid
+        if not math.isfinite(time_budget) or time_budget <= 0:
+            raise ValueError("time_budget doit etre un nombre positif fini.")
+        budget = min(float(time_budget), 25.0)
+        deadline = time.monotonic() + budget
         capped = _clamp_limit(limit)
-        shown = entries
-        paging = _export_payload({"entries": entries}, "entries", capped, cursor)
+        task_limit = max(1, min(int(task_limit), 100))
+        scope = [task_id, project_id, user_id, date_start, date_end]
+        current, offset, emitted = 0, 0, 0
+        if cursor:
+            try:
+                if len(cursor) > 2048:
+                    raise ValueError()
+                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+                if decoded["v"] != 2 or decoded["scope"] != scope:
+                    raise ValueError()
+                current, offset = decoded["task"], decoded["offset"]
+                emitted = decoded["emitted"]
+                if any(type(v) is not int or v < 0 for v in (current, offset, emitted)):
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError, UnicodeError):
+                raise ValueError("Curseur invalide : reprendre next_cursor avec les memes filtres.") from None
 
-        return _dumps({
-            "task_id": task_id or None,
-            "project_id": project_id or None,
-            "tasks_scanned": len(task_ids),
-            "matched": len(entries),
-            "returned": len(shown),
-            "truncated": len(shown) < len(entries),
-            "total_hours": _seconds_to_hours(total_seconds),
-            "total_seconds": total_seconds,
-            "by_user": {
-                u: {"hours": _seconds_to_hours(s), "seconds": s}
-                for u, s in sorted(by_user.items(), key=lambda kv: -kv[1])
-            },
-            "by_task": {
-                t: {"hours": _seconds_to_hours(s), "seconds": s}
-                for t, s in sorted(by_task.items(), key=lambda kv: -kv[1])
-            },
-            "entries": shown,
-            **paging,
-        })
+        def next_token(tid: int, position: int) -> str:
+            return base64.urlsafe_b64encode(json.dumps({
+                "v": 2, "scope": scope, "task": tid, "offset": position,
+                "emitted": emitted + len(entries),
+            }, separators=(",", ":")).encode()).decode()
 
+        async def read(awaitable):
+            return await asyncio.wait_for(awaitable, max(0, deadline - time.monotonic()))
+
+        entries, scanned_entries = [], []
+        scanned = 0
+        task_ids = []
+        reason, error, next_cursor = None, None, None
+        try:
+            if task_id:
+                task_ids = [int(task_id)]
+            else:
+                tasks = await read(api_get(f"projects/{project_id}/tasks", {}))
+                if not isinstance(tasks, list):
+                    raise ValueError("Liste des taches illisible.")
+                task_ids = sorted({int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")})
+        except TimeoutError:
+            reason = "time_budget"
+            next_cursor = next_token(current, offset)
+        except Exception as exc:
+            reason, error = "task_list_error", _format_error(exc)
+            next_cursor = next_token(current, offset)
+
+        remaining_tasks = [tid for tid in task_ids if tid >= current]
+        if offset and current not in task_ids and reason is None:
+            raise ValueError("Curseur invalide : la tache partiellement lue a disparu.")
+        for index, tid in enumerate(remaining_tasks) if reason is None else []:
+            position = offset if tid == current else 0
+            if scanned >= task_limit or time.monotonic() >= deadline:
+                reason = "task_limit" if scanned >= task_limit else "time_budget"
+                next_cursor = next_token(tid, position)
+                break
+            try:
+                task_entries = await read(_fetch_time_entries(tid))
+            except TimeoutError:
+                reason, next_cursor = "time_budget", next_token(tid, position)
+                break
+            except Exception as exc:
+                reason, error, next_cursor = "task_error", _format_error(exc), next_token(tid, position)
+                break
+            scanned += 1
+            task_entries = [e for e in task_entries
+                            if (not user_id or e["user_id"] == user_id)
+                            and (not date_start or (e["date"] and e["date"] >= date_start))
+                            and (not date_end or (e["date"] and e["date"] <= date_end))]
+            task_entries = sorted(_unique_rows(task_entries, identity="entry_id"), key=lambda e: e["entry_id"] or 0)
+            scanned_entries.extend(task_entries)
+            shown = task_entries[position:position + capped - len(entries)]
+            entries.extend(shown)
+            if position + len(shown) < len(task_entries):
+                reason, next_cursor = "limit", next_token(tid, position + len(shown))
+                break
+            if len(entries) >= capped and index + 1 < len(remaining_tasks):
+                reason, next_cursor = "limit", next_token(remaining_tasks[index + 1], 0)
+                break
+
+        aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
+        if not task_ids and reason is None:
+            aggregates_complete = True
+        by_user, by_task = {}, {}
+        for entry in scanned_entries:
+            seconds = entry["seconds"] or 0
+            uid = str(entry["user_id"])
+            key = entry["task_ref"] or str(entry["task_id"])
+            by_user[uid] = by_user.get(uid, 0) + seconds
+            by_task[key] = by_task.get(key, 0) + seconds
+        total_seconds = sum(e["seconds"] or 0 for e in scanned_entries)
+        result = {
+            "task_id": task_id or None, "project_id": project_id or None,
+            "tasks_scanned": scanned, "tasks_total": None if not task_ids and reason is not None else len(task_ids),
+            "count": len(entries), "returned": len(entries), "matched": len(scanned_entries),
+            "total": len(scanned_entries) if aggregates_complete else None,
+            "total_exact": aggregates_complete, "total_lower_bound": len(scanned_entries),
+            "scan_truncated": not aggregates_complete, "limit": capped, "offset": emitted,
+            "truncated": next_cursor is not None, "next_cursor": next_cursor,
+            "reason": reason or "complete", "time_budget": budget,
+            "elapsed_seconds": round(time.monotonic() - (deadline - budget), 3),
+            "aggregates_scope": "scanned_tasks", "aggregates_complete": aggregates_complete,
+            "total_hours": _seconds_to_hours(total_seconds), "total_seconds": total_seconds,
+            "by_user": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_user.items()},
+            "by_task": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_task.items()},
+            "entries": entries,
+        }
+        if error:
+            result["scan_error"] = error
+        if not aggregates_complete:
+            result["scan_note"] = (
+                "Agrégats limités aux tâches lues dans cet appel. "
+                "Reconstituer le total depuis les écritures exportées, sans sommer les agrégats de pages."
+            )
+        return _dumps(result)
     except Exception as exc:
         return _format_error(exc)
 
@@ -2057,6 +2254,7 @@ async def dolibarr_list_invoices(
     search_ref: str='',
     cursor: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Liste les factures clients.
 
@@ -2065,6 +2263,19 @@ async def dolibarr_list_invoices(
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
@@ -2130,8 +2341,8 @@ async def dolibarr_list_invoices(
             if min_amount and total_ttc < min_amount:
                 continue
 
-            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
-            date_inv = _ts_to_date(inv.get("date"))
+            date_lim = _invoice_due_date(inv)
+            date_inv = _ts_to_date(_first_present(inv, "date", "datef"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
             if date_lim and date_lim < today and inv_status == "1":
@@ -2142,6 +2353,7 @@ async def dolibarr_list_invoices(
                     pass
 
             results.append({
+                "_payment_terms_source": inv,
                 "id": inv.get("id"),
                 "ref": inv.get("ref"),
                 "thirdparty": inv.get("thirdparty_name") or inv.get("socid"),
@@ -2163,7 +2375,7 @@ async def dolibarr_list_invoices(
             "date_end": date_end or None,
             "credit_notes_count": sum(1 for r in results if (r["total_ttc"] or 0) < 0),
             "invoices": results,
-        }, limit, cursor, invoices, False, include_payments)
+        }, limit, cursor, invoices, False, include_payments, include_payment_terms)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2179,6 +2391,7 @@ async def dolibarr_list_supplier_invoices(
     search_ref: str='',
     cursor: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Liste les factures fournisseur.
 
@@ -2187,6 +2400,19 @@ async def dolibarr_list_supplier_invoices(
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Paramètres :
     - status : 'unpaid', 'paid', 'draft', 'all'
@@ -2232,8 +2458,8 @@ async def dolibarr_list_supplier_invoices(
         today = datetime.now().strftime("%Y-%m-%d")
         results = []
         for inv in invoices:
-            date_lim = _ts_to_date(_first_present(inv, "date_echeance", "date_lim_reglement"))
-            date_inv = _ts_to_date(inv.get("date"))
+            date_lim = _invoice_due_date(inv)
+            date_inv = _ts_to_date(_first_present(inv, "date", "datef"))
             inv_status = str(inv.get("fk_statut") or inv.get("status") or inv.get("statut") or "")
             days_late = 0
             if date_lim and date_lim < today and inv_status == "1":
@@ -2244,6 +2470,7 @@ async def dolibarr_list_supplier_invoices(
                     pass
 
             results.append({
+                "_payment_terms_source": inv,
                 "id": inv.get("id"),
                 "ref": inv.get("ref"),
                 "ref_supplier": inv.get("ref_supplier"),
@@ -2263,7 +2490,7 @@ async def dolibarr_list_supplier_invoices(
             "date_start": date_start or None,
             "date_end": date_end or None,
             "invoices": results,
-        }, limit, cursor, invoices, True, include_payments)
+        }, limit, cursor, invoices, True, include_payments, include_payment_terms)
 
     except Exception as exc:
         return _format_error(exc)
@@ -2408,6 +2635,12 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
     Retourne toutes les informations : coordonnées, catégories, contacts,
     conditions de paiement, etc.
 
+    cond_reglement_id, cond_reglement_code et cond_reglement_label décrivent
+    la condition du tiers : null sur les trois signifie qu'aucune condition
+    n'est paramétrée sur le tiers, ce qui produit des échéances par défaut sur
+    ses factures. Une résolution impossible est signalée dans unavailable_fields
+    et un dictionnaire illisible dans payment_terms_unavailable.
+
     Note publique : `note_public` est rendue entière, HTML nettoyé, jusqu'à
     DETAIL_NOTE_MAX_CHARS (20 000) caractères. Au-delà, elle est coupée à ce
     plafond et la coupe est annoncée : `note_public_truncated` passe à true et
@@ -2442,6 +2675,10 @@ async def dolibarr_get_thirdparty(thirdparty_id: int) -> str:
             "note_public_length": note_length,
             "note_public_truncated": note_truncated,
         }
+        dictionnaire = await _payment_terms()
+        result.update(_payment_term_values(tp, dictionnaire))
+        if dictionnaire["error"]:
+            result["payment_terms_unavailable"] = dictionnaire["error"]
         return _dumps(result)
     except Exception as exc:
         return _format_error(exc)
@@ -4747,11 +4984,25 @@ async def dolibarr_get_invoice(
     invoice_id: int=0,
     ref: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Détail d'une facture client par ID numérique ou par référence.
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
     ref, tiers, montants HT/TTC/TVA, statut, échéance, paiements associés
@@ -4802,7 +5053,7 @@ async def dolibarr_get_invoice(
             "total_ht": inv.get("total_ht"),
             "total_tva": inv.get("total_tva"),
             "total_ttc": inv.get("total_ttc"),
-            "date_invoice": _ts_to_date(inv.get("date")),
+            "date_invoice": _ts_to_date(_first_present(inv, "date", "datef")),
             "date_due": _ts_to_date(inv.get("date_lim_reglement")),
             "fk_project": inv.get("fk_project"),
             "ref_customer": inv.get("ref_client"),
@@ -4814,6 +5065,7 @@ async def dolibarr_get_invoice(
             "lines": lines,
         }
         result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payment_terms(result, inv, {}, include_payment_terms)
         await _with_invoice_payments(result, False, include_payments)
         return _dumps(result)
 
@@ -4893,11 +5145,25 @@ async def dolibarr_get_supplier_invoice(
     invoice_id: int=0,
     ref: str='',
     include_payments: bool=True,
+    include_payment_terms: bool=True,
 ) -> str:
     """Détail d'une facture FOURNISSEUR par ID numérique ou par référence.
 
     include_payments : vrai par défaut, lit les paiements des factures rendues.
     Une lecture refusée est signalée, jamais remplacée par une liste vide.
+
+    include_payment_terms : vrai par défaut, rend cond_reglement_id, _code et
+    _label de la facture et thirdparty_cond_reglement_id, _code et _label du tiers.
+    Lit le dictionnaire en cache et une fois chaque tiers de la page rendue.
+    À false, aucun appel complémentaire et champs null avec la raison.
+    Une lecture impossible est signalée dans unavailable_fields avec son erreur.
+    Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
+    de règlement n'est paramétrée dans Dolibarr.
+
+    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
+    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
+    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
+    l'ancienneté de la facture, pas un retard de règlement.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
     ref (ref interne Dolibarr type SI2602-0084). Retourne ref interne, ref
@@ -4952,7 +5218,7 @@ async def dolibarr_get_supplier_invoice(
             "total_ht": inv.get("total_ht"),
             "total_tva": inv.get("total_tva"),
             "total_ttc": inv.get("total_ttc"),
-            "date_invoice": _ts_to_date(inv.get("date") or inv.get("datef")),
+            "date_invoice": _ts_to_date(_first_present(inv, "date", "datef")),
             "date_due": _ts_to_date(
                 inv.get("date_echeance") or inv.get("date_lim_reglement")
             ),
@@ -4965,6 +5231,7 @@ async def dolibarr_get_supplier_invoice(
             "lines": lines,
         }
         result.update(_financial_fields(inv, proposal=False))
+        await _with_invoice_payment_terms(result, inv, {}, include_payment_terms)
         await _with_invoice_payments(result, True, include_payments)
         return _dumps(result)
 
@@ -5712,6 +5979,7 @@ BANK_ACCOUNT_LINE_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}"
 BANK_LINE_LINKS_ENDPOINT = "bankaccounts/{account_id}/lines/{line_id}/links"
 BANK_BALANCE_ENDPOINT = "bankaccounts/{account_id}/balance"
 PAYMENT_TYPES_ENDPOINT = "setup/dictionary/payment_types"
+PAYMENT_TERMS_ENDPOINT = "setup/dictionary/payment_terms"
 
 #: llx_bank_account.courant — Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
 BANK_ACCOUNT_TYPES = {"0": "épargne", "1": "compte courant", "2": "caisse"}
@@ -5748,6 +6016,42 @@ BANK_LINK_SOURCE_LABELS = {
 #: le dictionnaire c_paiement ne bouge pas en cours de session. Les tests le
 #: remettent à None pour repartir d'un cache vide.
 _PAYMENT_TYPES_CACHE: "dict[str, dict] | None" = None
+
+# Un refus de ce dictionnaire facultatif doit aussi être mémorisé : le répéter
+# pour chaque facture ralentirait les lectures sans rendre l'échéance plus fiable.
+_PAYMENT_TERMS_CACHE: dict | None = None
+
+
+async def _payment_terms() -> dict:
+    """Mémorise les conditions, même si la route manque ou refuse l'accès."""
+    global _PAYMENT_TERMS_CACHE
+    if _PAYMENT_TERMS_CACHE is not None:
+        return _PAYMENT_TERMS_CACHE
+
+    par_code: dict[str, dict] = {}
+    par_id: dict[str, dict] = {}
+    erreur = None
+    try:
+        # Une facture ancienne peut encore porter une condition devenue inactive.
+        lignes = await api_get(PAYMENT_TERMS_ENDPOINT, {"limit": 100})
+        if not isinstance(lignes, list) or any(not isinstance(ligne, dict) for ligne in lignes):
+            raise ValueError("Dictionnaire des conditions de règlement illisible.")
+        for ligne in lignes:
+            entree = {
+                "id": _id_int(_first_present(ligne, "id", "rowid")),
+                "code": ligne.get("code") or None,
+                "label": (ligne.get("label") or ligne.get("libelle")
+                          or ligne.get("libelle_facture") or None),
+            }
+            if entree["code"]:
+                par_code[str(entree["code"]).upper()] = entree
+            if entree["id"] is not None:
+                par_id[str(entree["id"])] = entree
+    except Exception as exc:
+        par_code, par_id = {}, {}
+        erreur = _format_error(exc)
+    _PAYMENT_TERMS_CACHE = {"by_code": par_code, "by_id": par_id, "error": erreur}
+    return _PAYMENT_TERMS_CACHE
 
 
 async def _payment_types() -> dict:
@@ -8402,7 +8706,7 @@ async def dolibarr_cash_forecast(horizon_days: int = 90, include_supplier: bool 
         def _digest(rows: list, supplier: bool) -> tuple:
             items, buckets = [], {}
             for inv in rows:
-                due = _ts_to_date(inv.get("date_lim_reglement"))
+                due = _invoice_due_date(inv)
                 total = float(inv.get("total_ttc") or 0)
                 remaining = inv.get("remaintopay")
                 amount = float(remaining) if remaining not in (None, "") else total
