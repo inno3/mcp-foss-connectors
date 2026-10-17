@@ -1,5 +1,13 @@
 # Historique Dolibarr
 
+## 1.8.3 - 2026-10-17
+
+- Conserve les métadonnées d'export présentes dans main avant la reprise des
+  temps : total exact ou minorant, troncature du périmètre, limite et décalage.
+- Le curseur v2 transporte le nombre cumulé d'écritures rendues ; `offset`
+  reste exploitable sans relire les tâches terminées. Repartir sans curseur
+  après le prototype 1.8.2. Les agrégats partiels restent explicitement nommés.
+
 ## 1.8.2 - 2026-10-17
 
 - Reprise de 3818b79 : budget global de lecture des temps (20 s par défaut,

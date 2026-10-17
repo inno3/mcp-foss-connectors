@@ -49,6 +49,30 @@ async def test_pages_par_tache_sans_rebalayer_les_precedentes(monkeypatch):
     assert not data["truncated"]
 
 
+async def test_metadonnees_export_conservees_avec_decalage_cumule(monkeypatch):
+    api(monkeypatch)
+    cursor, exported = "", 0
+    while True:
+        data = json.loads(await server.dolibarr_list_time_entries(
+            project_id=42, limit=4, task_limit=2, cursor=cursor))
+        assert data["offset"] == exported
+        assert data["limit"] == 4
+        assert data["total_exact"] is data["aggregates_complete"]
+        assert data["total_lower_bound"] == data["matched"]
+        assert data["scan_truncated"] is (not data["aggregates_complete"])
+        if data["scan_truncated"]:
+            assert data["scan_note"]
+        exported += data["returned"]
+        cursor = data["next_cursor"]
+        if cursor is None:
+            break
+    assert exported == 21
+
+    full = json.loads(await server.dolibarr_list_time_entries(project_id=42, limit=100))
+    assert full["total_exact"] and not full["scan_truncated"]
+    assert full["total"] == full["total_lower_bound"] == full["returned"] == 21
+
+
 async def test_budget_coupe_requete_en_cours_et_garde_les_resultats(monkeypatch):
     api(monkeypatch, n=100, delay=0.02)
     start = time.monotonic()

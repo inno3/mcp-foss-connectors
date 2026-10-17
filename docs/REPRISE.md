@@ -10,6 +10,15 @@ branche ; elle part de `e55c558` et doit préserver MeetingNotes 0.8.1.
 
 Décisions et état courant :
 
+- Dolibarr 1.8.3 conserve les métadonnées d’export de main dans la lecture des
+  temps. Curseur v2 avec décalage cumulé ; reprise des anciens parcours sans
+  curseur. Test reproduit avant correction : **1 échec** (offset absent).
+- Premier contrôle des métadonnées : **58 réussis, 1 échec** lié au test qui
+  attendait 21 lignes avec la limite par défaut de 20 ; la lecture complète
+  du test demande désormais 100 lignes.
+- Suite complète finale : **1 316 réussis, 1 ignoré**, en 5,30 s.
+  Extension 0.8.4 associée : **300 réussis, 2 échecs d’environnement** en 2,41 s.
+
 - Dolibarr 1.8.1 réunit les conditions de règlement de `08420a9` et la lecture
   commune des échéances de `05dfc5f` / `d689ac5`. L'indicateur facture + un jour
   reste une heuristique à vérifier avant une relance.

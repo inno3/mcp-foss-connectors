@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
-**Version courante : 1.8.2.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.3.** Voir le [CHANGELOG](CHANGELOG.md).
 
 ## Environment variables
 
@@ -630,6 +630,8 @@ python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions \
 Toutes les listes ci-dessous acceptent `limit` (20 par défaut, de 1 à 100)
 et `cursor` (vide au premier appel). Réutiliser `next_cursor` avec les mêmes
 filtres et le même tri. Le curseur est un décalage dans la liste dédoublonnée.
+Exception depuis 1.8.2 : les temps utilisent un curseur opaque par tâche,
+avec budget global et agrégats sur les seules tâches lues (voir ci-dessous).
 Chaque appel relit les données. Il faut donc exporter une période stable pour
 obtenir une union reproductible, sans création ou suppression concurrente.
 
@@ -799,4 +801,12 @@ si le périmètre complet n'a pas été observé. Les agrégats couvrent les tâ
 lues dans cet appel, y compris les écritures non rendues d'une tâche partielle.
 Ne pas additionner ces agrégats de page : additionner les écritures exportées.
 Ordre par ID de tâche puis ID d'écriture, données supposées stables entre pages.
-Les anciens curseurs numériques doivent être remplacés par un nouveau parcours.
+Les anciens curseurs numériques et ceux du prototype 1.8.2 doivent être remplacés
+par un nouveau parcours : le curseur v2 de 1.8.3 conserve aussi le décalage cumulé.
+
+Les métadonnées d'export de 1.8.0 sont conservées : `limit`, `offset` (écritures
+rendues avant la page), `total_exact`, `total_lower_bound` et `scan_truncated`.
+`total_exact` suit `aggregates_complete` ; `total_lower_bound` compte les lignes
+des tâches lues dans cet appel. `scan_truncated` signale ces agrégats partiels,
+y compris à la fin du parcours, tandis que `truncated` indique uniquement une
+suite à lire. `scan_note` explique cette différence. Ces minorants ne se somment pas.

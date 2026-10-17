@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1810,6 +1810,9 @@ async def dolibarr_list_time_entries(
     d'une tache tronquee : ne pas additionner les totaux de pages qui relisent
     la meme tache. aggregates_complete dit si ces totaux couvrent le perimetre.
     Pour un export, additionner les ecritures rendues, dedupliquees par entry_id.
+    total_exact suit aggregates_complete ; total_lower_bound compte les lignes
+    des tâches lues dans cet appel. scan_truncated signale ces agrégats partiels,
+    même en dernière page. offset compte les écritures rendues avant cette page.
 
     Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
     Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
@@ -1830,23 +1833,25 @@ async def dolibarr_list_time_entries(
         capped = _clamp_limit(limit)
         task_limit = max(1, min(int(task_limit), 100))
         scope = [task_id, project_id, user_id, date_start, date_end]
-        current, offset = 0, 0
+        current, offset, emitted = 0, 0, 0
         if cursor:
             try:
                 if len(cursor) > 2048:
                     raise ValueError()
                 decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
-                if decoded["v"] != 1 or decoded["scope"] != scope:
+                if decoded["v"] != 2 or decoded["scope"] != scope:
                     raise ValueError()
                 current, offset = decoded["task"], decoded["offset"]
-                if any(type(v) is not int or v < 0 for v in (current, offset)):
+                emitted = decoded["emitted"]
+                if any(type(v) is not int or v < 0 for v in (current, offset, emitted)):
                     raise ValueError()
             except (ValueError, KeyError, TypeError, UnicodeError):
                 raise ValueError("Curseur invalide : reprendre next_cursor avec les memes filtres.") from None
 
         def next_token(tid: int, position: int) -> str:
             return base64.urlsafe_b64encode(json.dumps({
-                "v": 1, "scope": scope, "task": tid, "offset": position,
+                "v": 2, "scope": scope, "task": tid, "offset": position,
+                "emitted": emitted + len(entries),
             }, separators=(",", ":")).encode()).decode()
 
         async def read(awaitable):
@@ -1920,6 +1925,8 @@ async def dolibarr_list_time_entries(
             "tasks_scanned": scanned, "tasks_total": None if not task_ids and reason is not None else len(task_ids),
             "count": len(entries), "returned": len(entries), "matched": len(scanned_entries),
             "total": len(scanned_entries) if aggregates_complete else None,
+            "total_exact": aggregates_complete, "total_lower_bound": len(scanned_entries),
+            "scan_truncated": not aggregates_complete, "limit": capped, "offset": emitted,
             "truncated": next_cursor is not None, "next_cursor": next_cursor,
             "reason": reason or "complete", "time_budget": budget,
             "elapsed_seconds": round(time.monotonic() - (deadline - budget), 3),
@@ -1931,6 +1938,11 @@ async def dolibarr_list_time_entries(
         }
         if error:
             result["scan_error"] = error
+        if not aggregates_complete:
+            result["scan_note"] = (
+                "Agrégats limités aux tâches lues dans cet appel. "
+                "Reconstituer le total depuis les écritures exportées, sans sommer les agrégats de pages."
+            )
         return _dumps(result)
     except Exception as exc:
         return _format_error(exc)
