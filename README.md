@@ -27,7 +27,7 @@ Le constructeur refuse les paquets extérieurs, y compris via un lien symbolique
 |---|---|--:|---|---|
 | **Dolibarr ERP** | `dolibarr-mcp` | 78¹ | Dolibarr 16+ REST API | `DOLAPIKEY` API key |
 | **Kanboard** | `kanboard-mcp` | 53 | Kanboard JSON-RPC API | personal API token |
-| **WordPress** | `wordpress-mcp` | 26 | WP REST API (+ ACF) | Application Password |
+| **WordPress** | `wordpress-mcp` | 34 | WP REST API (+ ACF) | Application Password |
 | **n8n** | `n8n-mcp` | 22 | n8n public REST API | `X-N8N-API-KEY` |
 | **Matrix** | `matrix-mcp` | 22 | Matrix client-server API | access token |
 | **Nextcloud** | `nextcloud-mcp` | 14 | WebDAV + OCS API | app password |

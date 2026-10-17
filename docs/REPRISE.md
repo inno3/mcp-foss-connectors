@@ -1,3 +1,53 @@
+# Reprise courante : lot MC, outillage, 17/10/2026
+
+Cette section fait foi pour la reprise. Les sections suivantes sont historiques,
+notamment leurs commandes sur d'anciens worktrees et leurs demandes de merge.
+`AGENTS.md` et `CLAUDE.md` renvoient à cette même source.
+
+## État vérifié
+
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/MC-mcp-foss-connectors`,
+  branche `codex/2026-10-17-outillage`, base `11d691f`, initialement propre.
+- `main` local : `11d691f`. K/K2, L et S sont intégrés. MB l'est aussi :
+  `03b4e10`, merge `f72e12d`, numérotation n8n `11d691f` en **1.3.1**.
+  L'ancien blocage de permission décrit plus bas est donc périmé.
+- MC `2ffac44` verrouille le constructeur sur les paquets de ce dépôt, liens
+  symboliques extérieurs compris, et documente la
+  [provenance canonique](PROVENANCE_CONNECTEURS.md). Ce document fait foi pour
+  les huit connecteurs publics, leurs copies privées et l'installation sur disque.
+- Versions conservées : paquet **0.2.0**, Dolibarr **1.8.4**, Kanboard **0.17.2**,
+  n8n **1.3.1**. Aucun numéro changé par MC. La copie Dolibarr installée est
+  identique au source courant ; HedgeDoc installé vient encore de M et WordPress
+  installé est antérieur au contrat de transport public. Aucun processus interrogé.
+- Le worktree `mcp-wt-builddoc/mcp-foss-connectors`, branche
+  `fix/dolibarr-list-documents-meetingnotes`, reste enregistré à `4445d44`.
+  L'intégration builddoc et sa collision de numéro avec S relèvent de B12/B26,
+  pas d'une nouvelle numérotation dans MC. Les anciens K/L/S/MB ne sont plus enregistrés.
+
+## Preuves et limites
+
+Suite initiale : **1 532 réussis, 1 ignoré**. Finale : **1 535 réussis,
+1 ignoré**, **0 tentative réseau**. L'ignoré est l'intégration Dolibarr réelle
+préexistante. Ruff sur les deux fichiers Python touchés : **0 diagnostic**.
+Le constructeur n'a été exécuté que sur des fixtures avec pip simulé ; aucun
+bundle de livraison ni dépendance n'a été installé.
+
+[Rapport MC](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_execution-2026-10-17/MC.rapport.md).
+Les worktrees associés sont `../MC-mcp-inno3` (repack, manifestes, distribution)
+et `../MC-inno3-mcp-extensions` (reprise documentaire), même branche MC.
+
+## Suite ordonnée
+
+1. Orchestrateur : intégrer MC et consolider les numéros au merge.
+2. Traiter B12/B26 avec le worktree builddoc conservé ; ne pas reprendre les
+   anciennes commandes K/L/S comme des consignes de checkout actuelles.
+3. Livraison HedgeDoc/WordPress, maintien WordPress Commons, recette et publication :
+   **à arbitrer par Benjamin**. Aucune installation applicative ni réseau par MC.
+
+---
+
+# Historique daté, non prescriptif
+
 # Reprise du dépôt mcp-foss-connectors
 
 ## 17/10/2026 : préparation de l'intégration MB, n8n 1.3.1
@@ -20,7 +70,7 @@ Le merge et la numérotation sur `main` ont été bloqués pendant le lot IM par
 la permission en lecture seule du répertoire `.git` ; ces résultats ne sont
 pas une validation du `main` intégré. Réexécuter la suite après application
 et consigner le commit final. Détails dans
-[IM.rapport.md](../../../_codex_wt/_execution-2026-10-17/IM.rapport.md).
+[IM.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_execution-2026-10-17/IM.rapport.md).
 Recette réelle et diffusion : **à arbitrer par Benjamin**.
 
 ## 17/10/2026 : lot S, conditions de règlement du tiers en 1.8.4
@@ -39,7 +89,7 @@ avant toute requête et relecture après écriture. Décision appliquée en vers
   Sa reprise décrit la preuve par commande. Commit fonctionnel : `acb8cc8`.
 - Les versions installées 1.8.3 et 0.8.5 proviennent de la mission ; aucune
   installation inspectée ni modifiée. Travail seul, hors ligne, sans push ni tag.
-- Rapport commun : [S.rapport.md](../../_rapports-2026-10-17/S.rapport.md).
+- Rapport commun : [S.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/S.rapport.md).
 
 Cette section décrit les worktrees du lot S. Les sections plus anciennes sont
 historiques ; leurs chemins et assertions de poste n'ont pas été revalidés.
@@ -481,7 +531,7 @@ Sources consultées par Git uniquement : `fix/dolibarr-carnets-echeances`
 Leur rôle est celui de sources historiques à archiver après intégration ; leurs
 worktrees n'ont pas été modifiés. Aucun fichier de `mcp-wt-builddoc` n'a été lu.
 
-Le rapport transversal est [L.rapport.md](../../_rapports-2026-10-17/L.rapport.md).
+Le rapport transversal est [L.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/L.rapport.md).
 Il contient le classement de chaque commit source, les commandes de recette,
 les branches à archiver et la construction depuis `git archive`, non exécutée.
 
