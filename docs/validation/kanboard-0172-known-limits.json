@@ -1,0 +1,17 @@
+{
+  "installed": {
+    "diagnostic_verified": true,
+    "diagnostic_user_id": 0,
+    "diagnostic_note_present": true,
+    "sent_creator_id": 0,
+    "sent_comment_user_id": 0
+  },
+  "canonical": {
+    "diagnostic_verified": true,
+    "diagnostic_user_id": 0,
+    "diagnostic_note_present": true,
+    "sent_creator_id": 0,
+    "sent_comment_user_id": 0
+  },
+  "network_attempts": 0
+}

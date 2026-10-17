@@ -12,9 +12,37 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_URL` | yes | URL of the JSON-RPC endpoint, e.g. `https://kanboard.example.com/jsonrpc.php`. |
 | `KANBOARD_USER` | yes | Login of the primary (human) account. Used by default for reads. |
 | `KANBOARD_TOKEN` | yes | Personal API token of the primary account (Kanboard → Profile → API). |
-| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Empty → falls back to the primary account. |
-| `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. |
+| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Required for agent writes; missing credentials only allow a fallback for reads. |
+| `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
+
+## Version 0.17.2: board status, dates and readable text
+
+The [changelog](CHANGELOG.md) also tracks the identity corrections in 0.17.2.
+
+`kanboard_get_board` shows active cards by default. Pass `status=0` for closed
+cards or `status=-1` for the former scope, including both. Filtering precedes
+the per-column limit; `task_count`, `total` and the cards shown share that scope.
+Cards with an unknown status stay visible with `is_active: null` and the column
+reports `status_filter_incomplete: true`.
+
+Boards and task summaries expose `date_created`, `date_modified` and an integer
+`is_active` (0 or 1, or null when unknown). Summaries are shared by task lists,
+search, the dashboard and overdue tasks. `kanboard_list_tasks` also accepts
+`modified_before`, a strict upper bound applied before pagination. Use
+`YYYY-MM-DD`, `YYYY-MM-DD HH:MM` or `YYYY-MM-DDTHH:MM` in the MCP server's local
+timezone. Undatable tasks are excluded from this filter and counted in
+`modified_before_unknown`.
+
+Kanboard text on read paths is HTML-decoded once, before any text truncation.
+The same rule applies to cached display names after a write. User-supplied
+write values and stored labels reused in updates retain their original form.
+Ambiguous label matches retain their raw spellings so they can be distinguished.
+
+All 53 tools and their existing parameters remain available. The only signature
+extensions are the two optional trailing parameters described above; 51 tool
+signatures are identical to the installed 0.17.1. The board's default scope and
+the decoded text are intentional changes in returned data.
 
 ## Tools (53)
 
@@ -155,8 +183,31 @@ closest one, saying when the gap is only accents, case or typographic variants.
 
 Write tools accept an `as_user` argument (`primary` | `agent`). This lets a human
 and an AI agent share the same MCP server while keeping a correct authorship
-trail on comments and task changes. If the agent account is not configured, all
-calls transparently fall back to the primary account.
+trail on comments and task changes. Agent writes require both agent credentials
+and a matching `getMe` identity. They never fall back to primary. The logins must
+differ; when both identities can be established, their user IDs must differ too.
+An unavailable primary `getMe` does not block a verified agent, and primary
+writes remain possible when their own `getMe` is unavailable.
+In that case, `kanboard_who_am_i` reports `identity_verified: false`, even if
+the user directory resolves an ID. A different login returned by `getMe`
+refuses the write, including for primary and during its probe before an agent
+write.
+When primary cannot be verified, task and comment creation omit the author
+parameter so Kanboard can assign it. The connector reads the recorded author
+back, but keeps `author_verified: false` without a proven identity to compare.
+
+The identity cache is tied to the endpoint, login and token, in memory only.
+Concurrent first writes share the same probe. Reads keep the 0.17.1 fallback to
+primary if agent credentials are missing; they do not require a `getMe` probe.
+
+Creation responses combine the historical fields (`creator_id`,
+`author_user_id_recorded`, `author_read_error`, `author_mismatch`) with
+`author_user_id`, `author_verified` and `author_warning`. Authors come from a
+read of the created object. An object without an author field reports
+`author_verification_method: not_exposed`. Display names use `getMe.name`.
+
+The canonical 0.17.1 source was reconciled with the installed extension on
+17 October 2026. See [the handover](../docs/REPRISE.md) for provenance and limits.
 
 ### Editing and deleting comments: authorship applies
 

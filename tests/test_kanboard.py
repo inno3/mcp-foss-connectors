@@ -5,6 +5,7 @@ Tous les appels JSON-RPC sont mockés : la suite tourne sans réseau ni token r�
 
 import json
 import os
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -28,6 +29,7 @@ from kanboard_mcp.server import (  # noqa: E402
     _label_key,
     _resolve_account,
     _ts_to_date,
+    _ts_to_datetime,
     kanboard_assign_task,
     kanboard_check_project_access,
     kanboard_create_task,
@@ -2104,3 +2106,672 @@ class TestAssignTaskResolvesLabelsThatWentThroughHtml:
             data = json.loads(await kanboard_assign_task(task_id=100, user_name="  BJEAN "))
         assert data["success"] is True
         assert data["owner_id"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Non-regression : releve des colonnes de suivi du 29/09/2026 (projet 262)
+# ---------------------------------------------------------------------------
+
+
+def _board_row(
+    task_id: int,
+    *,
+    is_active: str | int | None = "1",
+    title: str | None = None,
+    date_creation: str = "1609459200",
+    date_modification: str = "1612137600",
+) -> dict:
+    """Ligne de carte telle que la rend getBoard (requete etendue Kanboard).
+
+    `getExtendedQuery` selectionne explicitement is_active, date_creation,
+    date_modification et date_completed : les cartes du board les portent donc,
+    et BoardFormatter n'applique aucun filtre de statut avant de les rendre.
+    """
+    row = {
+        "id": task_id,
+        "title": title if title is not None else f"Carte {task_id}",
+        "assignee_name": "Alice",
+        "date_due": "1609459200",
+        "priority": 2,
+        "category_name": "Support",
+        "date_creation": date_creation,
+        "date_modification": date_modification,
+        "date_completed": "0",
+    }
+    if is_active is not None:
+        row["is_active"] = is_active
+    return row
+
+
+def _mixed_board(rows: list[dict]) -> list[dict]:
+    """Board a une swimlane et une colonne, garni des lignes fournies."""
+    return [{
+        "name": "Default",
+        "columns": [{"id": 5, "title": "Action Benjamin", "tasks": rows}],
+    }]
+
+
+@pytest.mark.asyncio
+class TestBoardDoesNotCountClosedCards:
+    """getBoard rendait les cartes fermees sans aucun marqueur.
+
+    Releve du 29/09/2026 sur le projet 262 : les six colonnes « Action
+    Benjamin » totalisaient 107 cartes pour 62 actives, et « Suspens » 13 pour
+    5 actives. Verifie en direct le meme jour : sur 63 cartes fermees du projet,
+    61 ressortaient de get_board, et la somme des task_count valait 523, soit
+    exactement 460 actives + 63 fermees. Aucun champ rendu ne les distinguait.
+    """
+
+    @staticmethod
+    def _rows() -> list[dict]:
+        return [
+            _board_row(1), _board_row(2), _board_row(3),
+            _board_row(4, is_active="0"), _board_row(5, is_active="0"),
+        ]
+
+    async def test_closed_cards_are_out_by_default(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        col = data[0]["columns"][0]
+        assert [t["id"] for t in col["tasks"]] == [1, 2, 3]
+
+    async def test_task_count_matches_the_rendered_perimeter(self) -> None:
+        """Le compte portait sur tout, la liste sur les actives : facteur deux."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262, status=1))
+        col = data[0]["columns"][0]
+        assert col["task_count"] == 3
+        assert col["task_count"] == len(col["tasks"])
+        assert "truncated" not in col
+
+    async def test_status_zero_renders_only_closed_cards(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262, status=0))
+        col = data[0]["columns"][0]
+        assert [t["id"] for t in col["tasks"]] == [4, 5]
+        assert col["task_count"] == 2
+
+    async def test_status_minus_one_restores_the_former_perimeter(self) -> None:
+        """L'ancien comportement reste atteignable, il cesse d'etre le defaut."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262, status=-1))
+        col = data[0]["columns"][0]
+        assert [t["id"] for t in col["tasks"]] == [1, 2, 3, 4, 5]
+        assert col["task_count"] == 5
+
+    async def test_every_card_says_whether_it_is_active(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262, status=-1))
+        by_id = {t["id"]: t["is_active"] for t in data[0]["columns"][0]["tasks"]}
+        assert by_id == {1: 1, 2: 1, 3: 1, 4: 0, 5: 0}
+
+    async def test_truncation_counts_only_the_filtered_perimeter(self) -> None:
+        """Une colonne de 12 actives noyees dans 20 fermees reste une colonne de 12."""
+        rows = [_board_row(i) for i in range(1, 13)]
+        rows += [_board_row(100 + i, is_active="0") for i in range(20)]
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(rows)):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        col = data[0]["columns"][0]
+        assert col["task_count"] == 12
+        assert col["truncated"] is True
+        assert col["shown"] == 10
+        assert col["total"] == 12
+
+    async def test_a_card_without_is_active_is_never_dropped(self) -> None:
+        """Filtrer sur un champ absent rejouerait la perte silencieuse a l'envers."""
+        rows = [_board_row(1), _board_row(2, is_active=None)]
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(rows)):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        col = data[0]["columns"][0]
+        assert [t["id"] for t in col["tasks"]] == [1, 2]
+        assert col["tasks"][1]["is_active"] is None
+        assert col["status_filter_incomplete"] is True
+
+    async def test_no_incomplete_marker_when_every_card_answered(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        assert "status_filter_incomplete" not in data[0]["columns"][0]
+
+    async def test_an_unknown_status_is_refused(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(self._rows())):
+            out = await kanboard_get_board(project_id=262, status=2)
+        assert "status" in out
+        assert out.startswith("Erreur")
+
+
+@pytest.mark.asyncio
+class TestBoardAndListRenderDates:
+    """Aucun outil de liste ne rendait la date de derniere modification.
+
+    Le critere de dormance (« quelles cartes n'ont recu aucun signal depuis plus
+    de quatorze jours ») etait hors de portee sans un appel get_task par carte,
+    et recent_activity plafonne a 50 evenements.
+    """
+
+    async def test_board_cards_carry_both_dates(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board([_board_row(1)])):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        task = data[0]["columns"][0]["tasks"][0]
+        assert task["date_created"] == _ts_to_datetime("1609459200")
+        assert task["date_modified"] == _ts_to_datetime("1612137600")
+
+    async def test_listed_tasks_carry_both_dates(self) -> None:
+        rows = _raw_tasks(1)
+        rows[0]["date_creation"] = "1609459200"
+        rows[0]["date_modification"] = "1612137600"
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=rows):
+            data = json.loads(await kanboard_list_tasks(project_id=29, status=0))
+        task = data["tasks"][0]
+        assert task["date_created"] == _ts_to_datetime("1609459200")
+        assert task["date_modified"] == _ts_to_datetime("1612137600")
+
+    async def test_is_active_is_an_integer_not_a_truthy_string(self) -> None:
+        """« 0 » en chaine est vrai en Python : une carte fermee se lisait ouverte."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_raw_tasks(1)):
+            data = json.loads(await kanboard_list_tasks(project_id=29, status=0))
+        assert data["tasks"][0]["is_active"] == 0
+        assert bool(data["tasks"][0]["is_active"]) is False
+
+
+@pytest.mark.asyncio
+class TestListTasksFiltersOnLastSignal:
+    """modified_before : repondre a la dormance sans un appel par carte."""
+
+    @staticmethod
+    def _stamp(text: str) -> str:
+        """Horodatage local, pour que les bornes du test ne dependent pas du fuseau."""
+        return str(int(datetime.strptime(text, "%Y-%m-%d").timestamp()))
+
+    @classmethod
+    def _rows(cls) -> list[dict]:
+        rows = _raw_tasks(4)
+        stamps = [cls._stamp("2021-01-01"), cls._stamp("2021-02-01"),
+                  cls._stamp("2021-03-01"), "0"]
+        for row, stamp in zip(rows, stamps):
+            row["date_modification"] = stamp
+        return rows
+
+    async def test_filter_applies_before_pagination(self) -> None:
+        """total_available doit compter le perimetre filtre, pas le projet entier."""
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            data = json.loads(await kanboard_list_tasks(
+                project_id=29, status=1, modified_before="2021-02-15"))
+        assert data["total_available"] == 2
+        assert [t["id"] for t in data["tasks"]] == ["1", "2"]
+        assert data["has_more"] is False
+
+    async def test_boundary_is_strict(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            data = json.loads(await kanboard_list_tasks(
+                project_id=29, status=1, modified_before="2021-02-01"))
+        assert [t["id"] for t in data["tasks"]] == ["1"]
+
+    async def test_cards_without_a_usable_date_are_set_aside_and_counted(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            data = json.loads(await kanboard_list_tasks(
+                project_id=29, status=1, modified_before="2030-01-01"))
+        assert data["total_available"] == 3
+        assert data["modified_before_unknown"] == 1
+
+    async def test_the_applied_bound_is_echoed(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            data = json.loads(await kanboard_list_tasks(
+                project_id=29, status=1, modified_before="2021-02-15"))
+        assert data["modified_before"] == "2021-02-15"
+
+    async def test_no_filter_key_when_no_filter_asked(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            data = json.loads(await kanboard_list_tasks(project_id=29, status=1))
+        assert "modified_before" not in data
+        assert "modified_before_unknown" not in data
+        assert data["total_available"] == 4
+
+    async def test_an_unparsable_date_is_refused_by_name(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=self._rows()):
+            out = await kanboard_list_tasks(project_id=29, modified_before="15/02/2021")
+        assert out.startswith("Erreur")
+        assert "AAAA-MM-JJ" in out
+
+
+@pytest.mark.asyncio
+class TestRenderedTextIsDecoded:
+    """Kanboard stocke l'entite, le connecteur la rendait telle quelle.
+
+    Verifie le 29/09/2026 : la carte 7970 du projet 262 a pour titre stocke
+    « [Alice &amp; Bob] Proposer une intervention au ticket », et sa description
+    porte la meme entite. Un titre recopie dans un livrable en sortait avec.
+    """
+
+    async def test_board_titles_are_decoded(self) -> None:
+        rows = [_board_row(7970, title="[Alice &amp; Bob] Proposer une intervention")]
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(rows)):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        assert data[0]["columns"][0]["tasks"][0]["title"] == (
+            "[Alice & Bob] Proposer une intervention"
+        )
+
+    async def test_listed_titles_are_decoded(self) -> None:
+        rows = _raw_tasks(1)
+        rows[0]["title"] = "[Alice &amp; Bob] Proposer une intervention"
+        rows[0]["category_name"] = "Support &amp; conseil"
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=rows):
+            data = json.loads(await kanboard_list_tasks(project_id=29, status=0))
+        assert data["tasks"][0]["title"] == "[Alice & Bob] Proposer une intervention"
+        assert data["tasks"][0]["category_name"] == "Support & conseil"
+
+    async def test_task_detail_decodes_title_description_and_comments(self) -> None:
+        task = {
+            "id": 7970,
+            "title": "[Alice &amp; Bob] Proposer une intervention",
+            "description": "Adresser a Alice &amp; Bob une proposition.",
+            "project_id": 262,
+            "project_name": "Pilotage",
+            "column_name": "Action Benjamin",
+            "swimlane_name": "Missions &amp; Hermine",
+            "assignee_name": "Alice",
+            "creator_name": "agent",
+        }
+
+        async def _dispatch(method: str, params: dict | None = None, as_user: str = ""):
+            if method == "getTask":
+                return task
+            if method == "getAllComments":
+                return [_comment(text="Vu avec Alice &amp; Bob.")]
+            if method == "getAllSubtasks":
+                return [{"id": 1, "title": "Chiffrer &amp; adresser", "status": 0}]
+            raise AssertionError(f"methode inattendue : {method}")
+
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   side_effect=_dispatch):
+            data = json.loads(await kanboard_get_task(task_id=7970))
+        assert data["title"] == "[Alice & Bob] Proposer une intervention"
+        assert data["description"] == "Adresser a Alice & Bob une proposition."
+        assert data["swimlane_name"] == "Missions & Hermine"
+        assert data["comments"][0]["content"] == "Vu avec Alice & Bob."
+        assert data["subtasks"][0]["title"] == "Chiffrer & adresser"
+
+    async def test_a_double_encoded_entity_loses_exactly_one_level(self) -> None:
+        """Decoder deux fois inventerait une donnee que Kanboard ne stocke pas."""
+        rows = [_board_row(1, title="Alice &amp;amp; Bob")]
+        with patch("kanboard_mcp.server.kb_call", new_callable=AsyncMock,
+                   return_value=_mixed_board(rows)):
+            data = json.loads(await kanboard_get_board(project_id=262))
+        assert data[0]["columns"][0]["tasks"][0]["title"] == "Alice &amp; Bob"
+
+
+_RENDERED_RAW = "Alice &amp; Bob &#39;C&#39; &amp;amp;"
+_RENDERED_TEXT = "Alice & Bob 'C' &amp;"
+
+
+@pytest.mark.asyncio
+class TestDecodedTaskReadPaths:
+    """Les details et cles de groupement exposent le texte decode une fois."""
+
+    @pytest.mark.parametrize("use_username", [False, True])
+    async def test_detail_decodes_labels_and_preserves_numeric_status(self, use_username):
+        task = _raw_tasks(1)[0]
+        fields = ("title", "project_name", "column_name", "swimlane_name", "category_name")
+        task.update(dict.fromkeys(fields, _RENDERED_RAW))
+        task.pop("assignee_name")
+        for role in ("assignee", "creator"):
+            task[f"{role}_{'username' if use_username else 'name'}"] = _RENDERED_RAW
+        task["description"] = "x" * 1999 + "&amp;fin"
+        person = {"username" if use_username else "name": _RENDERED_RAW}
+        subtask = {"id": 1, "title": _RENDERED_RAW, "status_name": _RENDERED_RAW, **person}
+        comment = {"id": 2, "comment": _RENDERED_RAW, **person}
+        with patch.object(server, "kb_call", new_callable=AsyncMock,
+                          side_effect=[task, [comment], [subtask, {"id": 3, "status": 0}]]):
+            data = json.loads(await kanboard_get_task(task_id=1))
+        for field in (*fields, "assignee", "creator"):
+            assert data[field] == _RENDERED_TEXT
+        assert data["description"] == "x" * 1999 + "&"
+        assert data["comments"][0]["user"] == _RENDERED_TEXT
+        assert data["comments"][0]["content"] == _RENDERED_TEXT
+        for field in ("title", "assignee", "status"):
+            assert data["subtasks"][0][field] == _RENDERED_TEXT
+        assert data["subtasks"][1]["status"] == 0
+
+    async def test_detail_does_not_decode_cached_names_again(self):
+        task = {"id": 1, "project_id": 29, "owner_id": 4, "creator_id": 5,
+                "column_id": 6, "swimlane_id": 7, "category_id": 8}
+        replies = {
+            "getTask": task, "getAllComments": [], "getAllSubtasks": [],
+            "getUser": {"name": _RENDERED_RAW},
+            "getColumns": [{"id": 6, "title": _RENDERED_RAW}],
+            "getAllSwimlanes": [{"id": 7, "name": _RENDERED_RAW}],
+            "getProjectById": {"name": _RENDERED_RAW},
+            "getAllCategories": [{"id": 8, "name": _RENDERED_RAW}],
+        }
+        async def dispatch(method, params=None, as_user=""):
+            return replies[method]
+        with patch.object(server, "_user_cache", {}), \
+             patch.object(server, "_column_cache", {}), \
+             patch.object(server, "_swimlane_cache", {}), \
+             patch.object(server, "_PROJECT_NAMES", {}), \
+             patch.object(server, "_CATEGORY_NAMES", {}), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch):
+            for _ in range(2):
+                data = json.loads(await kanboard_get_task(task_id=1))
+                for field in ("project_name", "column_name", "swimlane_name", "category_name",
+                              "assignee", "creator"):
+                    assert data[field] == _RENDERED_TEXT
+
+    async def test_dashboard_decodes_project_keys_and_deletion_decodes_title(self):
+        task = _raw_tasks(1)[0]
+        task.update(project_name=_RENDERED_RAW, title=_RENDERED_RAW)
+        with patch.object(server, "_get_my_tasks", new_callable=AsyncMock,
+                          return_value=([task], "")):
+            dashboard = json.loads(await kanboard_my_dashboard())
+        assert list(dashboard["by_project"]) == [_RENDERED_TEXT]
+        assert dashboard["by_project"][_RENDERED_TEXT][0]["project_name"] == _RENDERED_TEXT
+        with patch.object(server, "kb_call", new_callable=AsyncMock,
+                          side_effect=[task, True]) as call:
+            deleted = json.loads(await server.kanboard_delete_task(task_id=1))
+        assert deleted["title"] == _RENDERED_TEXT
+        assert call.call_args.args == ("removeTask", {"task_id": 1})
+
+
+@pytest.mark.asyncio
+class TestDecodedCommentReadPaths:
+    """Les lectures changent, les contenus envoyes et erreurs restent bruts."""
+
+    @pytest.mark.parametrize("length", [COMMENT_PREVIEW_CHARS, COMMENT_PREVIEW_CHARS + 1])
+    @pytest.mark.parametrize("full_comments", [False, True])
+    async def test_preview_counts_decoded_characters(self, length, full_comments):
+        raw = "x" * (COMMENT_PREVIEW_CHARS - 1) + "&amp;" + "z" * (length - COMMENT_PREVIEW_CHARS)
+        decoded = "x" * (COMMENT_PREVIEW_CHARS - 1) + "&" + "z" * (length - COMMENT_PREVIEW_CHARS)
+        with patch.object(server, "kb_call", new_callable=AsyncMock,
+                          side_effect=[_raw_tasks(1)[0], [_comment(text=raw)], []]):
+            data = json.loads(await kanboard_get_task(task_id=1, full_comments=full_comments))
+        row = data["comments"][0]
+        assert row["content"] == (decoded if full_comments else decoded[:COMMENT_PREVIEW_CHARS])
+        if not full_comments and length > COMMENT_PREVIEW_CHARS:
+            assert row["comment_truncated"] is True
+            assert row["comment_full_length"] == length
+        else:
+            assert "comment_truncated" not in row
+            assert "comment_full_length" not in row
+
+    @pytest.mark.parametrize("operation", ["list", "get", "update", "remove"])
+    async def test_comment_outputs_decode_once_and_input_is_untouched(self, operation):
+        raw = _comment(text=_RENDERED_RAW)
+        raw.update(name=_RENDERED_RAW, username=_RENDERED_RAW)
+        replies = {"getComment": raw, "getAllComments": [raw],
+                   "updateComment": True, "removeComment": True}
+        async def dispatch(method, params=None, as_user=""):
+            return replies[method]
+        with patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch) as call:
+            if operation == "list":
+                data = json.loads(await kanboard_list_comments(task_id=42))[0]
+            elif operation == "get":
+                data = json.loads(await kanboard_get_comment(comment_id=7))
+            elif operation == "update":
+                data = json.loads(await kanboard_update_comment(comment_id=7, comment=_RENDERED_RAW))
+            else:
+                data = json.loads(await kanboard_remove_comment(comment_id=7))
+        if operation in ("list", "get"):
+            for key in ("username", "name", "comment"):
+                assert data[key] == _RENDERED_TEXT
+        elif operation == "update":
+            assert data["previous_comment"] == _RENDERED_TEXT
+            assert data["new_comment"] == _RENDERED_RAW
+            assert call.call_args.args == ("updateComment", {"id": 7, "content": _RENDERED_RAW})
+        else:
+            assert data["deleted_comment"] == _RENDERED_TEXT
+            assert data["deleted_comment_author"] == _RENDERED_TEXT
+
+    @pytest.mark.parametrize("use_username", [False, True])
+    async def test_denial_decodes_author_in_hint_but_not_transport_detail(self, use_username):
+        raw = {"user_id": 84, "username" if use_username else "name": _RENDERED_RAW}
+        data = json.loads(server._comment_denied("modifier", 7, raw, "primary", _RENDERED_RAW))
+        assert data["comment_author"] == _RENDERED_TEXT
+        assert f"poste par {_RENDERED_TEXT}," in data["hint"]
+        assert data["api_detail"] == _RENDERED_RAW
+
+
+@pytest.mark.asyncio
+class TestDecodedLinkReadPaths:
+    """Les deux sources de relation et les libelles opposes sont decodes."""
+
+    @pytest.mark.parametrize("types_available", [False, True])
+    async def test_link_labels_decode_with_or_without_type_lookup(self, types_available):
+        raw = {"id": "1", "task_id": "2", "link_id": "3", "project_id": "4",
+               "label": _RENDERED_RAW, "title": _RENDERED_RAW,
+               "column_title": _RENDERED_RAW, "project_name": _RENDERED_RAW, "is_active": "1"}
+        async def dispatch(method, params=None, as_user=""):
+            if method == "getAllTaskLinks":
+                return [raw]
+            if method == "getAllLinks" and types_available:
+                return [{"id": "3", "label": "Type " + _RENDERED_RAW}]
+            raise RuntimeError("Catalogue indisponible")
+        with patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch):
+            row = json.loads(await kanboard_list_task_links(task_id=42))["links"][0]
+        assert row["relation"] == ("Type " if types_available else "") + _RENDERED_TEXT
+        for key in ("title", "column", "project_name"):
+            assert row[key] == _RENDERED_TEXT
+        assert row["linked_task_id"] == 2
+        assert row["status"] == "open"
+
+    async def test_link_types_decode_labels_and_preserve_missing_opposites(self):
+        rows = [{"id": "1", "label": _RENDERED_RAW, "opposite_id": "2"},
+                {"id": "2", "label": _RENDERED_RAW, "opposite_id": "1"},
+                {"id": "3", "label": _RENDERED_RAW, "opposite_id": "0"},
+                {"id": "4", "label": _RENDERED_RAW, "opposite_id": "99"}]
+        with patch.object(server, "kb_call", new_callable=AsyncMock, return_value=rows):
+            types = json.loads(await kanboard_list_link_types())["link_types"]
+        assert [row["label"] for row in types] == [_RENDERED_TEXT] * 4
+        assert [row["opposite_label"] for row in types] == [_RENDERED_TEXT] * 2 + [None, None]
+
+
+@pytest.mark.asyncio
+class TestDecodedProjectStructureReadPaths:
+    """Noms et descriptions sont decodes avant les limites de restitution."""
+
+    async def test_projects_metadata_and_deleted_name(self):
+        project = {"id": 29, "name": _RENDERED_RAW, "identifier": _RENDERED_RAW,
+                   "description": "x" * 199 + "&amp;fin", "default_swimlane": _RENDERED_RAW,
+                   "start_date": _RENDERED_RAW, "end_date": _RENDERED_RAW,
+                   "url": {"board": "https://kb.test/?a=1&amp;b=2"}}
+        with patch.object(server, "_projects_for_account", new_callable=AsyncMock,
+                          return_value=([project], "all")):
+            row = json.loads(await kanboard_list_projects())["projects"][0]
+        assert row["name"] == row["identifier"] == _RENDERED_TEXT
+        assert row["description"] == "x" * 199 + "&"
+        with patch.object(server, "kb_call", new_callable=AsyncMock, return_value=project):
+            data = json.loads(await server.kanboard_get_project_metadata(project_id=29))
+        for key in ("name", "identifier", "default_swimlane"):
+            assert data[key] == _RENDERED_TEXT
+        assert data["description"] == "x" * 199 + "&fin"
+        for key in ("start_date", "end_date", "url"):
+            assert data[key] == project[key]
+        with patch.object(server, "_column_cache", {}), \
+             patch.object(server, "_swimlane_cache", {}), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=[project, True]) as call:
+            deleted = json.loads(await server.kanboard_delete_project(project_id=29))
+        assert deleted["name"] == _RENDERED_TEXT
+        assert call.call_args.args == ("removeProject", {"project_id": 29})
+
+    @pytest.mark.parametrize("tool, label", [
+        ("kanboard_list_columns", "title"), ("kanboard_list_swimlanes", "name"),
+        ("kanboard_list_categories", "name"),
+    ])
+    async def test_structure_names_and_descriptions_decode_before_truncation(self, tool, label):
+        raw = {"id": 1, label: _RENDERED_RAW, "description": "x" * 499 + "&amp;fin",
+               "color_id": _RENDERED_RAW}
+        with patch.object(server, "kb_call", new_callable=AsyncMock, return_value=[raw]):
+            row = json.loads(await getattr(server, tool)(project_id=29))[0]
+        assert row[label] == _RENDERED_TEXT
+        assert row["description"] == "x" * 499 + "&"
+        if "color_id" in row:
+            assert row["color_id"] == _RENDERED_RAW
+
+
+@pytest.mark.asyncio
+class TestDecodedActivityReadPaths:
+    """Le resume decode precede la coupe, le type technique reste brut."""
+
+    @pytest.mark.parametrize("use_username", [False, True])
+    async def test_activity_decodes_user_title_and_summary(self, use_username):
+        event = {"event_name": _RENDERED_RAW, "date_creation": "1609459200",
+                 "author_username" if use_username else "author_name": _RENDERED_RAW,
+                 "task": {"id": 42, "title": _RENDERED_RAW},
+                 "event_title": "x" * 299 + "&amp;fin"}
+        with patch.object(server, "kb_call", new_callable=AsyncMock, return_value=[event]):
+            row = json.loads(await kanboard_recent_activity(project_id=29))["events"][0]
+        assert row["user"] == row["task_title"] == _RENDERED_TEXT
+        assert row["summary"] == "x" * 299 + "&"
+        assert row["event_type"] == _RENDERED_RAW
+
+
+@pytest.mark.asyncio
+class TestDecodedUserReadPaths:
+    """Les logins affiches sont decodes, les logins d'appariement restent bruts."""
+
+    @pytest.mark.parametrize("members", [
+        {"4": _RENDERED_RAW}, [{"id": 4, "name": _RENDERED_RAW}],
+        [{"id": 4, "username": _RENDERED_RAW}],
+    ])
+    async def test_project_members_decode_both_response_shapes(self, members):
+        with patch.object(server, "kb_call", new_callable=AsyncMock, return_value=members):
+            rows = json.loads(await server.kanboard_list_project_users(project_id=29))
+        assert rows == [{"user_id": 4, "name": _RENDERED_TEXT}]
+
+    @pytest.mark.parametrize("already_assigned", [False, True])
+    async def test_assignment_uses_decoded_cache_once_in_both_success_paths(self, already_assigned):
+        replies = {"getTask": {"id": 42, "project_id": 29, "owner_id": 4 if already_assigned else 0},
+                   "getProjectUsers": {"4": "alice"}, "getUser": {"name": _RENDERED_RAW},
+                   "updateTask": True}
+        async def dispatch(method, params=None, as_user=""):
+            return replies[method]
+        with patch.object(server, "_user_cache", {}), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch) as call:
+            row = json.loads(await kanboard_assign_task(task_id=42, user_id=4))
+        assert row["owner_name"] == _RENDERED_TEXT
+        writes = [c for c in call.call_args_list if c.args[0] == "updateTask"]
+        assert len(writes) == (0 if already_assigned else 1)
+        if writes:
+            assert writes[0].args[1] == {"id": 42, "owner_id": 4}
+
+    @pytest.mark.parametrize("cached_display", [False, True])
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    async def test_assignment_error_names_decode_once(self, cached_display, ambiguous):
+        async def dispatch(method, params=None, as_user=""):
+            if method == "getTask":
+                return {"id": 42, "project_id": 29}
+            if method == "getProjectUsers":
+                return {"4": "alice" if cached_display else _RENDERED_RAW,
+                        "5": "bob" if cached_display else _RENDERED_RAW}
+            if method == "getUser":
+                return {"name": _RENDERED_RAW} if cached_display else {}
+            raise AssertionError(f"Ecriture inattendue : {method}")
+        # Le cache decode deja un niveau avant la comparaison historique.
+        query = _RENDERED_TEXT if cached_display else _RENDERED_RAW
+        with patch.object(server, "_user_cache", {}), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch):
+            message = await kanboard_assign_task(task_id=42, user_name=query if ambiguous else "absent")
+        assert "Ambiguite" in message if ambiguous else "Membres disponibles" in message
+        assert repr([_RENDERED_TEXT, _RENDERED_TEXT]) in message
+
+    async def test_visible_project_names_decode_once_for_both_accounts(self):
+        async def dispatch(method, params=None, as_user=""):
+            if method == "getMyProjectsList":
+                return {"1" if as_user == "primary" else "2": _RENDERED_RAW}
+            if method == "getAllProjects":
+                return []
+            raise AssertionError(method)
+        with patch.object(server, "KANBOARD_USER_ALT", "bot"), \
+             patch.object(server, "KANBOARD_TOKEN_ALT", "test-token"), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch):
+            comparison = json.loads(await kanboard_check_project_access())
+            single = json.loads(await kanboard_check_project_access(project_id=1))
+        assert single["project_name"] == _RENDERED_TEXT
+        assert comparison["only_primary"] == [{"id": "1", "name": _RENDERED_TEXT}]
+        assert comparison["only_agent"] == [{"id": "2", "name": _RENDERED_TEXT}]
+
+    async def test_identity_decodes_api_names_but_keeps_queried_login(self):
+        with patch.object(server, "_get_credentials", return_value=(_RENDERED_RAW, "test-token", "primary")), \
+             patch.object(server, "_get_my_user_id", new_callable=AsyncMock, return_value=(4, "")), \
+             patch.object(server, "kb_call", new_callable=AsyncMock,
+                          return_value={"id": 4, "name": _RENDERED_RAW, "username": _RENDERED_RAW}) as call:
+            data = json.loads(await server.kanboard_who_am_i())
+        assert data["getMe"]["name"] == data["getMe"]["username"] == _RENDERED_TEXT
+        assert data["getUserByLoginName"]["username"] == _RENDERED_TEXT
+        assert data["getUserByLoginName"]["login_queried"] == _RENDERED_RAW
+        # Depuis 0.16.0, who_am_i etablit l'identite apres ses deux essais : le
+        # dernier appel est donc un getMe. Ce qui compte ici est que le login
+        # parti vers Kanboard soit celui qui est configure, non decode.
+        assert ("getUserByLoginName", {"login": _RENDERED_RAW}) in [
+            c.args for c in call.call_args_list
+        ]
+
+    @pytest.mark.parametrize("source", ["getMe", "getUserByLoginName", "getAllUsers"])
+    @pytest.mark.parametrize("use_username", [False, True])
+    async def test_account_names_decode_at_each_resolution_source(self, source, use_username):
+        user = {"id": 4, "username": _RENDERED_RAW}
+        if not use_username:
+            user["name"] = _RENDERED_RAW
+        async def dispatch(method, params=None, as_user=""):
+            if method != source:
+                return None
+            if method == "getAllUsers":
+                return [{"id": 99, "username": _RENDERED_TEXT}, user]
+            return user
+        with patch.object(server, "KANBOARD_USER", _RENDERED_RAW), \
+             patch.object(server, "KANBOARD_TOKEN", "test-token"), \
+             patch.object(server, "KANBOARD_USER_ALT", ""), \
+             patch.object(server, "_my_id_cache", {}), \
+             patch.object(server, "_my_name_cache", {}), \
+             patch.object(server, "kb_call", new_callable=AsyncMock, side_effect=dispatch) as call:
+            for _ in range(2):
+                data = json.loads(await server.kanboard_list_accounts())["accounts"]["primary"]
+                assert data["resolved_user_id"] == 4
+                assert data["resolved_name"] == _RENDERED_TEXT
+                assert data["login"] == _RENDERED_RAW
+            assert call.call_count == {"getMe": 1, "getUserByLoginName": 2, "getAllUsers": 3}[source]
+
+
+class TestDecodedLabelErrorReadPaths:
+    """Seul le rendu des candidats change, pas les lignes ni la resolution."""
+
+    @pytest.mark.parametrize("query, stored", [
+        ("Reunion & suite", "R&#233;union &amp; suite"),
+        ("Proje & suivi", "Projet &amp; suivi"),
+    ])
+    def test_available_and_closest_labels_decode(self, query, stored):
+        row = {"id": 1, "name": stored}
+        match, error = server._resolve_label([row], query, "Projet")
+        assert match is None
+        assert stored not in error
+        assert server._text(stored) in error
+        assert "Valeurs disponibles" in error
+        assert "Valeur la plus proche" in error
+        assert row["name"] == stored
+
+    def test_error_does_not_decode_input_or_suggestion_twice(self):
+        row = {"id": 1, "name": "Projet &amp;amp; suivi"}
+        query = "Proje &amp;amp; suivi"
+        match, error = server._resolve_label([row], query, "Projet")
+        assert match is None
+        assert f"'{query}' introuvable" in error
+        assert "Valeurs disponibles : ['Projet &amp; suivi']" in error
+        assert "Valeur la plus proche : 'Projet &amp; suivi'" in error

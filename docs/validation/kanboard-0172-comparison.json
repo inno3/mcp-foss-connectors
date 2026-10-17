@@ -1,0 +1,68 @@
+{
+  "installed_sha256": "50fa8b1f03855ff8efc91e681dfdb617fa2b81b73d7fec808fe3fc16d6a9a597",
+  "canonical_sha256": "d1269f3c581e4de56d50a34610705a476bc649fd10ecd3d437fb4015bd5bf54a",
+  "installed_version": "0.17.1",
+  "canonical_version": "0.17.2",
+  "registered_tools": 53,
+  "identical_schemas": 51,
+  "additive_schema_extensions": {
+    "kanboard_list_tasks": {
+      "modified_before": {
+        "default": "",
+        "title": "Modified Before",
+        "type": "string"
+      }
+    },
+    "kanboard_get_board": {
+      "status": {
+        "default": 1,
+        "title": "Status",
+        "type": "integer"
+      }
+    }
+  },
+  "added_functions": [
+    "_is_active_flag",
+    "_parse_date_bound",
+    "_text",
+    "_to_timestamp"
+  ],
+  "removed_functions": [],
+  "changed_functions_excluding_docstrings": [
+    "_closest_hint",
+    "_comment_denied",
+    "_comment_row",
+    "_ensure_write_identity",
+    "_get_category_name",
+    "_get_column_name",
+    "_get_my_user_id",
+    "_get_project_name",
+    "_get_swimlane_name",
+    "_get_user_name",
+    "_identity_refusal",
+    "_link_row",
+    "_resolve_label",
+    "_task_summary",
+    "_visible_projects",
+    "kanboard_assign_task",
+    "kanboard_delete_project",
+    "kanboard_delete_task",
+    "kanboard_get_board",
+    "kanboard_get_project_metadata",
+    "kanboard_get_task",
+    "kanboard_list_categories",
+    "kanboard_list_columns",
+    "kanboard_list_link_types",
+    "kanboard_list_project_users",
+    "kanboard_list_projects",
+    "kanboard_list_swimlanes",
+    "kanboard_list_task_links",
+    "kanboard_list_tasks",
+    "kanboard_my_dashboard",
+    "kanboard_recent_activity",
+    "kanboard_remove_comment",
+    "kanboard_update_comment",
+    "kanboard_who_am_i"
+  ],
+  "network_attempts": 0
+}

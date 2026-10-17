@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.15.0",
+  "version": "0.17.2",
   "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
   "author": {
     "name": "inno³",
@@ -50,14 +50,14 @@
     "kanboard_user_alt": {
       "type": "string",
       "title": "Compte agent - Utilisateur (optionnel)",
-      "description": "Login Kanboard d'un compte secondaire dédié à un agent IA (ex: bot). Laisser vide pour fallback sur le compte primary.",
+      "description": "Login Kanboard du compte agent (ex: bot). Obligatoire pour écrire avec as_user='agent' : aucun repli sur primary en écriture.",
       "default": "",
       "required": false
     },
     "kanboard_token_alt": {
       "type": "string",
       "title": "Compte agent - Token API (optionnel)",
-      "description": "Token API personnel du compte agent. Laisser vide pour utiliser uniquement le compte primary.",
+      "description": "Token API personnel du compte agent. Obligatoire pour écrire avec as_user='agent'. Sans identifiants agent, seules les lectures gardent le repli sur primary.",
       "default": "",
       "required": false,
       "sensitive": true
@@ -125,7 +125,7 @@
     },
     {
       "name": "kanboard_list_tasks",
-      "description": "Tâches d'un projet"
+      "description": "Tâches d'un projet avec dates et filtre facultatif modified_before"
     },
     {
       "name": "kanboard_get_task",
@@ -137,7 +137,7 @@
     },
     {
       "name": "kanboard_get_board",
-      "description": "État du board Kanban"
+      "description": "Tableau Kanban : cartes actives par défaut, status=0 fermées, status=-1 toutes"
     },
     {
       "name": "kanboard_create_task",
