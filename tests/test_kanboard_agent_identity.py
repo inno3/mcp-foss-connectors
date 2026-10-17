@@ -138,6 +138,18 @@ async def test_primary_is_explicitly_allowed_and_verified(rpc):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("account,user", [("primary", "human"), ("agent", "robot")])
+async def test_display_name_decodes_once_after_write_identity_probe(rpc, account, user):
+    """La garde 0.17.1 alimente aussi le cache de noms decode en 0.17.2."""
+    rpc.identities[user]["name"] = "Synthetic &amp;amp; Name"
+    await kb.kb_call("closeTask", {"task_id": 902}, as_user=account)
+    for _ in range(2):
+        accounts = json.loads(await kb.kanboard_list_accounts())["accounts"]
+        assert accounts[account]["resolved_name"] == "Synthetic &amp; Name"
+    assert [(u, m) for u, m, _ in rpc.calls if u == user and m == "getMe"] == [(user, "getMe")]
+
+
+@pytest.mark.asyncio
 async def test_read_fallback_is_available_and_reports_primary(rpc, monkeypatch):
     monkeypatch.setattr(kb, "KANBOARD_TOKEN_ALT", "")
     response = json.loads(await kb.kanboard_my_overdue(as_user="agent"))

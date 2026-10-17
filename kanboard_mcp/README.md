@@ -16,6 +16,32 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
+## Version 0.17.2: board status, dates and readable text
+
+`kanboard_get_board` shows active cards by default. Pass `status=0` for closed
+cards or `status=-1` for the former scope, including both. Filtering precedes
+the per-column limit; `task_count`, `total` and the cards shown share that scope.
+Cards with an unknown status stay visible with `is_active: null` and the column
+reports `status_filter_incomplete: true`.
+
+Boards and task summaries expose `date_created`, `date_modified` and an integer
+`is_active` (0 or 1, or null when unknown). Summaries are shared by task lists,
+search, the dashboard and overdue tasks. `kanboard_list_tasks` also accepts
+`modified_before`, a strict upper bound applied before pagination. Use
+`YYYY-MM-DD`, `YYYY-MM-DD HH:MM` or `YYYY-MM-DDTHH:MM` in the MCP server's local
+timezone. Undatable tasks are excluded from this filter and counted in
+`modified_before_unknown`.
+
+Kanboard text on read paths is HTML-decoded once, before any text truncation.
+The same rule applies to cached display names after a write. User-supplied
+write values and stored labels reused in updates retain their original form.
+Ambiguous label matches retain their raw spellings so they can be distinguished.
+
+All 53 tools and their existing parameters remain available. The only signature
+extensions are the two optional trailing parameters described above; 51 tool
+signatures are identical to the installed 0.17.1. The board's default scope and
+the decoded text are intentional changes in returned data.
+
 ## Tools (53)
 
 - `kanboard_my_dashboard` — Tableau de bord personnel Kanboard
