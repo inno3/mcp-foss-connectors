@@ -5,6 +5,8 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
+**Version courante : 1.8.1.** Voir le [CHANGELOG](CHANGELOG.md).
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -696,6 +698,47 @@ inexistante ou invalide rend `payments=null`, avec `payments_error` et un
 champ indisponible explicite. `include_payments=false` évite ces appels
 supplémentaires et signale que les paiements n'ont pas été demandés.
 
+### Conditions de règlement depuis 1.8.1
+
+`dolibarr_list_invoices`, `dolibarr_list_supplier_invoices`,
+`dolibarr_get_invoice` et `dolibarr_get_supplier_invoice` rendent désormais
+`cond_reglement_id`, `cond_reglement_code`, `cond_reglement_label` pour la
+facture, et les trois champs préfixés par `thirdparty_` pour son tiers.
+La condition du tiers ne remplace jamais celle de la facture. Hors erreur de
+lecture signalée, `null` sur les deux conditions signifie qu'aucune condition
+de règlement n'est paramétrée dans Dolibarr. `dolibarr_get_thirdparty` rend
+aussi les trois champs : tous à `null`, ils indiquent l'absence de condition
+paramétrée sur le tiers, à l'origine d'échéances par défaut sur ses factures.
+
+`date_due` peut être une valeur par défaut Dolibarr (date de facture + 1 jour),
+sans échéance négociée. `date_due_is_default` signale cette heuristique :
+`true` pour cet intervalle à vérifier, `false` pour un autre intervalle, `null` si l'une des
+dates manque ou est illisible. Sur une échéance par défaut, `days_late` mesure
+l'ancienneté de la facture, pas un retard de règlement ; son calcul reste
+inchangé. Les listes donnent `date_due_default_count` sur la seule page rendue
+et `payment_terms_note` seulement si ce nombre est non nul. Cette même note
+accompagne le détail d'une facture dont `date_due_is_default=true`.
+
+`include_payment_terms=true` par défaut ajoute une lecture de
+`thirdparties/{id}` par tiers distinct de la page rendue, après pagination.
+Le dictionnaire `setup/dictionary/payment_terms` est lu une seule fois par
+session, échec compris, avec les libellés `label`, `libelle` ou
+`libelle_facture`. Un dictionnaire inaccessible donne
+`payment_terms_unavailable` ; un tiers inaccessible donne
+`thirdparty_payment_terms_error` sur la facture. Ces échecs ne bloquent pas
+la lecture des factures : les champs impossibles à résoudre restent `null`
+et figurent dans `unavailable_fields`. Les données déjà portées par la
+facture restent disponibles. Redémarrer le serveur pour relire un dictionnaire
+après correction des droits ou modification des conditions.
+
+`include_payment_terms=false` supprime ces appels complémentaires et rend les
+sept champs, y compris `date_due_is_default`, à `null`, avec
+`payment_terms_error` et leur présence dans `unavailable_fields`. Dans ce cas,
+`date_due_default_count=0` signifie qu'aucun défaut n'a été détecté, sans
+certifier les échéances puisque leur contrôle a été désactivé.
+
+### Avoirs de la page rendue
+
 La liste client contient aussi `credit_notes`, les objets avoirs de la page
 rendue, avec leur facture source quand elle est connue. `credit_notes_count`
 compte ces objets. Ce tableau suit les mêmes filtres que `invoices` et n'est
@@ -734,3 +777,11 @@ refuse également un montant ou une date absents. Pour les encaissements,
 `unresolved_entries` signale les liens bancaires illisibles et rend le résultat
 tronqué. Les appels MCP réussis ne produisent plus de journaux INFO sur stderr.
 Les avertissements et erreurs restent visibles.
+
+### Échéances cohérentes depuis 1.8.1
+
+La liste des factures, leur détail et la projection de trésorerie partagent
+la même lecture : `date_echeance` prime sur `date_lim_reglement`, même quand
+sa valeur est explicitement nulle. Le signal `date_due_is_default` est une
+heuristique (facture + un jour), pas une preuve de l'absence d'accord ; vérifier
+les conditions avant une relance.
