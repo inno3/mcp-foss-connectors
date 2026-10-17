@@ -1,9 +1,101 @@
 # Reprise du dépôt mcp-foss-connectors
 
+## 17/10/2026 : lot S, conditions de règlement du tiers en 1.8.4
+
+### Objectif, décisions et état courant
+
+Ajouter `cond_reglement_id` à `dolibarr_update_thirdparty`, avec validation
+avant toute requête et relecture après écriture. Décision appliquée en version
+**1.8.4**, source, manifeste, README et CHANGELOG synchronisés.
+
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/S-mcp-foss-connectors`.
+- Branche existante conservée : `codex/2026-10-17-tiers-reglement`.
+- Départ vérifié : `cc67fc6`, arbre propre. Commit fonctionnel : `422f0d2`.
+- Extension associée : `../S-inno3-mcp-extensions`, branche
+  `codex/2026-10-17-carnets-commande`, départ `e388488`, version livrée **0.8.6**.
+  Sa reprise décrit la preuve par commande. Commit fonctionnel : `acb8cc8`.
+- Les versions installées 1.8.3 et 0.8.5 proviennent de la mission ; aucune
+  installation inspectée ni modifiée. Travail seul, hors ligne, sans push ni tag.
+- Rapport commun : [S.rapport.md](../../_rapports-2026-10-17/S.rapport.md).
+
+Cette section décrit les worktrees du lot S. Les sections plus anciennes sont
+historiques ; leurs chemins et assertions de poste n'ont pas été revalidés.
+`AGENTS.md` et `CLAUDE.md` restent identiques et pointent vers ce document.
+
+### Contrat livré et références
+
+`cond_reglement_id` est facultatif (`None` conserve l'existant) et exige un
+entier strictement positif. Booléens, chaînes et décimaux sont refusés aussi
+par le schéma MCP. Les paramètres antérieurs gardent leur signature et leur
+comportement ; le traitement enrichi s'applique lorsque la condition est fournie.
+Le PUT `thirdparties/{id}` est suivi d'un GET du même tiers, même après erreur.
+
+- `write_state` : `not_attempted`, `accepted`, `rejected` ou `unknown`.
+- `write_may_have_succeeded` conserve la possibilité d'une écriture lorsque
+  la réponse se perd ou que le serveur échoue. Aucun PUT n'est rejoué.
+- `readback` rend les champs relus, la condition normalisée, son code et son
+  libellé, ainsi que `cond_reglement_id_raw`. `verified` exige l'identifiant brut
+  demandé ; une déduction par le code du dictionnaire ne suffit pas.
+- `success` exige un PUT accepté et la condition confirmée. Après réponse
+  perdue, la valeur peut être relue avec `verified=true` et `success=false`.
+- Refus, écart et relecture impossible restent explicites. Un dictionnaire
+  inaccessible ne masque pas la valeur relue. Le détail du tiers exposait déjà
+  condition et libellé ; son contrat est vérifié par l'aller-retour.
+
+Sources : `dolibarr_mcp/server.py`, `dolibarr_mcp/manifest.json`,
+`dolibarr_mcp/README.md`, `dolibarr_mcp/CHANGELOG.md`.
+Tests nouveaux : `tests/test_dolibarr_thirdparty_write.py` (**28 cas**).
+Lecture antérieure : `tests/test_dolibarr_payment_terms.py`.
+Les tirets cadratins des fichiers modifiés ont été remplacés par des deux-points,
+y compris dans les textes historiques, conformément à la règle rédactionnelle.
+
+### Vérifications exécutées
+
+Venv existant : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+Commande de base depuis la racine :
+`PYTHONPATH=. <venv>/bin/python -m pytest tests -q -p no:cacheprovider`.
+
+| Vérification | Résultat mesuré |
+| --- | --- |
+| Suite complète initiale | 1 485 réussis, 1 ignoré, 6,06 s |
+| Écriture du tiers et conditions, première version des nouveaux tests | 104 réussis, 0,80 s |
+| Suite complète après correction et tests complémentaires | 1 513 réussis, 1 ignoré, 5,90 s |
+| Suite finale avec garde réseau et motifs des ignorés | **1 513 réussis, 1 ignoré, 6,02 s ; 0 tentative réseau** |
+| Ruff sur tout le dépôt (`check --no-cache .`) | 0 diagnostic |
+| `git diff --check` | Aucune erreur d'espacement |
+
+La garde utilise `sys.addaudithook` avant l'import de pytest et refuse
+`socket.connect`, `socket.getaddrinfo` et `socket.sendto`. Elle lance les mêmes
+arguments que la commande de base, avec `-rs`. Le seul test ignoré est
+l'intégration Dolibarr préexistante qui exige une instance réelle et y écrit.
+Aucun test rouge initial dans le cœur, aucun test supprimé ou désactivé.
+
+Comparaison AST exécutée avec `cc67fc6`, après normalisation des seuls tirets :
+**78 outils**, une seule fonction et signature modifiées,
+`dolibarr_update_thirdparty`, aucune fonction ajoutée ou supprimée. Manifeste
+**1.8.4**, **78 outils**. Les 77 autres signatures restent identiques.
+
+### Limites, arbitrages et prochaines actions
+
+Les tests prouvent le transport et le traitement de réponses synthétiques,
+pas la persistance sur l'instance réelle. L'existence de l'identifiant dans le
+dictionnaire et les droits restent à valider par le serveur. Le PUT et le GET
+ne sont pas transactionnels ; un autre acteur peut changer le tiers entre eux.
+`verified` porte sur la condition, pas sur tous les autres champs transmis.
+
+1. Relire et intégrer les deux branches du lot S en tenant compte du rapport commun.
+2. Recette sur service réel, construction, installation et publication :
+   **à arbitrer par Benjamin**, non exécutées ici.
+3. Après intégration, faire archiver par l'orchestration les branches
+   `codex/2026-10-17-tiers-reglement` et `codex/2026-10-17-carnets-commande`.
+   Aucune branche supprimée dans ce lot.
+
+---
+
 Deux lots du 17/10/2026 sont fusionnés dans `main` : Kanboard 0.17.2 (K, K2)
 et connecteur Dolibarr 1.8.3 / Nextcloud 1.4.1 (L). Leurs sections suivent.
 
-## 17/10/2026 — lot K2 : fiabiliser l'identité Kanboard 0.17.2
+## 17/10/2026 : lot K2 : fiabiliser l'identité Kanboard 0.17.2
 
 ### Objectif et état de reprise
 
@@ -113,7 +205,7 @@ Ne pas reprendre les consignes de poste périmées des branches historiques ; le
 autres worktrees restent des chantiers distincts. Le répertoire interdit
 `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc` n'a été ni consulté ni modifié.
 
-## 17/10/2026 — lot K : réunir Kanboard en 0.17.2
+## 17/10/2026 : lot K : réunir Kanboard en 0.17.2
 
 **Historique au commit `86eecc5` ; la section K2 ci-dessus fait foi pour la suite.**
 
@@ -269,7 +361,7 @@ Les autres worktrees du dépôt sont des chantiers distincts. En particulier,
 `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc` ne doit pas être touché.
 
 
-## 17/10/2026 — lot L terminé, carnets et échéances
+## 17/10/2026 : lot L terminé, carnets et échéances
 
 ### Objectif, branche et état vérifié
 
