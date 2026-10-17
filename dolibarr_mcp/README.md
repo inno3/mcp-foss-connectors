@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
-**Version courante : 1.8.1.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.2.** Voir le [CHANGELOG](CHANGELOG.md).
 
 ## Environment variables
 
@@ -658,7 +658,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
 | `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet |
 | `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
-| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, collections complètes par tâche, agrégats sur toute la sélection |
+| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues |
 | `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
 | `list_supplier_invoices` | `invoices`, id, ref, ref_supplier, total_ttc, échéance, statut, retard | mêmes statuts, thirdparty_id, search_ref sur les deux références | mêmes bornes et tri que les factures clients |
 | `list_proposals` | `proposals`, id, ref, tiers, total_ht, total_ttc, date_validity, status | status vide tous, 0 brouillon, 1 validé, 2 signé, 3 refusé, 4 facturé, thirdparty_id | Toutes dates, datep décroissante, REST paginé |
@@ -785,3 +785,18 @@ la même lecture : `date_echeance` prime sur `date_lim_reglement`, même quand
 sa valeur est explicitement nulle. Le signal `date_due_is_default` est une
 heuristique (facture + un jour), pas une preuve de l'absence d'accord ; vérifier
 les conditions avant une relance.
+
+### Lecture des temps bornée depuis 1.8.2
+
+`dolibarr_list_time_entries` accepte `task_limit` (20 par défaut, 100 maximum)
+et `time_budget` (20 secondes par défaut, 25 maximum). `next_cursor` reprend
+au premier élément non rendu, sans relire les tâches terminées. La découverte
+des tâches et les attentes réseau sont comprises dans le budget.
+
+`truncated`, `reason`, `tasks_scanned` et `aggregates_complete` distinguent
+une fin de parcours d'un arrêt sur limite, erreur ou budget. `total` vaut null
+si le périmètre complet n'a pas été observé. Les agrégats couvrent les tâches
+lues dans cet appel, y compris les écritures non rendues d'une tâche partielle.
+Ne pas additionner ces agrégats de page : additionner les écritures exportées.
+Ordre par ID de tâche puis ID d'écriture, données supposées stables entre pages.
+Les anciens curseurs numériques doivent être remplacés par un nouveau parcours.

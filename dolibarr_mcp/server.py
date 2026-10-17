@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1775,7 +1775,7 @@ async def _fetch_time_entries(task_id: int) -> list[dict]:
     """Écritures de temps d'une tâche, normalisées. Liste vide si aucune."""
     raw = await api_get(TIMESPENT_LIST_ENDPOINT.format(task_id=task_id))
     if not isinstance(raw, list):
-        return []
+        raise ValueError("Reponse de temps illisible : liste attendue.")
     return [_format_time_entry(e) for e in raw if isinstance(e, dict)]
 
 
@@ -1788,88 +1788,150 @@ async def dolibarr_list_time_entries(
     date_end: str = "",
     limit: int = DEFAULT_LIMIT,
     cursor: str = "",
+    task_limit: int = 20,
+    time_budget: float = 20.0,
 ) -> str:
-    """Liste les écritures de temps d'une tâche ou de tout un projet.
+    """Liste les temps avec pagination par tache et budget global explicite.
 
-    Export : total, returned, count, truncated et next_cursor. Passer cursor
-    avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
+    task_id ou project_id obligatoire. Filtres user_id et dates YYYY-MM-DD
+    incluses. limit borne les ecritures rendues (100 maximum), task_limit les
+    taches lues (20 par defaut, 100 maximum). time_budget inclut la decouverte
+    des taches, les requetes et leurs reprises : 20 s par defaut, 25 s maximum.
 
-    Paramètres :
-    - task_id : ID d'une tâche (task_id OU project_id est obligatoire)
-    - project_id : ID d'un projet, pour agréger toutes ses tâches
-    - user_id : ne garder que les écritures de cet utilisateur
-    - date_start / date_end : bornes incluses, format YYYY-MM-DD
-    - limit : nombre max d'écritures RETOURNÉES (les totaux, eux, portent sur
-      l'intégralité des écritures filtrées)
+    Reprendre next_cursor avec les memes filtres. Ordre par ID de tache puis
+    ID d'ecriture. Une tache terminee n'est pas relue ; la tache partiellement
+    rendue est relue a la page suivante. Le curseur suppose des temps stables
+    pendant le parcours. Les anciens curseurs numeriques ne sont plus valides.
 
-    Retourne, pour chaque écriture : `entry_id` (rowid de llx_element_time,
-    à passer à dolibarr_update_time_entry / dolibarr_delete_time_entry), date,
-    horodatage, durée en `hours` ET en `seconds`, utilisateur, note, et la
-    tâche de rattachement. Plus les totaux `total_hours` / `total_seconds`,
-    et une ventilation par utilisateur (`by_user`) et par tâche (`by_task`).
+    truncated annonce toute suite, y compris apres erreur ou expiration.
+    tasks_scanned compte les taches lues dans CET appel, reason explique l'arret.
+    total est inconnu tant que le projet entier n'a pas ete lu dans cet appel.
+    Les agregats portent sur les taches lues, y compris la partie non rendue
+    d'une tache tronquee : ne pas additionner les totaux de pages qui relisent
+    la meme tache. aggregates_complete dit si ces totaux couvrent le perimetre.
+    Pour un export, additionner les ecritures rendues, dedupliquees par entry_id.
 
-    `matched` compte les écritures filtrées, `returned` celles effectivement
-    rendues : quand `truncated` vaut true, la liste est tronquée mais les
-    totaux restent complets.
+    Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
+    Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
     """
+    import base64
+    import math
+
     try:
         if not task_id and not project_id:
             return "Fournir un task_id ou un project_id."
-
-        task_ids: list[int] = []
-        if task_id:
-            task_ids = [int(task_id)]
-        else:
-            tasks = await api_get(f"projects/{project_id}/tasks", {})
-            task_ids = [int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")]
-
-        entries: list[dict] = []
-        for tid in task_ids:
-            entries.extend(await _fetch_time_entries(tid))
-
-        if user_id:
-            entries = [e for e in entries if e["user_id"] == user_id]
-        if date_start:
-            entries = [e for e in entries if e["date"] and e["date"] >= date_start]
-        if date_end:
-            entries = [e for e in entries if e["date"] and e["date"] <= date_end]
-
-        entries = _unique_rows(entries)
-        entries.sort(key=lambda e: (e["date"] or "", e["entry_id"] or 0))
-
-        total_seconds = sum(e["seconds"] or 0 for e in entries)
-        by_user: dict[str, int] = {}
-        by_task: dict[str, int] = {}
-        for e in entries:
-            by_user[str(e["user_id"])] = by_user.get(str(e["user_id"]), 0) + (e["seconds"] or 0)
-            key = e["task_ref"] or str(e["task_id"])
-            by_task[key] = by_task.get(key, 0) + (e["seconds"] or 0)
-
+        invalid = _valid_dates(date_start=date_start, date_end=date_end)
+        if invalid:
+            return invalid
+        if not math.isfinite(time_budget) or time_budget <= 0:
+            raise ValueError("time_budget doit etre un nombre positif fini.")
+        budget = min(float(time_budget), 25.0)
+        deadline = time.monotonic() + budget
         capped = _clamp_limit(limit)
-        shown = entries
-        paging = _export_payload({"entries": entries}, "entries", capped, cursor)
+        task_limit = max(1, min(int(task_limit), 100))
+        scope = [task_id, project_id, user_id, date_start, date_end]
+        current, offset = 0, 0
+        if cursor:
+            try:
+                if len(cursor) > 2048:
+                    raise ValueError()
+                decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+                if decoded["v"] != 1 or decoded["scope"] != scope:
+                    raise ValueError()
+                current, offset = decoded["task"], decoded["offset"]
+                if any(type(v) is not int or v < 0 for v in (current, offset)):
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError, UnicodeError):
+                raise ValueError("Curseur invalide : reprendre next_cursor avec les memes filtres.") from None
 
-        return _dumps({
-            "task_id": task_id or None,
-            "project_id": project_id or None,
-            "tasks_scanned": len(task_ids),
-            "matched": len(entries),
-            "returned": len(shown),
-            "truncated": len(shown) < len(entries),
-            "total_hours": _seconds_to_hours(total_seconds),
-            "total_seconds": total_seconds,
-            "by_user": {
-                u: {"hours": _seconds_to_hours(s), "seconds": s}
-                for u, s in sorted(by_user.items(), key=lambda kv: -kv[1])
-            },
-            "by_task": {
-                t: {"hours": _seconds_to_hours(s), "seconds": s}
-                for t, s in sorted(by_task.items(), key=lambda kv: -kv[1])
-            },
-            "entries": shown,
-            **paging,
-        })
+        def next_token(tid: int, position: int) -> str:
+            return base64.urlsafe_b64encode(json.dumps({
+                "v": 1, "scope": scope, "task": tid, "offset": position,
+            }, separators=(",", ":")).encode()).decode()
 
+        async def read(awaitable):
+            return await asyncio.wait_for(awaitable, max(0, deadline - time.monotonic()))
+
+        entries, scanned_entries = [], []
+        scanned = 0
+        task_ids = []
+        reason, error, next_cursor = None, None, None
+        try:
+            if task_id:
+                task_ids = [int(task_id)]
+            else:
+                tasks = await read(api_get(f"projects/{project_id}/tasks", {}))
+                if not isinstance(tasks, list):
+                    raise ValueError("Liste des taches illisible.")
+                task_ids = sorted({int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")})
+        except TimeoutError:
+            reason = "time_budget"
+            next_cursor = next_token(current, offset)
+        except Exception as exc:
+            reason, error = "task_list_error", _format_error(exc)
+            next_cursor = next_token(current, offset)
+
+        remaining_tasks = [tid for tid in task_ids if tid >= current]
+        if offset and current not in task_ids and reason is None:
+            raise ValueError("Curseur invalide : la tache partiellement lue a disparu.")
+        for index, tid in enumerate(remaining_tasks) if reason is None else []:
+            position = offset if tid == current else 0
+            if scanned >= task_limit or time.monotonic() >= deadline:
+                reason = "task_limit" if scanned >= task_limit else "time_budget"
+                next_cursor = next_token(tid, position)
+                break
+            try:
+                task_entries = await read(_fetch_time_entries(tid))
+            except TimeoutError:
+                reason, next_cursor = "time_budget", next_token(tid, position)
+                break
+            except Exception as exc:
+                reason, error, next_cursor = "task_error", _format_error(exc), next_token(tid, position)
+                break
+            scanned += 1
+            task_entries = [e for e in task_entries
+                            if (not user_id or e["user_id"] == user_id)
+                            and (not date_start or (e["date"] and e["date"] >= date_start))
+                            and (not date_end or (e["date"] and e["date"] <= date_end))]
+            task_entries = sorted(_unique_rows(task_entries, identity="entry_id"), key=lambda e: e["entry_id"] or 0)
+            scanned_entries.extend(task_entries)
+            shown = task_entries[position:position + capped - len(entries)]
+            entries.extend(shown)
+            if position + len(shown) < len(task_entries):
+                reason, next_cursor = "limit", next_token(tid, position + len(shown))
+                break
+            if len(entries) >= capped and index + 1 < len(remaining_tasks):
+                reason, next_cursor = "limit", next_token(remaining_tasks[index + 1], 0)
+                break
+
+        aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
+        if not task_ids and reason is None:
+            aggregates_complete = True
+        by_user, by_task = {}, {}
+        for entry in scanned_entries:
+            seconds = entry["seconds"] or 0
+            uid = str(entry["user_id"])
+            key = entry["task_ref"] or str(entry["task_id"])
+            by_user[uid] = by_user.get(uid, 0) + seconds
+            by_task[key] = by_task.get(key, 0) + seconds
+        total_seconds = sum(e["seconds"] or 0 for e in scanned_entries)
+        result = {
+            "task_id": task_id or None, "project_id": project_id or None,
+            "tasks_scanned": scanned, "tasks_total": None if not task_ids and reason is not None else len(task_ids),
+            "count": len(entries), "returned": len(entries), "matched": len(scanned_entries),
+            "total": len(scanned_entries) if aggregates_complete else None,
+            "truncated": next_cursor is not None, "next_cursor": next_cursor,
+            "reason": reason or "complete", "time_budget": budget,
+            "elapsed_seconds": round(time.monotonic() - (deadline - budget), 3),
+            "aggregates_scope": "scanned_tasks", "aggregates_complete": aggregates_complete,
+            "total_hours": _seconds_to_hours(total_seconds), "total_seconds": total_seconds,
+            "by_user": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_user.items()},
+            "by_task": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_task.items()},
+            "entries": entries,
+        }
+        if error:
+            result["scan_error"] = error
+        return _dumps(result)
     except Exception as exc:
         return _format_error(exc)
 

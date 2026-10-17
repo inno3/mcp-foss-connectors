@@ -16,8 +16,17 @@ Décisions et état courant :
 - La reprise de base `0211d5e` est déjà dans `main` : AST de Dolibarr et de
   Nextcloud identiques après normalisation des seuls tirets typographiques.
 - Le test de version MCP de `17e1d3e` est repris pour comparer au manifeste.
-- À intégrer ensuite : temps bornés (`3818b79`) et diagnostic local Nextcloud
-  (`0077f99`). Les documents historiques ne valent pas vérification actuelle.
+- Dolibarr 1.8.1 commité : `f607c5a`. Version 1.8.2 : reprise des temps
+  bornés (`3818b79`), budget de 20 s (25 s maximum), reprise par tâche et
+  agrégats explicitement limités aux tâches lues. Les anciens curseurs numériques
+  ne sont plus acceptés ; les données doivent rester stables entre pages.
+- Test ciblé temps : **415 réussis, 1 ignoré, 1 échec** lié à l’ordre
+  d’import (URL fictive initialisée après le cœur). Le test repris configure
+  désormais cette URL avant son import, comme les tests existants.
+- Temps après correction de l’import : **416 réussis, 1 ignoré**, sur les tests
+  temps, Dolibarr, exports et manifestes.
+- À intégrer ensuite : diagnostic local Nextcloud (`0077f99`). Les documents
+  historiques ne valent pas vérification actuelle.
 
 Vérifications réellement exécutées, hors ligne :
 
