@@ -9,7 +9,7 @@ Claude Desktop et tout autre client MCP.
 
 Configuration : DOLIBARR_URL (URL de base) + DOLIBARR_API_KEY (header DOLAPIKEY).
 Optionnel : DOLIBARR_WEB_LOGIN / DOLIBARR_WEB_PASSWORD, requis uniquement par
-les écritures que l'API REST n'expose pas — à ce jour le seul rapprochement
+les écritures que l'API REST n'expose pas : à ce jour le seul rapprochement
 bancaire (cf. dolibarr_set_bank_statement).
 Compatible Dolibarr 16+ (API REST).
 """
@@ -20,10 +20,11 @@ import logging
 import os
 import sys
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -32,7 +33,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.3"
+__version__ = "1.8.4"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -177,7 +178,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 if resp.status_code < 500:
                     resp.raise_for_status()
 
-                # Erreurs serveur 5xx : bug connu de l'API REST Dolibarr — certains endpoints
+                # Erreurs serveur 5xx : bug connu de l'API REST Dolibarr : certains endpoints
                 # (contacts, thirdparties) retournent HTTP 500 avec un corps JSON valide (entier
                 # ou tableau) à la place d'un HTTP 200. On parse le corps avant de décider.
                 # Une vraie erreur Dolibarr a toujours la forme {"error": {"code":…, "message":…}}.
@@ -186,7 +187,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                     if not (isinstance(body, dict) and "error" in body):
                         logger.warning(
                             "HTTP %d avec corps JSON valide (non-erreur) pour %s %s "
-                            "— bug API Dolibarr, traité comme succès",
+                            ": bug API Dolibarr, traité comme succès",
                             resp.status_code, method, url,
                         )
                         return body
@@ -231,7 +232,7 @@ async def _api_request(method: str, endpoint: str, **kwargs: Any) -> Any:
                 raise
         except DolibarrAPIError as exc:
             # Corps non-JSON sur réponse 2xx : très probablement un hoquet transient
-            # côté PHP-FPM / proxy. On retry comme pour un timeout — donc jamais
+            # côté PHP-FPM / proxy. On retry comme pour un timeout : donc jamais
             # sur une écriture, qui a pu aboutir malgré la réponse illisible.
             last_exc = exc
             if idempotent and attempt < _MAX_RETRIES:
@@ -271,7 +272,7 @@ async def _api_get_list(endpoint: str, params: dict[str, Any] | None = None) -> 
                 body = exc.response.json()
                 msg = (body.get("error") or {}).get("message", "")
                 if "No " in msg and "found" in msg.lower():
-                    logger.info("404 'no results' pour %s — traité comme liste vide", endpoint)
+                    logger.info("404 'no results' pour %s : traité comme liste vide", endpoint)
                     return []
             except Exception:
                 pass
@@ -365,7 +366,7 @@ def _seconds_to_hours(value: Any) -> float | None:
     Dolibarr stocke et renvoie TOUTES les durées en secondes, le plus souvent
     sous forme de chaîne ('14400'). Exposer cette valeur brute sous un nom en
     heures fait conclure à un temps 3600 fois trop élevé, sans aucune erreur
-    visible — d'où cette conversion systématique.
+    visible : d'où cette conversion systématique.
 
     Retourne None si la valeur est absente ou non numérique : surtout pas 0,
     qui se lirait comme « aucun temps passé » alors que l'information manque.
@@ -847,13 +848,13 @@ async def _gather_limited(factories: list, concurrency: int = 8) -> list:
 # Repli formulaire web
 # ---------------------------------------------------------------------------
 #
-# Quelques écritures n'ont AUCUNE route REST dans Dolibarr 24 — le
+# Quelques écritures n'ont AUCUNE route REST dans Dolibarr 24 : le
 # rapprochement bancaire en est une (cf. dolibarr_set_bank_statement). Le
 # connecteur ne bascule sur le formulaire web que pour celles-là, et seulement
 # si un compte web est explicitement configuré. Sans DOLIBARR_WEB_LOGIN /
 # DOLIBARR_WEB_PASSWORD, les outils concernés refusent en le disant : jamais de
 # mode dégradé silencieux. Une instance derrière un SSO qui n'expose pas le
-# formulaire de login natif ne peut pas utiliser ce repli — l'échec est alors
+# formulaire de login natif ne peut pas utiliser ce repli : l'échec est alors
 # constaté à la relecture, pas supposé.
 
 WEB_LOGIN = os.environ.get("DOLIBARR_WEB_LOGIN", "")
@@ -935,7 +936,7 @@ async def _web_post(path: str, data: "list[tuple[str, str]]", query: str = "") -
 
 
 # ---------------------------------------------------------------------------
-# Tools — Projets
+# Tools : Projets
 # ---------------------------------------------------------------------------
 
 
@@ -1072,7 +1073,7 @@ async def dolibarr_list_tasks(
 
     Retourne : ref, label, progression, dates, charge prévue et temps passé.
 
-    Durées — Dolibarr les renvoie en SECONDES ; chacune est exposée deux fois :
+    Durées : Dolibarr les renvoie en SECONDES ; chacune est exposée deux fois :
     - planned_hours / spent_hours   : heures, arrondies à 2 décimales
     - planned_seconds / spent_seconds : valeur brute Dolibarr, sans perte
     Une tâche portant 32,5 h ressort donc à spent_hours=32.5 et
@@ -1348,7 +1349,7 @@ async def _log_time_error(
         payload["hint"] = (
             f"La tâche #{task_id} existe, mais {endpoint} rend un 404 : la route "
             "ou le verbe ne correspond pas à cette version de Dolibarr. "
-            "L'ajout de temps est un POST sur tasks/{id}/addtimespent — "
+            "L'ajout de temps est un POST sur tasks/{id}/addtimespent : "
             "tasks/{id}/timespent est en lecture seule."
         )
     elif status == 400:
@@ -2233,7 +2234,7 @@ async def dolibarr_close_task(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Facturation
+# Tools : Facturation
 # ---------------------------------------------------------------------------
 
 
@@ -2280,7 +2281,7 @@ async def dolibarr_list_invoices(
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
     - thirdparty_id : filtrer par tiers
-    - min_amount : montant TTC minimum. Laissé à 0, il ne filtre RIEN — surtout
+    - min_amount : montant TTC minimum. Laissé à 0, il ne filtre RIEN : surtout
       pas les avoirs, dont le total est négatif par construction.
     - limit : nombre max de résultats
     - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
@@ -2421,7 +2422,7 @@ async def dolibarr_list_supplier_invoices(
     - date_start / date_end : bornes sur la DATE DE FACTURE (YYYY-MM-DD, incluses)
     - sort : 'desc' (défaut, plus récentes d'abord) ou 'asc'
     - search_ref : fragment de référence, cherché À LA FOIS dans la référence
-      interne Dolibarr (SI2602-0084) et dans la référence du fournisseur —
+      interne Dolibarr (SI2602-0084) et dans la référence du fournisseur :
       c'est cette dernière qu'on lit sur un relevé ou une relance.
 
     Mêmes corrections que pour les factures clients : tri décroissant par défaut
@@ -2548,7 +2549,7 @@ async def dolibarr_list_proposals(
         return _format_error(exc)
 
 # ---------------------------------------------------------------------------
-# Tools — Tiers
+# Tools : Tiers
 # ---------------------------------------------------------------------------
 
 
@@ -2700,8 +2701,8 @@ async def dolibarr_add_contact(
 
     Confirmation utilisateur requise avant exécution.
 
-    Anti-doublon : vérifie l'email (1) sur le tiers cible — doublon strict — et
-    (2) sur tous les autres tiers — doublon potentiel (même personne rattachée
+    Anti-doublon : vérifie l'email (1) sur le tiers cible : doublon strict : et
+    (2) sur tous les autres tiers : doublon potentiel (même personne rattachée
     ailleurs). Dans les deux cas, AUCUN contact n'est créé et l'id existant est
     renvoyé. Passer force=True pour créer malgré tout (ex. même personne
     légitimement contact de deux sociétés).
@@ -2843,7 +2844,7 @@ async def dolibarr_create_thirdparty(
 
         # Anti-doublon : nom identique (insensible à la casse) ou email identique.
         # En cas d'erreur de recherche (ex. 404 "no third parties found"), on
-        # n'empêche pas la création — le garde-fou est best-effort.
+        # n'empêche pas la création : le garde-fou est best-effort.
         if not force:
             try:
                 clauses = [f"(t.nom:like:'{_sf_escape(name)}')"]
@@ -2938,6 +2939,7 @@ async def dolibarr_update_thirdparty(
     note_private: str = "",
     note_public: str = "",
     status: int = -1,
+    cond_reglement_id: Annotated[int, Field(strict=True, gt=0)] | None = None,
 ) -> str:
     """Modifie un tiers existant dans Dolibarr.
 
@@ -2952,10 +2954,27 @@ async def dolibarr_update_thirdparty(
     - fournisseur : 0 ou 1
     - note_private, note_public
     - status : 0=fermé, 1=ouvert
+    - cond_reglement_id : entier strictement positif du dictionnaire des conditions
+      de règlement ; None conserve la condition existante.
+
+    Avec cond_reglement_id, le tiers est relu après toute tentative de PUT,
+    même en cas d'erreur. write_state distingue accepted, rejected et unknown ;
+    write_may_have_succeeded indique si l'écriture a pu passer. readback contient
+    les champs relus, verified compare la condition demandée à celle relue.
+    success exige un PUT accepté et cette comparaison réussie. Une erreur de
+    relecture ne signifie jamais que l'écriture a échoué. Aucun rejeu automatique.
     """
     try:
         if not thirdparty_id:
             return "Veuillez fournir un thirdparty_id."
+        if cond_reglement_id is not None and (
+            type(cond_reglement_id) is not int or cond_reglement_id <= 0
+        ):
+            return _dumps({
+                "success": False, "write_state": "not_attempted",
+                "write_may_have_succeeded": False, "verified": False, "readback": None,
+                "error": "cond_reglement_id doit être un entier strictement positif.",
+            })
 
         data: dict[str, Any] = {}
         if name:
@@ -2984,9 +3003,56 @@ async def dolibarr_update_thirdparty(
             data["note_public"] = note_public
         if status >= 0:
             data["status"] = str(status)
+        if cond_reglement_id is not None:
+            data["cond_reglement_id"] = cond_reglement_id
 
         if not data:
             return "Aucun champ à mettre à jour."
+
+        if cond_reglement_id is not None:
+            response: dict[str, Any] = {
+                "success": False, "thirdparty_id": thirdparty_id,
+                "updated_fields": list(data.keys()), "write_state": "unknown",
+                "write_may_have_succeeded": True, "verified": False, "readback": None,
+            }
+            try:
+                await api_put(f"thirdparties/{thirdparty_id}", data)
+                response["write_state"] = "accepted"
+            except Exception as write_exc:
+                response["error"] = _format_error(write_exc)
+                status_code = (
+                    write_exc.response.status_code if isinstance(write_exc, httpx.HTTPStatusError)
+                    else getattr(write_exc, "status", 0)
+                )
+                if 300 <= status_code < 500:
+                    response["write_state"] = "rejected"
+                    response["write_may_have_succeeded"] = False
+            try:
+                tp = await api_get(f"thirdparties/{thirdparty_id}")
+                if not isinstance(tp, dict) or str(tp.get("id")) != str(thirdparty_id):
+                    raise ValueError("Le tiers relu est absent ou son identifiant ne correspond pas.")
+                readback = {key: tp.get(key) for key in data}
+                response["readback"] = readback
+                dictionnaire = await _payment_terms()
+                readback.update(_payment_term_values(tp, dictionnaire))
+                if dictionnaire["error"]:
+                    readback["payment_terms_unavailable"] = dictionnaire["error"]
+                raw_id = _first_present(tp, "cond_reglement_id", "cond_reglement", "fk_cond_reglement")
+                readback["cond_reglement_id_raw"] = raw_id
+                response["verified"] = str(raw_id) == str(cond_reglement_id)
+                if not response["verified"]:
+                    response["payment_terms_warning"] = (
+                        "La condition relue ne correspond pas à la condition demandée."
+                    )
+            except Exception as read_exc:
+                response["refetch_warning"] = _format_error(read_exc)
+            response["success"] = response["write_state"] == "accepted" and response["verified"]
+            response["message"] = (
+                f"Condition de règlement du tiers {thirdparty_id} écrite et relue."
+                if response["success"] else
+                "Mise à jour non confirmée : consulter write_state, readback et les avertissements avant tout nouvel essai."
+            )
+            return _dumps(response)
 
         await api_put(f"thirdparties/{thirdparty_id}", data)
 
@@ -3183,11 +3249,11 @@ async def dolibarr_delete_contact(contact_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Tickets
+# Tools : Tickets
 # ---------------------------------------------------------------------------
 
 #: Libellés FR des statuts de ticket (colonne llx_ticket.fk_statut), d'après les
-#: constantes Ticket::STATUS_* de Dolibarr — les codes 4 et 6 n'existent pas.
+#: constantes Ticket::STATUS_* de Dolibarr : les codes 4 et 6 n'existent pas.
 #: L'API REST renvoie status_label=null (libellé calculé par l'UI, jamais
 #: sérialisé) : on le reconstitue côté connecteur.
 TICKET_STATUS_LABELS = {
@@ -3450,13 +3516,13 @@ async def dolibarr_create_ticket(
 
     Confirmation utilisateur requise avant exécution.
 
-    ATTENTION — la création d'un ticket n'est pas forcément une écriture
+    ATTENTION : la création d'un ticket n'est pas forcément une écriture
     isolée. Un module branché sur le trigger Dolibarr TICKET_CREATE peut
     écrire ailleurs dans la foulée, et le connecteur ne peut pas l'en
     empêcher : c'est du code serveur, déclenché par l'écriture elle-même.
     Cas connu sur les instances inno³ (module maison `supportcredits`) :
     créer un ticket rattaché à un tiers DÉBITE un carnet de support de ce
-    client — le plus ancien carnet actif, non périmé, ayant assez de solde.
+    client : le plus ancien carnet actif, non périmé, ayant assez de solde.
     Le comportement dépend de deux réglages du module, côté serveur :
     SUPPORTCREDITS_CONSUME_MODE (`auto` débite, `suggest` et `manual` non) et
     SUPPORTCREDITS_CONSUME_TIMING (`create` débite ici, `close` à la clôture).
@@ -3481,7 +3547,7 @@ async def dolibarr_create_ticket(
 
     Retourne l'ID et la référence du ticket créé, plus :
     - `side_effects_checked` : le connecteur a-t-il su REGARDER les effets de
-      bord. Faux quand aucune extension ne lui apprend à les lire — « je n'ai
+      bord. Faux quand aucune extension ne lui apprend à les lire : « je n'ai
       pas regardé » n'est pas « il ne s'est rien passé » ;
     - `side_effects` : ce qui a été écrit au passage, une entrée par module.
       Sur une instance `supportcredits`, l'entrée nomme le carnet débité, les
@@ -3561,7 +3627,7 @@ async def dolibarr_close_ticket(
     L'API REST Dolibarr n'a pas d'endpoint de clôture : l'outil passe par
     PUT /tickets/{id}. Piège couvert : Ticket::update() écrit la colonne
     fk_statut depuis $this->status (Dolibarr récents), si bien qu'un PUT ne
-    portant que fk_statut répond 200 sans rien écrire — on envoie les deux
+    portant que fk_statut répond 200 sans rien écrire : on envoie les deux
     clés puis on RELIT le ticket pour vérifier que le statut a changé.
     Pour un statut 8 ou 9, on reproduit Ticket::close() : date_close = now
     et progress = 100.
@@ -3773,7 +3839,7 @@ async def dolibarr_update_ticket(
 async def dolibarr_delete_ticket(ticket_id: int = 0, ref: str = "") -> str:
     """Supprime définitivement un ticket de support (DELETE /tickets/{id}).
 
-    Confirmation utilisateur requise avant exécution — suppression
+    Confirmation utilisateur requise avant exécution : suppression
     IRRÉVERSIBLE, fil de messages compris. Pour clore proprement un ticket,
     préférer dolibarr_close_ticket.
 
@@ -3802,7 +3868,7 @@ async def dolibarr_delete_ticket(ticket_id: int = 0, ref: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Résolution et synthèse
+# Tools : Résolution et synthèse
 # ---------------------------------------------------------------------------
 
 
@@ -3964,7 +4030,7 @@ REVENUE_SCAN_PAGE = 100
 #: Garde-fou de boucle : 50 pages = 5 000 factures sur la période demandée.
 REVENUE_SCAN_MAX_PAGES = 50
 #: Plafond d'écritures bancaires inspectées pour le CA encaissé. Au-delà, la
-#: réponse porte `truncated: true` — jamais de troncature muette.
+#: réponse porte `truncated: true` : jamais de troncature muette.
 REVENUE_CASH_SCAN_MAX = 400
 
 
@@ -4079,17 +4145,17 @@ async def dolibarr_get_revenue_summary(
     Paramètres :
     - year  : année (défaut : année en cours)
     - month : mois 1-12 (défaut : mois en cours)
-    - basis : assiette du calcul, et c'est le paramètre déterminant —
+    - basis : assiette du calcul, et c'est le paramètre déterminant :
         * 'emises' (défaut) : toutes les factures VALIDÉES, payées ou non
           (fk_statut 1 et 2), comptées à leur date de facture. C'est le CA
           commercial : une facture émise dans le mois y figure le jour de son
           émission, sans attendre son encaissement. Le total est NET des
-          avoirs — dont le montant est négatif — et le détail est rendu à part
+          avoirs : dont le montant est négatif : et le détail est rendu à part
           (`month_gross_ht`, `month_credit_notes_ht`, `month_nb_credit_notes`)
           pour qu'une facture annulée par un avoir de même montant se lise, au
           lieu de sembler avoir disparu.
         * 'encaissees' : les encaissements clients réellement constatés en
-          banque sur la période, à leur date d'opération. Montants TTC — ce
+          banque sur la période, à leur date d'opération. Montants TTC : ce
           sont des mouvements de compte, pas des bases HT.
       L'assiette retenue est toujours rappelée dans la réponse (`basis`,
       `basis_label`) : les deux chiffres sont légitimes et ne se comparent pas.
@@ -4099,7 +4165,7 @@ async def dolibarr_get_revenue_summary(
 
     'encaissees' reconstruit les encaissements depuis le journal bancaire, faute
     de route REST listant les règlements : les comptes clos et les caisses sont
-    exclus, et le balayage est plafonné à REVENUE_CASH_SCAN_MAX écritures — la
+    exclus, et le balayage est plafonné à REVENUE_CASH_SCAN_MAX écritures : la
     réponse porte alors `truncated: true`.
     """
     from datetime import datetime
@@ -4223,7 +4289,7 @@ def _month_last_day(year: int, month: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Actions / Agenda
+# Tools : Actions / Agenda
 # ---------------------------------------------------------------------------
 
 
@@ -4301,7 +4367,7 @@ async def dolibarr_list_actions_open(
         return _format_error(exc)
 
 # ---------------------------------------------------------------------------
-# Tools — Dashboard
+# Tools : Dashboard
 # ---------------------------------------------------------------------------
 
 
@@ -4321,7 +4387,7 @@ async def dolibarr_dashboard() -> str:
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Projets ouverts — ne charger que id+ref pour compter
+    # Projets ouverts : ne charger que id+ref pour compter
     try:
         projects = await api_get("projects", {
             "sqlfilters": "(t.fk_statut:=:1)",
@@ -4332,7 +4398,7 @@ async def dolibarr_dashboard() -> str:
     except Exception as exc:
         dashboard["projects_open"] = f"Erreur : {exc}"
 
-    # Factures impayées — ne charger que les champs nécessaires au calcul
+    # Factures impayées : ne charger que les champs nécessaires au calcul
     try:
         invoices = await api_get("invoices", {
             "sqlfilters": "(t.fk_statut:=:1)",
@@ -4381,7 +4447,7 @@ async def dolibarr_dashboard() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Projets (création/modification)
+# Tools : Projets (création/modification)
 # ---------------------------------------------------------------------------
 
 
@@ -4665,7 +4731,7 @@ async def dolibarr_delete_project(project_id: int) -> str:
                     "dolibarr_body": body,
                     "diagnostic": (
                         "HTTP 500 sur DELETE /projects/{id}. Causes typiques :\n"
-                        "  1. FK enfant non gérée par Project::delete() — Dolibarr abandonne.\n"
+                        "  1. FK enfant non gérée par Project::delete() : Dolibarr abandonne.\n"
                         "  2. Trigger PROJECT_DELETE custom qui lève une exception PHP.\n"
                         "  3. Projet PROV laissé à mi-chemin (renommage cassé).\n"
                         "Étapes recommandées :\n"
@@ -4680,7 +4746,7 @@ async def dolibarr_delete_project(project_id: int) -> str:
                         f"(SELECT rowid FROM llx_projet_task WHERE fk_projet={project_id});\n"
                         "     SELECT * FROM llx_ecm_files WHERE filepath LIKE 'projet/%' "
                         f"AND src_object_id={project_id};\n"
-                        "  c. En dernier recours (irréversible — backup DB avant !) :\n"
+                        "  c. En dernier recours (irréversible : backup DB avant !) :\n"
                         f"     DELETE FROM llx_projet_extrafields WHERE fk_object={project_id};\n"
                         f"     DELETE FROM llx_element_contact WHERE element_id={project_id} "
                         "AND element_type='project';\n"
@@ -4712,7 +4778,7 @@ async def dolibarr_create_proposal(
     - thirdparty_id : ID du tiers (obligatoire)
     - title         : titre de la proposition (optionnel)
     - project_id    : ID du projet associé (optionnel)
-    - date          : date de création (format YYYY-MM-DD, optionnel — défaut : aujourd'hui)
+    - date          : date de création (format YYYY-MM-DD, optionnel : défaut : aujourd'hui)
     - date_validity : date de fin de validité (format YYYY-MM-DD, optionnel).
                       Sans ce paramètre, Dolibarr peut afficher 15/02/1970
                       (bug timestamp : duree_validite*86400 interprété comme epoch)
@@ -4798,7 +4864,7 @@ async def dolibarr_add_proposal_lines(
         if not proposal_id:
             return "Le proposal_id est obligatoire."
         if not lines:
-            return "La liste lines est vide — aucune ligne à ajouter."
+            return "La liste lines est vide : aucune ligne à ajouter."
 
         added = []
         total_ht = 0.0
@@ -4826,7 +4892,7 @@ async def dolibarr_add_proposal_lines(
             # [line_object], PAS un objet nu.
             #
             # Cause racine (api_proposals.class.php::postLines) :
-            #   foreach ($request_data as $TData) — itère sur les clés du dict
+            #   foreach ($request_data as $TData) : itère sur les clés du dict
             #   → iter 1 : $TData = valeur de "desc" (string) → foreach() warning, 0 ligne
             #   → iter 2..N : $TData = scalaire → empty($TData[0]) = true → wrappé en array
             #                 → (object)$scalaire → stdClass vide → addline(null,...) → ligne vide
@@ -4850,7 +4916,7 @@ async def dolibarr_add_proposal_lines(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Détail facture / propal + validate + download PDF
+# Tools : Détail facture / propal + validate + download PDF
 # ---------------------------------------------------------------------------
 
 
@@ -5299,14 +5365,14 @@ async def dolibarr_update_invoice(
 
     Paramètres :
     - invoice_id   : ID de la facture (obligatoire)
-    - project_id   : rattacher la facture à ce projet — champ API `fk_project`.
+    - project_id   : rattacher la facture à ce projet : champ API `fk_project`.
                      0 = ne pas toucher au lien projet.
     - ref_customer : référence client (champ API `ref_client`)
     - note_public  : note publique
     - note_private : note privée
     - date_due     : date limite de règlement (format YYYY-MM-DD)
 
-    Statut — vérifié en production le 11/08/2026 sur FA2608-0939 (Dolibarr
+    Statut : vérifié en production le 11/08/2026 sur FA2608-0939 (Dolibarr
     23.0.0) : un PUT sur une facture **validée non payée** (fk_statut=1,
     paye=0) renvoie HTTP 200 et le champ est persisté. `Facture::update()`
     écrit `fk_projet` sans aucun garde de statut, et `api_invoices::put()`
@@ -5315,12 +5381,12 @@ async def dolibarr_update_invoice(
 
     Effet de bord mesuré sur ce même essai : `fk_user_modif` prend l'id de
     l'utilisateur de la clé API et le trigger FACTURE_MODIFY se déclenche.
-    Aucun autre champ ne bouge — `Facture::update()` réécrit toute la ligne,
+    Aucun autre champ ne bouge : `Facture::update()` réécrit toute la ligne,
     mais à partir de l'objet relu juste avant, donc à valeurs identiques.
 
     Piège d'interface, sans rapport avec l'API : dans `card.php`, le sélecteur
     de projet d'une facture **ne liste pas les projets fermés**. Un champ qui
-    paraît vide dans l'UI ne signifie donc pas « aucun projet rattaché » —
+    paraît vide dans l'UI ne signifie donc pas « aucun projet rattaché » :
     seule la valeur `fk_project` rendue ici fait foi.
 
     Retour JSON : success, invoice_id, ref, status, status_label, fk_project,
@@ -5445,7 +5511,7 @@ async def dolibarr_update_proposal(
 
     Paramètres :
     - proposal_id   : ID de la proposition (obligatoire)
-    - project_id    : rattacher la propal à ce projet — champ API `fk_project`.
+    - project_id    : rattacher la propal à ce projet : champ API `fk_project`.
                       0 = ne pas toucher au lien projet.
     - title         : titre/objet de la proposition (champ `titre`)
     - date          : date de la proposition (format YYYY-MM-DD)
@@ -5454,12 +5520,12 @@ async def dolibarr_update_proposal(
     - note_private  : note privée
     - ref_customer  : référence client (champ API `ref_client`)
 
-    Lien projet — vérifié en prod (Dolibarr 23.0.0) : l'API REST expose la
+    Lien projet : vérifié en prod (Dolibarr 23.0.0) : l'API REST expose la
     propriété `fk_project` (PAS `fk_projet`, qui est l'orthographe de la colonne
     SQL) ; `Propal::update()` persiste bien le lien. Un PUT {"fk_project":"258"}
     relu via GET renvoie fk_project="258".
 
-    Statut — l'update est autorisé quel que soit le statut : rattacher un projet
+    Statut : l'update est autorisé quel que soit le statut : rattacher un projet
     et éditer les notes restent possibles sur une propale *validée* (comme dans
     l'UI Dolibarr). Pour les propales validées/signées/facturées, Dolibarr peut
     cependant ignorer certains champs (dates, montants) ; la réponse relit la
@@ -5549,7 +5615,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
 
     Paramètres :
     - proposal_id : ID de la proposition à supprimer (obligatoire)
-    - force       : défaut False — seuls les BROUILLONS (statut 0) sont
+    - force       : défaut False : seuls les BROUILLONS (statut 0) sont
                     supprimables. Passer force=True pour supprimer malgré tout
                     une propale validée/signée/refusée/facturée (assumé par
                     l'appelant : liens commandes/factures potentiellement
@@ -5599,7 +5665,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
                     "proposal_id": proposal_id,
                     "error": "not_found",
                     "message": (
-                        f"Proposition {proposal_id} introuvable (404) — rien à supprimer."
+                        f"Proposition {proposal_id} introuvable (404) : rien à supprimer."
                     ),
                 })
             if get_exc.response.status_code in (401, 403):
@@ -5610,7 +5676,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
 
         # Garde-fou : seuls les brouillons sont supprimables, sauf force=True.
         # (Cohérent avec update/delete_proposal_line ; évite de détruire une
-        # propale engagée — validée/signée/facturée — sur un simple appel.)
+        # propale engagée : validée/signée/facturée : sur un simple appel.)
         if not force:
             if snapshot_error is not None or not snapshot:
                 return _dumps({
@@ -5680,7 +5746,7 @@ async def dolibarr_delete_proposal(proposal_id: int, force: bool = False) -> str
                         f"{proposal_id} AND targettype='propal';\n"
                         "     SELECT rowid FROM llx_propaldet WHERE fk_propal="
                         f"{proposal_id};\n"
-                        "  c. En dernier recours (irréversible — backup DB avant !) :\n"
+                        "  c. En dernier recours (irréversible : backup DB avant !) :\n"
                         f"     DELETE FROM llx_propal_extrafields WHERE fk_object={proposal_id};\n"
                         f"     DELETE FROM llx_propaldet WHERE fk_propal={proposal_id};\n"
                         f"     DELETE FROM llx_element_contact WHERE element_id={proposal_id} "
@@ -5723,7 +5789,7 @@ async def dolibarr_update_proposal_line(
     erreur. Repasser la propale en brouillon avant (UI : bouton « Modifier »),
     puis revalider.
 
-    Exemple — porter une remise de 15 % sur une ligne existante (au lieu d'une
+    Exemple : porter une remise de 15 % sur une ligne existante (au lieu d'une
     ligne de remise négative séparée) : fields={"remise_percent": 15}.
 
     Retourne : success, proposal_id, line_id, champs envoyés, et les totaux
@@ -5867,7 +5933,7 @@ async def dolibarr_set_proposal_draft(proposal_id: int) -> str:
     Confirmation utilisateur requise avant exécution.
 
     Nécessaire pour éditer/supprimer les lignes d'une propale déjà validée
-    (Dolibarr les verrouille sinon — voir dolibarr_update_proposal_line). Workflow
+    (Dolibarr les verrouille sinon : voir dolibarr_update_proposal_line). Workflow
     type pour corriger une ligne d'une propale validée :
       1. dolibarr_set_proposal_draft(id)            → statut 1→0
       2. dolibarr_update_proposal_line / dolibarr_delete_proposal_line
@@ -5965,11 +6031,11 @@ async def dolibarr_get_invoice_pdf_url(invoice_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools — Banque : comptes, écritures, rapprochement
+# Tools : Banque : comptes, écritures, rapprochement
 # ---------------------------------------------------------------------------
 
 #: Routes REST du module Banque (vérifiées sur api_bankaccounts.class.php 24.0.0).
-#: Attention : `BANK_LINE_ENDPOINT` n'est PAS imbriquée sous le compte — la route
+#: Attention : `BANK_LINE_ENDPOINT` n'est PAS imbriquée sous le compte : la route
 #: déclarée est `GET /bankaccounts/lines/{line_id}`, sans identifiant de compte.
 BANK_ACCOUNTS_ENDPOINT = "bankaccounts"
 BANK_ACCOUNT_ENDPOINT = "bankaccounts/{account_id}"
@@ -5981,10 +6047,10 @@ BANK_BALANCE_ENDPOINT = "bankaccounts/{account_id}/balance"
 PAYMENT_TYPES_ENDPOINT = "setup/dictionary/payment_types"
 PAYMENT_TERMS_ENDPOINT = "setup/dictionary/payment_terms"
 
-#: llx_bank_account.courant — Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
+#: llx_bank_account.courant : Account::TYPE_SAVINGS / TYPE_CURRENT / TYPE_CASH.
 BANK_ACCOUNT_TYPES = {"0": "épargne", "1": "compte courant", "2": "caisse"}
 BANK_ACCOUNT_TYPE_CASH = "2"
-#: llx_bank_account.clos — Account::STATUS_OPEN / STATUS_CLOSED.
+#: llx_bank_account.clos : Account::STATUS_OPEN / STATUS_CLOSED.
 BANK_ACCOUNT_STATUS = {"0": "ouvert", "1": "clos"}
 BANK_ACCOUNT_STATUS_OPEN = "0"
 
@@ -5992,7 +6058,7 @@ BANK_ACCOUNT_STATUS_OPEN = "0"
 #: n'est fournie. `GET /bankaccounts/{id}/lines` n'accepte NI limit NI page :
 #: Dolibarr instancie un AccountLine par ligne retournée, donc une requête sans
 #: borne basse relit tout l'historique du compte et finit en timeout. La fenêtre
-#: est renvoyée dans la réponse (`date_start`) — jamais appliquée en silence.
+#: est renvoyée dans la réponse (`date_start`) : jamais appliquée en silence.
 BANK_ENTRIES_DEFAULT_WINDOW_DAYS = 90
 
 #: Types de lien `llx_bank_url` qui désignent l'objet à l'origine de l'écriture.
@@ -6172,8 +6238,8 @@ def _format_bank_line(raw: dict) -> dict:
     """Formate une écriture bancaire (AccountLine) en dict lisible.
 
     `amount` est SIGNÉ dans llx_bank : positif = entrée d'argent (crédit),
-    négatif = sortie (débit). On expose les deux lectures — `amount` signé et
-    le couple `debit`/`credit` — parce qu'une erreur de signe sur une écriture
+    négatif = sortie (débit). On expose les deux lectures : `amount` signé et
+    le couple `debit`/`credit` : parce qu'une erreur de signe sur une écriture
     bancaire est silencieuse et coûteuse.
     """
     if not isinstance(raw, dict):
@@ -6245,8 +6311,8 @@ def _bank_date_filter(after: str = "", before: str = "", strict_after: bool = Fa
     """Construit le sqlfilters d'une plage de dates sur llx_bank.
 
     Piège : `GET /bankaccounts/{id}/lines` construit son SQL sur
-    `FROM llx_bank` SANS alias. Un critère préfixé `t.` — la forme employée
-    partout ailleurs dans ce serveur — produit un « unknown table t » et un
+    `FROM llx_bank` SANS alias. Un critère préfixé `t.` : la forme employée
+    partout ailleurs dans ce serveur : produit un « unknown table t » et un
     HTTP 503. Les critères doivent donc porter le nom de colonne nu.
     """
     clauses = []
@@ -6499,7 +6565,7 @@ async def _bank_account_detail(account_id: int) -> dict:
 
     `GET /bankaccounts/{id}` ne renseigne PAS `balance` : seule la route de
     liste appelle `Account::solde(1)`. L'objet rendu porte donc la valeur par
-    défaut de la classe, soit 0 — trompeur au possible dans une réponse dont
+    défaut de la classe, soit 0 : trompeur au possible dans une réponse dont
     l'objet affiché est justement le compte relu. On complète explicitement.
     """
     account = _format_bank_account(await api_get(BANK_ACCOUNT_ENDPOINT.format(account_id=account_id)))
@@ -6535,7 +6601,7 @@ async def dolibarr_get_bank_balance(account_id: int, date: str = "") -> str:
     Dolibarr n'expose que le solde courant (`GET /bankaccounts/{id}/balance`,
     somme des écritures dont la date d'opération est passée). Pour une autre
     date, ce solde est reporté en ajoutant ou retranchant les seules écritures
-    situées entre cette date et aujourd'hui — jamais en resommant tout
+    situées entre cette date et aujourd'hui : jamais en resommant tout
     l'historique, que l'API ne sait pas agréger.
 
     Retourne : solde, date d'arrêté, nombre d'écritures prises dans le report
@@ -6612,13 +6678,13 @@ async def dolibarr_create_bank_entry(
     - account_id   : ID du compte (obligatoire)
     - date         : date d'opération (YYYY-MM-DD, obligatoire)
     - label        : libellé de l'écriture (obligatoire)
-    - amount       : montant, TOUJOURS positif — le sens vient de `direction`
+    - amount       : montant, TOUJOURS positif : le sens vient de `direction`
     - direction    : 'credit' = entrée d'argent, 'debit' = sortie
     - payment_type : mode de règlement, code ou id (VIR, CHQ, LIQ, CB, PRE…)
     - num_payment  : numéro de chèque / référence de règlement (optionnel)
     - project_id   : projet à rattacher (optionnel)
 
-    Sens du montant — le piège à ne pas rejouer. Dans llx_bank le montant est
+    Sens du montant : le piège à ne pas rejouer. Dans llx_bank le montant est
     SIGNÉ : positif = crédit (entrée), négatif = débit (sortie). Le formulaire
     `compta/bank/various_payment/card.php` expose ce signe via un champ `sens`
     dont la valeur 1 vaut Crédit et 0 Débit (vérifié en production le
@@ -6626,13 +6692,13 @@ async def dolibarr_create_bank_entry(
     `sign = ($sens == '0' ? -1 : 1)`). Cet outil ne prend donc jamais un montant
     négatif : il refuse, plutôt que de risquer une double négation muette.
 
-    Écriture posée via `POST /bankaccounts/{id}/lines` — l'API REST expose la
+    Écriture posée via `POST /bankaccounts/{id}/lines` : l'API REST expose la
     route, aucun formulaire web n'est sollicité. Nuance à connaître : cette
     route appelle `Account::addline()` et crée une ligne de journal bancaire,
     pas un objet « paiement divers » (llx_payment_various). L'écriture apparaît
     donc au relevé et dans le solde, mais pas dans la liste des paiements
     divers, et elle ne porte pas de ventilation comptable. Le rattachement au
-    projet est posé comme lien `llx_bank_url` — le seul emplacement dont
+    projet est posé comme lien `llx_bank_url` : le seul emplacement dont
     dispose une ligne de journal, qui n'a pas de champ projet.
 
     Retourne l'écriture RELUE depuis Dolibarr, avec le solde du compte avant et
@@ -6688,7 +6754,7 @@ async def dolibarr_create_bank_entry(
         if not line_id:
             return _dumps({
                 "success": False,
-                "message": "Dolibarr n'a pas renvoyé d'identifiant d'écriture — rien de fiable à relire.",
+                "message": "Dolibarr n'a pas renvoyé d'identifiant d'écriture : rien de fiable à relire.",
             })
 
         project_warning: str | None = None
@@ -6771,7 +6837,7 @@ async def dolibarr_delete_bank_entry(account_id: int, entry_id: int) -> str:
 
     Deux refus systématiques, parce que la ligne bancaire n'est pas toujours
     l'objet d'origine :
-    1. une écriture RAPPROCHÉE n'est pas supprimée — elle est adossée à un
+    1. une écriture RAPPROCHÉE n'est pas supprimée : elle est adossée à un
        relevé, et la retirer désaccorde le rapprochement sans prévenir ;
     2. une écriture PORTANT UN LIEN de règlement (facture client ou
        fournisseur, paiement divers, virement interne, prélèvement…) n'est pas
@@ -6779,7 +6845,7 @@ async def dolibarr_delete_bank_entry(account_id: int, entry_id: int) -> str:
        de banque. C'est le règlement qu'il faut annuler, depuis Dolibarr.
 
     Restent donc supprimables les écritures saisies directement, typiquement
-    celles créées par dolibarr_create_bank_entry — dont les écritures de test.
+    celles créées par dolibarr_create_bank_entry : dont les écritures de test.
 
     Retourne le solde du compte avant et après : la variation doit être
     exactement l'opposé du montant supprimé.
@@ -6884,11 +6950,11 @@ async def dolibarr_set_bank_statement(
     le formulaire est donc contraint, et il est explicite : il exige
     DOLIBARR_WEB_LOGIN et DOLIBARR_WEB_PASSWORD dans la configuration du
     connecteur (compte disposant du droit « banque : rapprocher »). Sans eux,
-    l'outil refuse — il ne prétend jamais avoir rapproché.
+    l'outil refuse : il ne prétend jamais avoir rapproché.
 
     Garde-fous, dans l'ordre :
     1. le compte doit être rapprochable (`rappro` actif, hors caisse, non clos)
-       — sinon échec explicite, sans aucune écriture tentée ;
+       : sinon échec explicite, sans aucune écriture tentée ;
     2. chaque écriture doit appartenir à ce compte ;
     3. après le POST, chaque écriture est RELUE par l'API REST et son
        `num_releve` comparé à la valeur demandée. Un formulaire qui change de
@@ -7021,7 +7087,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
     (1 = rapprochement actif). Cet outil écrit `rappro` via
     `PUT /bankaccounts/{id}` : `enabled=True` pose bien rappro=1.
 
-    Retourne le compte RELU après écriture, `reconcilable` compris — un compte
+    Retourne le compte RELU après écriture, `reconcilable` compris : un compte
     de type caisse ou clos reste non rapprochable même avec rappro=1, et c'est
     visible dans la réponse plutôt que découvert au rapprochement suivant.
     """
@@ -7048,7 +7114,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
                 f"{account_id} ({after.get('label')})."
                 if persisted else
                 f"Le PUT a répondu sans erreur mais rappro vaut toujours "
-                f"{after.get('rappro')} après relecture — écriture non prise en compte "
+                f"{after.get('rappro')} après relecture : écriture non prise en compte "
                 "(droit « banque : configurer » manquant ?)."
             ),
         })
@@ -7058,7 +7124,7 @@ async def dolibarr_toggle_bank_reconciliation(account_id: int, enabled: bool) ->
 
 
 # ---------------------------------------------------------------------------
-# Tools — Règlements et lettrage
+# Tools : Règlements et lettrage
 # ---------------------------------------------------------------------------
 
 INVOICE_PAYMENTS_ENDPOINT = "invoices/{invoice_id}/payments"
@@ -7069,7 +7135,7 @@ SUPPLIER_INVOICE_LINES_ENDPOINT = "supplierinvoices/{invoice_id}/lines"
 
 #: `SupplierInvoices::postLine()` lit ses arguments en propriétés d'objet sans
 #: aucun `isset()`. Une clé absente déclenche un warning PHP et arrive en null
-#: dans `addline()` — la ligne est créée, mais amputée. On envoie donc toujours
+#: dans `addline()` : la ligne est créée, mais amputée. On envoie donc toujours
 #: le jeu complet, avec des valeurs neutres explicites.
 SUPPLIER_LINE_DEFAULTS: dict[str, Any] = {
     "description": "",
@@ -7102,7 +7168,7 @@ def _format_payment(raw: dict) -> dict:
     `fk_bank_line` est le rowid de l'écriture bancaire : c'est la clé du
     lettrage, celle qui relie une facture à une ligne de relevé.
     Le même tableau porte aussi les avoirs et acomptes imputés, qui n'ont pas
-    d'écriture bancaire — d'où `has_bank_line`, pour ne pas les confondre.
+    d'écriture bancaire : d'où `has_bank_line`, pour ne pas les confondre.
     """
     if not isinstance(raw, dict):
         return {}
@@ -7160,7 +7226,7 @@ def _payment_key(payment: dict) -> tuple:
     L'API rend un identifiant de paiement, jamais l'écriture bancaire associée :
     le règlement créé se retrouve par différence avec la liste lue juste avant.
     L'identité ne peut pas se réduire à `bank_line_id`, absent des avoirs et
-    acomptes imputés — deux d'entre eux se confondraient.
+    acomptes imputés : deux d'entre eux se confondraient.
     """
     return (
         payment.get("ref"),
@@ -7201,7 +7267,7 @@ async def dolibarr_list_invoice_payments(
 
     Retourne pour chaque règlement : date, montant, mode, numéro, rowid de
     l'écriture bancaire (`bank_line_id`) et, quand cette écriture existe, le
-    compte bancaire mouvementé — savoir qu'une facture est payée ne dit pas sur
+    compte bancaire mouvementé : savoir qu'une facture est payée ne dit pas sur
     quelle ligne de relevé elle a été lettrée.
 
     Le tableau inclut aussi les avoirs et acomptes imputés sur la facture :
@@ -7351,7 +7417,7 @@ async def dolibarr_add_supplier_invoice_payment(
     porte un montant négatif, et c'est le comportement attendu.
 
     Ici la route nominale `POST /supplierinvoices/{id}/payments` accepte bien un
-    `amount` — contrairement à son équivalent client. Elle est donc employée
+    `amount` : contrairement à son équivalent client. Elle est donc employée
     telle quelle, sans passer par une route distribuée.
 
     Retourne le règlement RELU depuis la facture, avec le solde bancaire avant
@@ -7619,7 +7685,7 @@ async def dolibarr_create_supplier_invoice(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Facturation client : création, lignes, reprise d'une propale
+# Tools : Facturation client : création, lignes, reprise d'une propale
 # ---------------------------------------------------------------------------
 
 INVOICES_ENDPOINT = "invoices"
@@ -7627,7 +7693,7 @@ INVOICE_LINES_ENDPOINT = "invoices/{invoice_id}/lines"
 INVOICE_LINE_ENDPOINT = "invoices/{invoice_id}/lines/{line_id}"
 
 #: `Invoices::postLine()` déréférence chacun de ses champs en propriété d'objet
-#: sans `isset()` — même piège que côté fournisseur. Une clé absente arrive en
+#: sans `isset()` : même piège que côté fournisseur. Une clé absente arrive en
 #: null dans `Facture::addline()` : la ligne est créée, mais amputée, et sans
 #: erreur. Le jeu ci-dessous reprend l'exemple de charge utile documenté en
 #: amont, avec des valeurs neutres explicites.
@@ -7667,7 +7733,7 @@ def _line_number(line: dict, keys: "tuple[str, ...]", default: float) -> float:
 
     Une clé PRÉSENTE mais nulle vaut « absente » : les lignes recopiées d'un
     autre document portent volontiers `tva_tx: None`, et un `float(None)` y
-    ferait échouer toute la ligne — donc une facture vide, assortie d'un
+    ferait échouer toute la ligne : donc une facture vide, assortie d'un
     avertissement, là où l'appelant attend une reprise fidèle.
     """
     for key in keys:
@@ -7827,7 +7893,7 @@ async def dolibarr_add_invoice_lines(invoice_id: int, lines: list[dict]) -> str:
         if not invoice_id:
             return "Veuillez fournir un invoice_id."
         if not lines:
-            return "La liste lines est vide — aucune ligne à ajouter."
+            return "La liste lines est vide : aucune ligne à ajouter."
 
         is_draft, status_label = await _invoice_is_draft(invoice_id)
         if not is_draft:
@@ -7974,7 +8040,7 @@ async def dolibarr_delete_invoice(invoice_id: int, supplier: bool = False) -> st
     une mise en abandon depuis Dolibarr.
 
     Retourne la confirmation, et vérifie par relecture que l'objet a bien
-    disparu — un DELETE accepté sans effet est signalé comme un échec.
+    disparu : un DELETE accepté sans effet est signalé comme un échec.
     """
     try:
         if not invoice_id:
@@ -8093,7 +8159,7 @@ async def dolibarr_create_invoice_from_proposal(
     proposition. Le connecteur relit donc la propale et recopie tiers, projet,
     référence client et lignes une à une. Conséquence à connaître : les lignes
     sont recréées, pas déplacées, et la facture est liée à la propale via
-    `linked_objects` — le lien remonte dans l'onglet « Éléments liés ».
+    `linked_objects` : le lien remonte dans l'onglet « Éléments liés ».
 
     Retourne la facture créée (brouillon), relue avec ses lignes.
     """
@@ -8175,7 +8241,7 @@ async def dolibarr_create_invoice_from_proposal(
         elif report.get("total_ht") != report.get("proposal_total_ht"):
             report["total_warning"] = (
                 f"Total HT facture ({report.get('total_ht')}) différent du total de la "
-                f"proposition ({report.get('proposal_total_ht')}) — remises ou arrondis à vérifier."
+                f"proposition ({report.get('proposal_total_ht')}) : remises ou arrondis à vérifier."
             )
 
         if mark_proposal_invoiced:
@@ -8195,13 +8261,13 @@ async def dolibarr_create_invoice_from_proposal(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Pièces jointes et génération de PDF
+# Tools : Pièces jointes et génération de PDF
 # ---------------------------------------------------------------------------
 
 #: `fetchObjectByElement()`, qui résout l'objet destinataire côté Dolibarr,
 #: raisonne en NOMS D'ÉLÉMENT internes, pas en noms de module REST. Les alias
 #: lisibles annoncés dans la documentation de l'API ('supplier_invoice') n'y
-#: sont pas reconnus et produisent un 404 — vérifié en production le
+#: sont pas reconnus et produisent un 404 : vérifié en production le
 #: 31/08/2026 sur SI2603-0085, facture fournisseur pourtant validée.
 DOCUMENT_MODULE_ALIASES = {
     "supplier_invoice": "facture_fournisseur",
@@ -8238,7 +8304,7 @@ async def dolibarr_list_documents(
     avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
-    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+    - module    : type d'objet : 'invoice', 'supplier_invoice', 'proposal',
                   'order', 'project', 'project_task', 'thirdparty', 'member'…
     - object_id : ID de l'objet (fournir object_id OU ref)
     - ref       : référence de l'objet (ex. 'FA2608-0939')
@@ -8320,7 +8386,7 @@ async def dolibarr_upload_document(
 
     Paramètres :
     - file_path : chemin du fichier SUR LA MACHINE qui exécute le connecteur
-    - module    : type d'objet — 'invoice', 'supplier_invoice', 'proposal',
+    - module    : type d'objet : 'invoice', 'supplier_invoice', 'proposal',
                   'order', 'project', 'project_task', 'expensereport'…
     - ref       : référence de l'objet destinataire (ex. 'SI2608-0012'). C'est
                   elle qui détermine le sous-dossier de stockage.
@@ -8335,7 +8401,7 @@ async def dolibarr_upload_document(
     message que rien ne rattache au fichier envoyé.
 
     Retourne le nom stocké et le contenu de la liste des pièces jointes après
-    envoi — la vérification que le fichier est bien arrivé.
+    envoi : la vérification que le fichier est bien arrivé.
     """
     try:
         import base64
@@ -8372,7 +8438,7 @@ async def dolibarr_upload_document(
         })
 
         # Relecture : c'est elle qui distingue un dépôt réel d'un POST accepté
-        # sans effet. Elle peut échouer sans que le dépôt ait échoué — on le dit
+        # sans effet. Elle peut échouer sans que le dépôt ait échoué : on le dit
         # alors, plutôt que de rendre un `documents_after` nul et muet.
         listed, check_note = None, None
         if stored_ref:
@@ -8471,7 +8537,7 @@ async def dolibarr_build_document(
 
 
 # ---------------------------------------------------------------------------
-# Tools — Référentiels (utilisateurs, produits, modes de règlement)
+# Tools : Référentiels (utilisateurs, produits, modes de règlement)
 # ---------------------------------------------------------------------------
 
 USERS_ENDPOINT = "users"
@@ -8615,7 +8681,7 @@ async def dolibarr_list_payment_types(
 
     Les deux formes servent : les outils de règlement attendent l'identifiant,
     les écritures bancaires attendent le code. Le connecteur accepte l'une ou
-    l'autre partout et convertit — cet outil sert à savoir ce qui existe sur
+    l'autre partout et convertit : cet outil sert à savoir ce qui existe sur
     l'instance, dont la liste est configurable.
     """
     try:
@@ -8627,7 +8693,7 @@ async def dolibarr_list_payment_types(
         return _format_error(exc)
 
 # ---------------------------------------------------------------------------
-# Tools — Trésorerie : prévisionnel, virements internes, relevés
+# Tools : Trésorerie : prévisionnel, virements internes, relevés
 # ---------------------------------------------------------------------------
 
 BANK_TRANSFER_ENDPOINT = "bankaccounts/transfer"
@@ -8656,7 +8722,7 @@ async def dolibarr_cash_forecast(horizon_days: int = 90, include_supplier: bool 
     déjà en retard y sont comptées à l'échéance dépassée, donc immédiatement.
 
     Le reste à payer vient de `remaintopay` quand Dolibarr le fournit, et du
-    total TTC sinon — un règlement partiel non reflété gonflerait la prévision.
+    total TTC sinon : un règlement partiel non reflété gonflerait la prévision.
     """
     try:
         from datetime import datetime
@@ -8880,13 +8946,13 @@ async def dolibarr_list_bank_statements(
     Paramètres :
     - account_id : ID du compte (obligatoire)
     - date_start : début de la période inspectée (YYYY-MM-DD). Par défaut,
-      365 jours en arrière — l'API ne sait pas agréger, chaque écriture de la
+      365 jours en arrière : l'API ne sait pas agréger, chaque écriture de la
       période est relue.
     - date_end   : fin de la période inspectée (YYYY-MM-DD, optionnel)
 
     Retourne, par numéro de relevé : nombre d'écritures, première et dernière
     date, total mouvementé. Plus `unassigned`, le compte des écritures encore
-    sans relevé — celles que dolibarr_set_bank_statement reste à traiter.
+    sans relevé : celles que dolibarr_set_bank_statement reste à traiter.
     """
     try:
         if not account_id:

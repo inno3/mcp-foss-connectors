@@ -1,5 +1,16 @@
 # Historique Dolibarr
 
+## 1.8.4 - 2026-10-17
+
+- `dolibarr_update_thirdparty` accepte `cond_reglement_id`, entier strictement
+  positif, validé avant tout appel REST y compris dans le schéma MCP.
+- Avec ce paramètre, relecture du tiers après toute tentative d'écriture :
+  état du PUT, possibilité d'écriture, valeur brute et condition résolue rendus
+  séparément. Une erreur ou une valeur différente ne devient pas un succès.
+  Aucun rejeu de PUT. Les autres paramètres conservent leur comportement.
+- `dolibarr_get_thirdparty` conserve la lecture de la condition et du libellé,
+  vérifiée par les tests de l'aller-retour.
+
 ## 1.8.3 - 2026-10-17
 
 - Conserve les métadonnées d'export présentes dans main avant la reprise des

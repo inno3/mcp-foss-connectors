@@ -3,9 +3,29 @@
 MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolibarr **16+**). Projects, tasks, time logging, third parties, contacts, customer and supplier invoicing, proposals, bank accounts, payment settlement, cash forecasting, attachments and support tickets.
 
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
-environment variables — no host, login or secret is baked into the code.
+environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.3.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.4.** Voir le [CHANGELOG](CHANGELOG.md).
+
+`dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
+strictement positif du dictionnaire des conditions de règlement. Le paramètre
+omis ou `null` conserve la condition existante ; zéro, booléens, chaînes et
+nombres décimaux sont refusés avant tout appel. Les autres paramètres gardent
+leur comportement.
+
+Avec cette option, le PUT REST du tiers est suivi d'une relecture, même si le
+PUT échoue. `write_state` distingue `accepted`, `rejected`, `unknown` et, lors
+du refus local, `not_attempted`. `write_may_have_succeeded` indique si l'écriture
+a pu passer. `readback` rend les champs relus, dont l'identifiant brut
+`cond_reglement_id_raw`, l'identifiant normalisé, le code et le libellé.
+`verified` compare l'identifiant brut à la demande ; `success` exige aussi un
+PUT accepté. Une réponse perdue peut donc donner `verified=true` avec
+`success=false` : la valeur est présente, sans preuve que cet appel l'a écrite.
+Les erreurs restent dans `error`, `refetch_warning` ou `payment_terms_warning`.
+Une relecture impossible ne permet pas de conclure à l'échec de l'écriture ;
+aucun PUT n'est rejoué automatiquement. Le détail `dolibarr_get_thirdparty`
+expose déjà l'identifiant et le libellé, avec une réserve si le dictionnaire
+est inaccessible.
 
 ## Environment variables
 
@@ -13,89 +33,89 @@ environment variables — no host, login or secret is baked into the code.
 |---|---|---|
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
-| `DOLIBARR_WEB_LOGIN` | no | Login used **only** for the writes the REST API does not expose — today, bank reconciliation alone. Leave unset to disable that fallback. |
+| `DOLIBARR_WEB_LOGIN` | no | Login used **only** for the writes the REST API does not expose : today, bank reconciliation alone. Leave unset to disable that fallback. |
 | `DOLIBARR_WEB_PASSWORD` | no | Password for the account above. Needs the *bank → reconcile* permission. |
 
 ## Outils (78)
 
-- `dolibarr_list_projects` — Liste les projets Dolibarr
-- `dolibarr_get_project` — Détail d'un projet par ID numérique ou par référence
-- `dolibarr_list_tasks` — Liste les tâches d'un projet Dolibarr
-- `dolibarr_log_time` — Saisir du temps passé sur une tâche Dolibarr
+- `dolibarr_list_projects` : Liste les projets Dolibarr
+- `dolibarr_get_project` : Détail d'un projet par ID numérique ou par référence
+- `dolibarr_list_tasks` : Liste les tâches d'un projet Dolibarr
+- `dolibarr_log_time` : Saisir du temps passé sur une tâche Dolibarr
 - `dolibarr_list_time_entries` : Liste les écritures de temps d'une tâche ou d'un projet
 - `dolibarr_update_time_entry` : Corrige une écriture de temps existante
 - `dolibarr_delete_time_entry` : Supprime une écriture de temps
 - `dolibarr_list_task_contacts` : Liste les intervenants affectés à une tâche
 - `dolibarr_assign_task_user` : Affecte un utilisateur comme intervenant d'une tâche
 - `dolibarr_unassign_task_user` : Retire un utilisateur des intervenants d'une tâche
-- `dolibarr_create_task` — Crée une tâche dans un projet Dolibarr
-- `dolibarr_close_task` — Marque une tâche Dolibarr comme terminée (progress=100 par défaut)
-- `dolibarr_list_invoices` — Liste les factures clients
-- `dolibarr_list_supplier_invoices` — Liste les factures fournisseur
-- `dolibarr_list_proposals` — Liste les propositions commerciales (devis)
-- `dolibarr_list_thirdparties` — Liste les tiers (clients, fournisseurs, prospects)
-- `dolibarr_get_thirdparty` — Détail complet d'un tiers par son ID
-- `dolibarr_add_contact` — Ajoute un contact à un tiers existant dans Dolibarr
-- `dolibarr_create_thirdparty` — Crée un nouveau tiers dans Dolibarr
-- `dolibarr_update_thirdparty` — Modifie un tiers existant dans Dolibarr
-- `dolibarr_list_contacts` — Liste les contacts rattachés à un tiers
-- `dolibarr_search_contacts` — Cherche un contact par email ou nom à travers tous les tiers
-- `dolibarr_update_contact` — Modifie un contact existant dans Dolibarr
-- `dolibarr_delete_contact` — Supprime un contact dans Dolibarr
-- `dolibarr_list_tickets` — Liste les tickets de support
-- `dolibarr_get_ticket` — Récupère le détail complet d'un ticket de support
-- `dolibarr_create_ticket` — Crée un ticket de support dans Dolibarr
-- `dolibarr_close_ticket` — Ferme (ou rouvre) un ticket avec message de clôture optionnel, via PUT /tickets/{id}
-- `dolibarr_add_ticket_message` — Ajoute un message au fil d'un ticket via POST /tickets/newmessage
-- `dolibarr_update_ticket` — Met à jour un ticket : sujet, sévérité, type, rattachements, assignation
-- `dolibarr_delete_ticket` — Supprime définitivement un ticket (irréversible)
-- `dolibarr_resolve_email` — Résout une adresse email vers un tiers et/ou contact Dolibarr
-- `dolibarr_get_revenue_summary` — Synthèse du chiffre d'affaires depuis les factures Dolibarr
-- `dolibarr_list_actions_open` — Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr
-- `dolibarr_dashboard` — Tableau de bord de direction (synthèse multi-modules)
-- `dolibarr_create_project` — Crée un nouveau projet dans Dolibarr
-- `dolibarr_update_project` — Met à jour un projet existant dans Dolibarr
-- `dolibarr_delete_project` — Supprime un projet Dolibarr via DELETE /api/projects/{id}
-- `dolibarr_create_proposal` — Crée une proposition commerciale dans Dolibarr
-- `dolibarr_add_proposal_lines` — Ajoute des lignes à une proposition commerciale Dolibarr (brouillon)
-- `dolibarr_get_invoice` — Détail d'une facture client par ID numérique ou par référence
-- `dolibarr_get_proposal` — Détail d'une proposition commerciale par ID numérique ou par référence
-- `dolibarr_get_supplier_invoice` — Détail d'une facture FOURNISSEUR par ID numérique ou par référence
-- `dolibarr_validate_invoice` — Valide une facture brouillon (statut 0 → 1) via POST /invoices/{id}/validate
-- `dolibarr_update_invoice` — Met à jour une facture : projet, référence client, notes, date d'échéance
-- `dolibarr_validate_proposal` — Valide une proposition commerciale brouillon via POST /proposals/{id}/validate
-- `dolibarr_update_proposal` — Met à jour une proposition : projet, titre, dates, notes, réf. client
-- `dolibarr_set_proposal_draft` — Repasse une proposition validée en brouillon (pour rééditer ses lignes)
-- `dolibarr_delete_proposal` — Supprime une proposition commerciale
-- `dolibarr_update_proposal_line` — Met à jour une ligne de proposition (brouillon uniquement)
-- `dolibarr_delete_proposal_line` — Supprime une ligne de proposition (brouillon uniquement)
-- `dolibarr_get_invoice_pdf_url` — Retourne l'URL Dolibarr du PDF d'une facture (lien direct pour téléchargement
-- `dolibarr_list_bank_accounts` — Liste les comptes bancaires, solde et indicateur de rapprochement
-- `dolibarr_list_bank_entries` — Écritures d'un compte sur une période, solde cumulé compris
-- `dolibarr_get_bank_balance` — Solde d'un compte à aujourd'hui ou à une date d'arrêté
-- `dolibarr_create_bank_entry` — Crée une opération diverse (sens explicite : `credit` / `debit`)
-- `dolibarr_set_bank_statement` — Affecte un numéro de relevé à un lot d'écritures et les rapproche
-- `dolibarr_toggle_bank_reconciliation` — Active ou désactive le rapprochement d'un compte
-- `dolibarr_list_invoice_payments` — Règlements d'une facture et leur écriture bancaire
-- `dolibarr_add_invoice_payment` — Enregistre un règlement client et l'écriture bancaire
-- `dolibarr_add_supplier_invoice_payment` — Enregistre un règlement fournisseur et l'écriture bancaire
-- `dolibarr_create_supplier_invoice` — Crée une facture fournisseur (brouillon)
-- `dolibarr_create_invoice` — Crée une facture client (brouillon) avec ses lignes
-- `dolibarr_add_invoice_lines` — Ajoute des lignes à une facture brouillon
-- `dolibarr_delete_invoice_line` — Supprime une ligne d'une facture brouillon
-- `dolibarr_create_invoice_from_proposal` — Facture une proposition commerciale
-- `dolibarr_list_documents` — Liste les pièces jointes d'un objet
-- `dolibarr_upload_document` — Attache un fichier local à un objet
-- `dolibarr_build_document` — (Re)génère le PDF d'un document commercial
-- `dolibarr_list_users` — Liste les utilisateurs et leurs identifiants internes
-- `dolibarr_list_products` — Liste les produits et services du catalogue
-- `dolibarr_list_payment_types` — Liste les modes de règlement actifs
-- `dolibarr_cash_forecast` — Prévisionnel de trésorerie (soldes + échéances)
-- `dolibarr_transfer_between_accounts` — Virement interne entre deux comptes
-- `dolibarr_list_bank_statements` — Relevés posés et écritures restant à rapprocher
-- `dolibarr_delete_bank_entry` — Supprime une écriture isolée (non rapprochée, sans règlement)
-- `dolibarr_delete_invoice` — Supprime une facture brouillon, client ou fournisseur
-- `dolibarr_validate_supplier_invoice` — Valide une facture fournisseur brouillon
+- `dolibarr_create_task` : Crée une tâche dans un projet Dolibarr
+- `dolibarr_close_task` : Marque une tâche Dolibarr comme terminée (progress=100 par défaut)
+- `dolibarr_list_invoices` : Liste les factures clients
+- `dolibarr_list_supplier_invoices` : Liste les factures fournisseur
+- `dolibarr_list_proposals` : Liste les propositions commerciales (devis)
+- `dolibarr_list_thirdparties` : Liste les tiers (clients, fournisseurs, prospects)
+- `dolibarr_get_thirdparty` : Détail complet d'un tiers par son ID
+- `dolibarr_add_contact` : Ajoute un contact à un tiers existant dans Dolibarr
+- `dolibarr_create_thirdparty` : Crée un nouveau tiers dans Dolibarr
+- `dolibarr_update_thirdparty` : Modifie un tiers existant dans Dolibarr
+- `dolibarr_list_contacts` : Liste les contacts rattachés à un tiers
+- `dolibarr_search_contacts` : Cherche un contact par email ou nom à travers tous les tiers
+- `dolibarr_update_contact` : Modifie un contact existant dans Dolibarr
+- `dolibarr_delete_contact` : Supprime un contact dans Dolibarr
+- `dolibarr_list_tickets` : Liste les tickets de support
+- `dolibarr_get_ticket` : Récupère le détail complet d'un ticket de support
+- `dolibarr_create_ticket` : Crée un ticket de support dans Dolibarr
+- `dolibarr_close_ticket` : Ferme (ou rouvre) un ticket avec message de clôture optionnel, via PUT /tickets/{id}
+- `dolibarr_add_ticket_message` : Ajoute un message au fil d'un ticket via POST /tickets/newmessage
+- `dolibarr_update_ticket` : Met à jour un ticket : sujet, sévérité, type, rattachements, assignation
+- `dolibarr_delete_ticket` : Supprime définitivement un ticket (irréversible)
+- `dolibarr_resolve_email` : Résout une adresse email vers un tiers et/ou contact Dolibarr
+- `dolibarr_get_revenue_summary` : Synthèse du chiffre d'affaires depuis les factures Dolibarr
+- `dolibarr_list_actions_open` : Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr
+- `dolibarr_dashboard` : Tableau de bord de direction (synthèse multi-modules)
+- `dolibarr_create_project` : Crée un nouveau projet dans Dolibarr
+- `dolibarr_update_project` : Met à jour un projet existant dans Dolibarr
+- `dolibarr_delete_project` : Supprime un projet Dolibarr via DELETE /api/projects/{id}
+- `dolibarr_create_proposal` : Crée une proposition commerciale dans Dolibarr
+- `dolibarr_add_proposal_lines` : Ajoute des lignes à une proposition commerciale Dolibarr (brouillon)
+- `dolibarr_get_invoice` : Détail d'une facture client par ID numérique ou par référence
+- `dolibarr_get_proposal` : Détail d'une proposition commerciale par ID numérique ou par référence
+- `dolibarr_get_supplier_invoice` : Détail d'une facture FOURNISSEUR par ID numérique ou par référence
+- `dolibarr_validate_invoice` : Valide une facture brouillon (statut 0 → 1) via POST /invoices/{id}/validate
+- `dolibarr_update_invoice` : Met à jour une facture : projet, référence client, notes, date d'échéance
+- `dolibarr_validate_proposal` : Valide une proposition commerciale brouillon via POST /proposals/{id}/validate
+- `dolibarr_update_proposal` : Met à jour une proposition : projet, titre, dates, notes, réf. client
+- `dolibarr_set_proposal_draft` : Repasse une proposition validée en brouillon (pour rééditer ses lignes)
+- `dolibarr_delete_proposal` : Supprime une proposition commerciale
+- `dolibarr_update_proposal_line` : Met à jour une ligne de proposition (brouillon uniquement)
+- `dolibarr_delete_proposal_line` : Supprime une ligne de proposition (brouillon uniquement)
+- `dolibarr_get_invoice_pdf_url` : Retourne l'URL Dolibarr du PDF d'une facture (lien direct pour téléchargement
+- `dolibarr_list_bank_accounts` : Liste les comptes bancaires, solde et indicateur de rapprochement
+- `dolibarr_list_bank_entries` : Écritures d'un compte sur une période, solde cumulé compris
+- `dolibarr_get_bank_balance` : Solde d'un compte à aujourd'hui ou à une date d'arrêté
+- `dolibarr_create_bank_entry` : Crée une opération diverse (sens explicite : `credit` / `debit`)
+- `dolibarr_set_bank_statement` : Affecte un numéro de relevé à un lot d'écritures et les rapproche
+- `dolibarr_toggle_bank_reconciliation` : Active ou désactive le rapprochement d'un compte
+- `dolibarr_list_invoice_payments` : Règlements d'une facture et leur écriture bancaire
+- `dolibarr_add_invoice_payment` : Enregistre un règlement client et l'écriture bancaire
+- `dolibarr_add_supplier_invoice_payment` : Enregistre un règlement fournisseur et l'écriture bancaire
+- `dolibarr_create_supplier_invoice` : Crée une facture fournisseur (brouillon)
+- `dolibarr_create_invoice` : Crée une facture client (brouillon) avec ses lignes
+- `dolibarr_add_invoice_lines` : Ajoute des lignes à une facture brouillon
+- `dolibarr_delete_invoice_line` : Supprime une ligne d'une facture brouillon
+- `dolibarr_create_invoice_from_proposal` : Facture une proposition commerciale
+- `dolibarr_list_documents` : Liste les pièces jointes d'un objet
+- `dolibarr_upload_document` : Attache un fichier local à un objet
+- `dolibarr_build_document` : (Re)génère le PDF d'un document commercial
+- `dolibarr_list_users` : Liste les utilisateurs et leurs identifiants internes
+- `dolibarr_list_products` : Liste les produits et services du catalogue
+- `dolibarr_list_payment_types` : Liste les modes de règlement actifs
+- `dolibarr_cash_forecast` : Prévisionnel de trésorerie (soldes + échéances)
+- `dolibarr_transfer_between_accounts` : Virement interne entre deux comptes
+- `dolibarr_list_bank_statements` : Relevés posés et écritures restant à rapprocher
+- `dolibarr_delete_bank_entry` : Supprime une écriture isolée (non rapprochée, sans règlement)
+- `dolibarr_delete_invoice` : Supprime une facture brouillon, client ou fournisseur
+- `dolibarr_validate_supplier_invoice` : Valide une facture fournisseur brouillon
 
 ## Invoicing a proposal: Dolibarr has no such route
 
@@ -108,12 +128,12 @@ invoice client-side: same third party, project, customer reference, and one
 `POST /invoices/{id}/lines` per proposal line. Two consequences it states
 plainly instead of hiding:
 
-- lines are **recreated, not moved** — the tool compares the resulting invoice
+- lines are **recreated, not moved** : the tool compares the resulting invoice
   total against the proposal total and raises `total_warning` if they diverge,
   and reports `success: false` if any line was refused, so a half-copied draft
   never reads as done;
 - the link back to the proposal is posted through `linked_objects`, which
-  `Facture::create()` turns into a real `add_object_linked('propal', …)` — the
+  `Facture::create()` turns into a real `add_object_linked('propal', …)` : the
   invoice shows up under the proposal's *Linked objects* tab.
 
 The proposal's own status is **left alone** unless `mark_proposal_invoiced=True`.
@@ -129,7 +149,7 @@ connector therefore always sends the full field set, taken from the upstream
 docblock examples.
 
 The mirror-image trap bit during development: a line copied from another
-document carries `tva_tx: None` — the key is *present*, holding null. Reading it
+document carries `tva_tx: None` : the key is *present*, holding null. Reading it
 with `float(...)` blew up the whole line, and `create_invoice_from_proposal`
 produced an **empty invoice plus a warning**. `_line_number()` now treats a null
 value as an absent one. A test pins that behaviour.
@@ -138,8 +158,8 @@ value as an absent one. A test pins that behaviour.
 
 `llx_bank.amount` is **signed**: positive credits the account (money in),
 negative debits it (money out). Dolibarr's own *various payment* form hides that
-behind a `sens` field where **1 means Crédit** and **0 means Débit** — the
-opposite of the intuition that 0 comes first — and `PaymentVarious::create()`
+behind a `sens` field where **1 means Crédit** and **0 means Débit** : the
+opposite of the intuition that 0 comes first : and `PaymentVarious::create()`
 turns it back into `sign = ($sens == '0' ? -1 : 1)`.
 
 `dolibarr_create_bank_entry` refuses to replay that trap. It takes a **positive**
@@ -158,7 +178,7 @@ Three gaps are worth knowing about, because the tools work around them and say
 so in their responses rather than pretending otherwise:
 
 1. **Customer payment amounts.** `POST /invoices/{id}/payments` ignores any
-   amount and always settles the full remaining balance — partial payments are
+   amount and always settles the full remaining balance : partial payments are
    impossible through it. `dolibarr_add_invoice_payment` therefore posts to
    `POST /invoices/paymentsdistributed`, the only route that accepts an explicit
    amount. The supplier route, oddly, *does* take an `amount`, and is used as is.
@@ -166,7 +186,7 @@ so in their responses rather than pretending otherwise:
    the label; `num_releve` and `rappro` are reachable solely through
    `AccountLine::update_conciliation()`, i.e. through the web form.
    `dolibarr_set_bank_statement` falls back to that form, but only when
-   `DOLIBARR_WEB_LOGIN`/`DOLIBARR_WEB_PASSWORD` are set — and it **re-reads every
+   `DOLIBARR_WEB_LOGIN`/`DOLIBARR_WEB_PASSWORD` are set : and it **re-reads every
    entry over REST afterwards** to confirm the statement number landed. A form
    that answers 200 without writing is reported as a failure, never as a success.
 3. **Paginating bank lines.** `GET /bankaccounts/{id}/lines` accepts neither
@@ -185,7 +205,7 @@ server produces an *unknown table* error and an HTTP 503.
 `dolibarr_cash_forecast` is the one synthesis this connector did not let you
 build: open non-cash account balances, plus validated-unpaid customer invoices
 (what comes in), minus validated-unpaid supplier invoices (what goes out),
-bucketed by due date — overdue, 0-30, 31-60, 61-90, beyond — and a projected
+bucketed by due date : overdue, 0-30, 31-60, 61-90, beyond : and a projected
 balance at the horizon.
 
 Two honest limits, both stated in the response:
@@ -193,7 +213,7 @@ Two honest limits, both stated in the response:
 - it is a **due-date projection**, not a commitment: each invoice is counted on
   its due date, and overdue ones count immediately;
 - the amount used is `remaintopay` when Dolibarr provides it, the TTC total
-  otherwise — a partly-settled invoice must not be forecast in full.
+  otherwise : a partly-settled invoice must not be forecast in full.
 
 ## Credit notes are negative, and that broke two things
 
@@ -202,7 +222,7 @@ defects in 1.6.0 came from forgetting that, both found during the 31/08/2026
 acceptance run against production:
 
 - `list_invoices` compared `total_ttc < min_amount` with `min_amount` defaulting
-  to **0**, so every credit note was silently dropped — 13 of the last 100
+  to **0**, so every credit note was silently dropped : 13 of the last 100
   invoices on the inno³ instance. `min_amount` now filters only when it is
   actually given, and the response carries `credit_notes_count`.
 - `get_revenue_summary` was *correct* but unreadable: August 2026 showed
@@ -220,10 +240,10 @@ negative data. Neutral must mean *absent*, not *zero*.
 `dolibarr_get_revenue_summary` takes a `basis` parameter and always echoes it
 back, because the two answers are both legitimate and are not comparable:
 
-- `emises` (default) — every **validated** invoice, paid or not, counted at its
+- `emises` (default) : every **validated** invoice, paid or not, counted at its
   invoice date. This is commercial revenue: an invoice issued this month counts
   this month.
-- `encaissees` — the customer payments actually **seen on a bank account** over
+- `encaissees` : the customer payments actually **seen on a bank account** over
   the period, at their operation date, VAT included.
 
 Until v1.4 the summary pulled 500 invoices sorted by `rowid` ascending with no
@@ -234,14 +254,14 @@ bounded by the requested year and paged to the end.
 ## Durations are seconds, everywhere
 
 Dolibarr stores and returns **every** duration in seconds, usually as a string
-(`"117000"`). Read as hours, that is a figure 3600 times too high — and nothing
+(`"117000"`). Read as hours, that is a figure 3600 times too high : and nothing
 errors out. Every tool that exposes a duration therefore returns it twice: a
 converted value rounded to two decimals (`spent_hours`, `planned_hours`,
 `total_spent_hours`) alongside the untouched original (`spent_seconds`,
 `planned_seconds`, `total_spent_seconds`). A task carrying 32.5 h reports
 `spent_hours: 32.5` and `spent_seconds: 117000`.
 
-A missing duration reports `null`, never `0` — zero would read as "no time
+A missing duration reports `null`, never `0` : zero would read as "no time
 logged" when the information is simply absent.
 
 In the other direction, `dolibarr_log_time` takes `duration` in **hours** and
@@ -259,7 +279,7 @@ a bad id.
 | `tasks/{id}/timespent` | `GET` only | works; a `POST` here returns `404` |
 | `tasks/{id}/timespent/{entry_id}` | `PUT` / `DELETE` | work (Dolibarr 23+) |
 | `tasks/{id}/getTimeSpent/{entry_id}` | `GET` | works (Dolibarr 23+) |
-| `projects/tasks/{id}/…` | — | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
+| `projects/tasks/{id}/…` | : | does not exist: the `Tasks` class is mounted at the root, never under `/projects` |
 
 ### Known upstream bug: adding time fails on some Dolibarr 23.0.x builds
 
@@ -330,7 +350,7 @@ looked it up:
 ### Transport errors are named, and reads are replayed
 
 A dropped connection or a read timeout used to reach the caller as a bare
-`Erreur : ` — `httpx.ReadError` and `ReadTimeout` carry no message — so a
+`Erreur : ` : `httpx.ReadError` and `ReadTimeout` carry no message : so a
 `dolibarr_get_meetingnote` failing on a busy server read like a missing note
 (08/09/2026, three notes, all found on replay). Every transport failure is now
 retried on reads (`GET`), and on any method when the request never left
@@ -358,16 +378,16 @@ wrote with what it reads.
 ## Creating a ticket can write somewhere else, and says so
 
 `POST /tickets` fires Dolibarr's `TICKET_CREATE` trigger, and any installed
-module may write on the back of it. The connector cannot prevent that — it is
-server-side code, triggered by the write itself — so it reports it instead.
+module may write on the back of it. The connector cannot prevent that : it is
+server-side code, triggered by the write itself : so it reports it instead.
 
 `dolibarr_create_ticket` returns two extra fields:
 
-- `side_effects_checked` — whether the connector was *able* to look. It is
+- `side_effects_checked` : whether the connector was *able* to look. It is
   `false` on a vanilla install, where nothing teaches it which module writes
   what. "I did not look" is not "nothing happened", and the two must not read
   alike.
-- `side_effects` — one entry per module that wrote, each naming what it wrote.
+- `side_effects` : one entry per module that wrote, each naming what it wrote.
   An entry carrying `error` means an observer failed: the ticket exists, but
   that side effect could not be verified.
 
@@ -391,7 +411,7 @@ the `severity` argument also **prices** the ticket. The module maps `low` to
 one unit and `high` / `critical` to five; `normal` is not in its dictionary at
 all, so it falls back to one unit and logs a warning. A ticket raised as
 `critical` costs the client five times one raised as `low`, and nothing in the
-parameter's name says so — hence the note in the tool's docstring.
+parameter's name says so : hence the note in the tool's docstring.
 
 What prompted this: on 18/09/2026, eleven tickets created through this tool
 each debited one unit from the client's support notebooks (inno³'s in-house
@@ -497,7 +517,7 @@ pass, which is exactly the boundary of the upstream bug.
 
 ### Bank round trip: balance before, balance after
 
-Same rules — real instance, run by hand. This one is worth running on every new
+Same rules : real instance, run by hand. This one is worth running on every new
 Dolibarr version, because a sign inversion on a bank entry produces no error at
 all: it produces a wrong balance.
 
@@ -537,7 +557,7 @@ async def main():
     entry = next(e for e in listed["entries"] if e["id"] == debit["entry_id"])
     assert entry["balance_after"] == after, entry          # solde cumulé = solde réel
 
-    print("OK — supprimer les deux écritures de test dans Dolibarr.")
+    print("OK : supprimer les deux écritures de test dans Dolibarr.")
 
 asyncio.run(main())
 PY
@@ -546,7 +566,7 @@ PY
 Expected: `+100` then `-40`, a balance that moved by exactly `+60`, and a
 running balance on the last entry equal to the account balance. Delete both
 test entries afterwards with `dolibarr_delete_bank_entry`, which refuses any
-entry that is already reconciled or that carries a payment link — deleting the
+entry that is already reconciled or that carries a payment link : deleting the
 bank line of a settled invoice would leave the payment orphaned.
 
 The payment tools follow the same contract on a throwaway invoice:
@@ -558,12 +578,12 @@ with a `bank_line_id`.
 ## Acceptance test against a live instance
 
 [`RECETTE_COWORK.md`](RECETTE_COWORK.md) is a script to run from an MCP client
-against a real Dolibarr. It starts with a version check — three acceptance runs
-were spent chasing "defects" that were only stale deployments — then walks
+against a real Dolibarr. It starts with a version check : three acceptance runs
+were spent chasing "defects" that were only stale deployments : then walks
 banking, settlement, invoicing and attachments with expected values measured on
 the live instance. It validates no invoice, so it burns no accounting sequence
 number. It needs a throwaway bank account and third party, keeps every amount
-under 10 €, and cleans up after itself — flagging what it could not remove.
+under 10 €, and cleans up after itself : flagging what it could not remove.
 
 ## Extending the connector
 
@@ -586,7 +606,7 @@ def register(mcp):
 ```
 
 An extension can also observe what a write triggers server-side, through
-`server.register_ticket_create_observer()` — see
+`server.register_ticket_create_observer()` : see
 [Creating a ticket can write somewhere else](#creating-a-ticket-can-write-somewhere-else-and-says-so).
 
 A bad extension can never break the core: load failures are caught and logged
@@ -594,15 +614,15 @@ to stderr, and the server keeps running with its 48 generic tools.
 
 ### inno³ extension package
 
-Tools that depend on inno³'s **custom** Dolibarr modules — `meetingnotes`,
+Tools that depend on inno³'s **custom** Dolibarr modules : `meetingnotes`,
 `supportcredits` (carnets), `inno3pilot` (boards) and the signed
-`inno3dashboard` / `supportcredits` portal URLs — are published as a separate
+`inno3dashboard` / `supportcredits` portal URLs : are published as a separate
 add-on, **`inno3-mcp-extensions`** (29 tools), *not* in this repository.
 Installing it next to `dolibarr-mcp` raises the tool count from 48 to 77;
 uninstalling it restores the generic 48. No environment flag needed.
 
 To ship both in a single Claude Desktop bundle, vendor the extension at build
-time — pip installs it *with* its `.dist-info`, without which the entry point is
+time : pip installs it *with* its `.dist-info`, without which the entry point is
 invisible and the extra tools silently absent:
 
 ```sh
@@ -610,7 +630,7 @@ python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions
 ```
 
 **Updating an already-installed bundle.** A Desktop extension is identified by
-`<publisher>.<manifest name>` — that key indexes both its install directory and
+`<publisher>.<manifest name>` : that key indexes both its install directory and
 its settings file (URLs, secrets). Publishing under a different `name` therefore
 installs a *second* extension side by side and does not carry the configuration
 over. To update in place, republish under the name already installed, without
@@ -623,7 +643,7 @@ python scripts/build_mcpb.py dolibarr --with-extension ../inno3-mcp-extensions \
 
 ## License
 
-[Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
+[Apache-2.0](../LICENSE) : © 2026 inno³ and contributors.
 
 ## Contrat des exports depuis 1.8.0
 
