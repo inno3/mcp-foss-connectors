@@ -1,5 +1,28 @@
 # Reprise du dépôt mcp-foss-connectors
 
+## 17/10/2026 : préparation de l'intégration MB, n8n 1.3.1
+
+Le correctif `03b4e10` utilise POST avec un objet JSON vide pour activer et
+désactiver les workflows. Les 19 régressions couvrent aussi le transport,
+les réponses perdues et le journal des écritures déjà acceptées. Les sources
+ont été vérifiées sur `codex/2026-10-17-n8n-activation`, base `37f73a5`.
+
+Version corrective préparée : **1.3.1**, après maximum du manifeste dépôt
+**1.3.0** et de l'installation locale, où aucun manifeste n8n n'a été trouvé.
+Le paquet global reste en 0.2.0. Aucune installation applicative ni publication.
+
+Vérifications IM sur la branche MB : **1 532 réussis, 1 ignoré préexistant**
+(intégration Dolibarr réelle) ; manifeste/outils **26 réussis** ; Ruff sur les
+deux fichiers Python touchés **0 diagnostic**. Avant correction : **18 échecs,
+1 réussite** sur les nouveaux tests n8n. Aucun accès réseau tenté.
+
+Le merge et la numérotation sur `main` ont été bloqués pendant le lot IM par
+la permission en lecture seule du répertoire `.git` ; ces résultats ne sont
+pas une validation du `main` intégré. Réexécuter la suite après application
+et consigner le commit final. Détails dans
+[IM.rapport.md](../../../_codex_wt/_execution-2026-10-17/IM.rapport.md).
+Recette réelle et diffusion : **à arbitrer par Benjamin**.
+
 ## 17/10/2026 : lot S, conditions de règlement du tiers en 1.8.4
 
 ### Objectif, décisions et état courant

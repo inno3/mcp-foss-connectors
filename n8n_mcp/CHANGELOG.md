@@ -1,6 +1,6 @@
 # Historique des changements n8n
 
-## Non publié
+## 1.3.1 (2026-10-17)
 
 - Activation et désactivation d'un workflow par `POST` avec un corps JSON
   vide sur `workflows/{id}/activate` et `workflows/{id}/deactivate`.
