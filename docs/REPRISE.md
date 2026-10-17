@@ -23,7 +23,7 @@ La suite initiale complète donne **1 352 réussis, 1 ignoré**, en **5,54 s** ;
 aucun test rouge préexistant. Ruff initial propre sur `kanboard_mcp/`,
 `tests/test_kanboard_agent_identity.py` et `tests/test_kanboard_compat_016.py`.
 
-Point 1 : le diagnostic conserve le `verified` réel de la garde. Un login
+Point 1, commit **`3a045f1`** : le diagnostic conserve le `verified` réel de la garde. Un login
 différent renvoyé par `getMe` est refusé pour primary aussi, y compris pendant
 sa sonde avant une écriture agent. Une sonde primary indisponible reste tolérée ;
 l'agent doit toujours établir sa propre identité, sans repli. Les neuf nouveaux
@@ -33,12 +33,22 @@ Après correction, les suites identité, compatibilité 0.16 et régression publ
 donnent **63 réussis**, en **0,24 s**, **0 tentative réseau**. Un passage
 intermédiaire donnait **1 échec, 62 réussites** : le libellé de refus agent
 attendu par un contrat historique avait changé ; le marqueur `identite
-incoherente` est conservé dans le message corrigé. Ruff et `git diff --check`+sont propres sur le périmètre modifié.
+incoherente` est conservé dans le message corrigé. Ruff et `git diff --check`
+sont propres sur le périmètre modifié.
+
+Point 2 : les tests historiques comportaient déjà une assertion minimale pour
+chacun des champs `author_read_error` et `author_mismatch` sur les commentaires.
+Ces assertions sont renforcées : succès maintenu, auteur relu ou inconnu,
+preuve absente, cause conservée, aucun champ contradictoire et aucun rejeu de
+création. Quatre cas supplémentaires couvrent un commentaire absent, un auteur
+absent, un auteur illisible et un booléen. Aucun changement serveur nécessaire.
+La suite de compatibilité donne **13 réussis**, en **0,07 s**, avec **0 tentative
+réseau** ; Ruff et `git diff --check` propres.
 
 ## Prochaines actions K2
 
-1. Point 1 vérifié ; son commit accompagne cette mise à jour.
-2. Renforcer les contrats `author_read_error` et `author_mismatch` des commentaires.
+1. Point 1 committé en `3a045f1`.
+2. Point 2 vérifié ; son commit accompagne cette mise à jour.
 3. Vérifier l'injection des auteurs zéro et la corriger séparément si nécessaire.
 4. Retirer les paragraphes propres au lot K de `AGENTS.md` et `CLAUDE.md`.
 5. Exécuter la suite complète, Ruff et le contrôle de diff ; finaliser la reprise

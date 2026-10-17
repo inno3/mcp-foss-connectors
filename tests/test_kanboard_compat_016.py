@@ -1,4 +1,4 @@
-"""Neuf contrats 0.16 conserves par la 0.17.1, sans donnees ni HTTP reels.
+"""Contrats 0.16 conserves et renforces en 0.17.2, sans donnees ni HTTP reels.
 
 Repris de mcp-inno3/main (fa18893), auparavant sous docs/validation.
 Ils ciblent maintenant le source canonique et sa collecte pytest ordinaire.
@@ -22,6 +22,7 @@ class Rpc:
         }
         self.author = 84
         self.read_error = False
+        self.read_results = {}
         self.calls = []
 
     async def post(self, url, *, json, headers):
@@ -33,10 +34,10 @@ class Rpc:
         elif method in {'getComment', 'getTask'}:
             if self.read_error:
                 raise RuntimeError('Synthetic author read failure')
-            result = {
+            result = self.read_results.get(method, {
                 'id': '902', 'user_id': str(self.author), 'creator_id': str(self.author),
                 'title': 'Synthetic', 'project_id': '42', 'column_id': '1',
-            }
+            })
         else:
             result = 902
         return httpx.Response(200, request=httpx.Request('POST', url), json={'result': result})
@@ -93,14 +94,68 @@ async def test_comment_preserves_recorded_author_alias(rpc):
 @pytest.mark.parametrize('kind', ['task', 'comment'])
 async def test_author_mismatch_preserves_legacy_field(rpc, kind):
     rpc.author = 4
-    assert (await create(kind))['author_mismatch']
+    data = await create(kind)
+    assert data['success'] is True
+    assert data['as_user'] == 'agent'
+    assert data['author_user_id'] == 4
+    legacy_field = 'creator_id' if kind == 'task' else 'author_user_id_recorded'
+    assert data[legacy_field] == 4
+    assert 'auteur 4' in data['author_mismatch']
+    assert '84' in data['author_mismatch']
+    assert data['author_verified'] is False
+    assert data['author_warning']
+    assert 'author_read_error' not in data
+    create_method = 'createTask' if kind == 'task' else 'createComment'
+    read_method = 'getTask' if kind == 'task' else 'getComment'
+    assert data['author_verification_method'] == read_method
+    assert rpc.calls == [
+        ('robot', 'getMe'), ('human', 'getMe'),
+        ('robot', create_method), ('robot', read_method),
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ['task', 'comment'])
 async def test_author_read_failure_preserves_cause(rpc, kind):
     rpc.read_error = True
-    assert 'Synthetic author read failure' in (await create(kind))['author_read_error']
+    data = await create(kind)
+    assert data['success'] is True
+    assert data['as_user'] == 'agent'
+    assert 'Synthetic author read failure' in data['author_read_error']
+    assert data['author_user_id'] is None
+    assert data['author_verified'] is False
+    assert data['author_warning']
+    assert 'author_mismatch' not in data
+    assert 'author_user_id_recorded' not in data
+    create_method = 'createTask' if kind == 'task' else 'createComment'
+    read_method = 'getTask' if kind == 'task' else 'getComment'
+    assert data['author_verification_method'] == read_method
+    assert rpc.calls == [
+        ('robot', 'getMe'), ('human', 'getMe'),
+        ('robot', create_method), ('robot', read_method),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('recorded', [
+    None, {'id': '902'}, {'id': '902', 'user_id': 'bad'}, {'id': '902', 'user_id': True},
+])
+async def test_comment_missing_or_invalid_author_reports_read_error(rpc, recorded):
+    rpc.read_results['getComment'] = recorded
+    data = await create('comment')
+    assert data['success'] is True
+    assert data['as_user'] == 'agent'
+    assert 'user_id' in data['author_read_error']
+    assert data['author_user_id'] is None
+    assert data['author_verified'] is False
+    assert data['author_warning']
+    assert data['author_verification_method'] == 'getComment'
+    assert 'author_user_id_recorded' not in data
+    assert 'author_mismatch' not in data
+    assert rpc.calls == [
+        ('robot', 'getMe'), ('human', 'getMe'),
+        ('robot', 'createComment'), ('robot', 'getComment'),
+    ]
 
 
 @pytest.mark.asyncio

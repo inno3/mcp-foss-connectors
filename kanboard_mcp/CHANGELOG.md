@@ -10,6 +10,10 @@
   d'identité avant écriture, y compris pour primary et lors de sa sonde avant
   une écriture agent. Un `getMe` primary indisponible reste toléré ; la garde
   agent exige toujours une identité vérifiée et ne se replie jamais sur primary.
+- Contrats des commentaires renforcés : `author_read_error` conserve la cause
+  d'une relecture échouée ou indique un auteur absent/illisible ;
+  `author_mismatch` accompagne l'auteur relu lorsqu'il diffère de l'identité
+  vérifiée. La création réussie n'est pas rejouée et aucun auteur n'est inventé.
 
 ### Lot K
 
