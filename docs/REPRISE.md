@@ -9,6 +9,9 @@ garder les fichiers d'entrée limités au renvoi vers ce document.
 - Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/K-mcp-foss-connectors`.
 - Branche existante vérifiée : `codex/2026-10-17-kanboard-0.17.2` ; départ K2
   **`bff1697`**, arbre initial propre. Aucun autre worktree consulté.
+- État fonctionnel livré en **`0fcd80f`**, après **`3a045f1`** (identité) et
+  **`e9b4a8a`** (contrats des commentaires). Le commit documentaire qui porte
+  cette section termine le lot K2. Source et manifeste restent en **0.17.2**.
 - Venv partagé : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
 - Sans réseau, installation, changement de branche, tag ni push ; travail seul.
 - Les trois branches à archiver indiquées dans le lot K existent toujours.
@@ -16,6 +19,9 @@ garder les fichiers d'entrée limités au renvoi vers ce document.
   Les JSON `validation/kanboard-0172-comparison.json` et
   `validation/kanboard-0172-known-limits.json` décrivent **`bff1697`**, pas les
   corrections K2. Leurs empreintes et limites ne décrivent plus le HEAD courant.
+- Rapport K2 :
+  `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K2.rapport.md`.
+  Le rapport K reste le relevé historique de l'alignement précédent.
 
 ## Avancée K2 et vérifications
 
@@ -23,9 +29,10 @@ La suite initiale complète donne **1 352 réussis, 1 ignoré**, en **5,54 s** ;
 aucun test rouge préexistant. Ruff initial propre sur `kanboard_mcp/`,
 `tests/test_kanboard_agent_identity.py` et `tests/test_kanboard_compat_016.py`.
 
-Point 1, commit **`3a045f1`** : le diagnostic conserve le `verified` réel de la garde. Un login
-différent renvoyé par `getMe` est refusé pour primary aussi, y compris pendant
-sa sonde avant une écriture agent. Une sonde primary indisponible reste tolérée ;
+Point 1, commit **`3a045f1`** : le diagnostic conserve le `verified` réel de la
+garde. Un login différent renvoyé par `getMe` est refusé pour primary aussi,
+y compris pendant sa sonde avant une écriture agent. Une sonde primary
+indisponible reste tolérée ;
 l'agent doit toujours établir sa propre identité, sans repli. Les neuf nouveaux
 cas HTTP synthétiques donnent avant correction **5 échecs, 4 réussites,
 39 désélectionnés**, en **0,13 s**, **0 tentative réseau**.
@@ -36,8 +43,9 @@ attendu par un contrat historique avait changé ; le marqueur `identite
 incoherente` est conservé dans le message corrigé. Ruff et `git diff --check`
 sont propres sur le périmètre modifié.
 
-Point 2, commit **`e9b4a8a`** : les tests historiques comportaient déjà une assertion minimale pour
-chacun des champs `author_read_error` et `author_mismatch` sur les commentaires.
+Point 2, commit **`e9b4a8a`** : les tests historiques comportaient déjà une
+assertion minimale pour chacun des champs `author_read_error` et
+`author_mismatch` sur les commentaires.
 Ces assertions sont renforcées : succès maintenu, auteur relu ou inconnu,
 preuve absente, cause conservée, aucun champ contradictoire et aucun rejeu de
 création. Quatre cas supplémentaires couvrent un commentaire absent, un auteur
@@ -45,8 +53,9 @@ absent, un auteur illisible et un booléen. Aucun changement serveur nécessaire
 La suite de compatibilité donne **13 réussis**, en **0,07 s**, avec **0 tentative
 réseau** ; Ruff et `git diff --check` propres.
 
-Point 3 : l'injection de zéro persistait après le point 1. Les 24 nouveaux cas
-donnent avant correction **20 échecs, 4 réussites, 48 désélectionnés**, en
+Point 3, commit **`0fcd80f`** : l'injection de zéro persistait après le point 1.
+Les 24 nouveaux cas donnent avant correction **20 échecs, 4 réussites,
+48 désélectionnés**, en
 **0,30 s**, **0 tentative réseau**. Sans identité primary prouvée, `kb_call`
 omet désormais `creator_id` / `user_id`, même si un appelant fournit un auteur ;
 il n'utilise pas le cache de résolution. `kanboard_add_comment` laisse cette
@@ -59,14 +68,45 @@ La suite complète donne **1 389 réussis, 1 ignoré**, en **5,65 s** (`-rs`) ;
 le seul ignoré reste l'intégration Dolibarr qui exige un service réel.
 `ruff check --no-cache . --output-format concise` est propre sur tout le dépôt.
 
-## Prochaines actions K2
+Point 4 : `AGENTS.md` et `CLAUDE.md` sont identiques et ne gardent que le renvoi
+à cette reprise. Leurs paragraphes propres au lot K sont retirés. Le
+[CHANGELOG du connecteur](../kanboard_mcp/CHANGELOG.md), créé dans K2 car aucun
+fichier dédié n'existait, et son README décrivent les corrections.
 
-1. Point 1 committé en `3a045f1`.
-2. Point 2 committé en `e9b4a8a`.
-3. Point 3 vérifié ; son commit accompagne cette mise à jour.
-4. Retirer les paragraphes propres au lot K de `AGENTS.md` et `CLAUDE.md`.
-5. Exécuter la suite complète, Ruff et le contrôle de diff ; finaliser la reprise
-   et `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K2.rapport.md`.
+Validation finale sous garde réseau :
+`PYTHONPATH=. <venv>/bin/python scripts/test_kanboard_crosscheck_offline.py tests`
+→ **1 389 réussis, 1 ignoré**, en **5,35 s**, **0 tentative réseau**.
+Les 37 cas supplémentaires et les assertions renforcées passent dans la collecte
+ordinaire. Ruff est propre sur tout le dépôt ; `git diff --check` et les contrôles
+de diff indexé sont propres. Aucun test n'a été ignoré ou supprimé pour ce lot.
+
+Comparaison AST exécutée avec `bff1697` : **4 fonctions modifiées**, aucune
+ajoutée ni supprimée (`_ensure_write_identity`, `_ensure_account_identity`,
+`kb_call`, `kanboard_add_comment`). Versions source et manifeste **0.17.2**
+vérifiées. SHA-256 du serveur final :
+`0598618a025183b20f7075705b4d4db0525998a65934b4d5bc4b73f48f9f1777`.
+
+## Limites, arbitrages et prochaines actions
+
+Les deux limites primary du lot K sont corrigées dans le dépôt ; les relevés
+JSON historiques restent datés de `bff1697`. Aucune vérification de l'extension
+installée, recette réelle, construction de bundle, installation ou publication
+n'a été exécutée dans K2. L'attribution effective par un serveur réel lorsqu'on
+omet l'auteur reste **à confirmer**. Les tests prouvent les paramètres émis
+et le traitement de réponses synthétiques, pas le comportement du service.
+
+1. Relire les quatre commits K2 et intégrer la branche au dépôt canonique.
+2. Recette, installation et publication 0.17.2 **à arbitrer par Benjamin**, dont
+   le cas primary sans `getMe` avec attribution de l'auteur par Kanboard.
+3. Extension des relectures après déplacement, fermeture et réouverture :
+   **à arbitrer par Benjamin** ; elle reste hors du périmètre K2, comme dans K.
+4. Claude Code pourra archiver, après intégration, `fix/kanboard-identite-agent`,
+   `codex/2026-10-10-kanboard-identite` et
+   `fix/kanboard-0.17.0-board-status-entites-dates`. Aucune branche supprimée ici.
+
+Ne pas reprendre les consignes de poste périmées des branches historiques ; les
+autres worktrees restent des chantiers distincts. Le répertoire interdit
+`/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc` n'a été ni consulté ni modifié.
 
 # 17/10/2026 — lot K : réunir Kanboard en 0.17.2
 
