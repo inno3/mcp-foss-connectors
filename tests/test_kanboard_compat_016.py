@@ -1,6 +1,6 @@
 """Contrats 0.16 conserves et renforces en 0.17.2, sans donnees ni HTTP reels.
 
-Repris de mcp-inno3/main (fa18893), auparavant sous docs/validation.
+Repris de mcp-inno3/main (218842c), auparavant sous docs/validation.
 Ils ciblent maintenant le source canonique et sa collecte pytest ordinaire.
 """
 

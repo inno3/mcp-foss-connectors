@@ -1,4 +1,4 @@
-"""Protection publique de 03ca172, adaptee aux deux sondes getMe de la 0.17.1."""
+"""Protection publique de 55e6278, adaptee aux deux sondes getMe de la 0.17.1."""
 
 import asyncio
 import base64
