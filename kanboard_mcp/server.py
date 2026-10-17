@@ -33,14 +33,233 @@ logger = logging.getLogger("kanboard-mcp")
 
 mcp = FastMCP("kanboard")
 
+SERVER_VERSION = "0.17.1"
+_identity_lock = asyncio.Lock()
+
+def _identity_refusal(account: str, reason: str, remedy: str = "") -> None:
+    """Refus type, rendu en « Refus » et write_state = non_appliquee."""
+    raise KanboardIdentityError(account, reason, remedy)
+
+def _author_legacy(
+    obj: Any, field: str, expected_uid: int | None, read_error: str = ""
+) -> dict[str, Any]:
+    """Rend les champs d'auteur historiques, sans relecture supplementaire.
+
+    La 0.16 exposait `creator_id` a la racine d'une tache creee,
+    `author_user_id_recorded` pour un commentaire, `author_read_error` quand la
+    relecture echoue et `author_mismatch` quand l'auteur enregistre differe.
+    Des appelants les lisent : les retirer est une rupture de contrat, et c'est
+    ce que la contre-lecture du 12/10/2026 a trouve. Ils completent donc
+    `_author_fields` au lieu de le remplacer.
+    """
+    raw = obj.get(field) if isinstance(obj, dict) else None
+    valid = type(raw) is int or (
+        isinstance(raw, str) and raw.isascii() and raw.isdecimal()
+    )
+    if not valid:
+        detail = read_error or f"{field} illisible ou absent : {raw!r}"
+        return {"author_read_error": detail}
+    uid = int(raw)
+    out: dict[str, Any] = {
+        "author_user_id_recorded" if field == "user_id" else field: uid
+    }
+    if expected_uid and uid != expected_uid:
+        out["author_mismatch"] = (
+            f"Kanboard a enregistre l'auteur {uid} alors que l'identite verifiee "
+            f"est {expected_uid} : relire l'objet avant de s'appuyer sur cette ecriture."
+        )
+    return out
+
+def _identity_key(account: str) -> tuple[str, str, str]:
+    user, token, _ = _get_credentials(account, for_write=True)
+    return KANBOARD_URL, user, token
+
+async def _ensure_write_identity(as_user: str) -> dict[str, Any]:
+    """Prouve l'identite par getMe avant ecriture, sans resolution par annuaire.
+
+    Le cache est lie a l'URL et aux identifiants, en memoire seulement. Le
+    verrou evite plusieurs sondes lors des premieres ecritures concurrentes.
+    Agent et primary doivent avoir des logins ET des UID distincts. L'identite
+    primary est donc aussi etablie, meme si aucune lecture ne l'a precedee.
+    Aucun echec de verification n'est mis en cache.
+    """
+    user, _, account = _get_credentials(as_user, for_write=True)
+    if account == "agent" and user.strip().casefold() == KANBOARD_USER.strip().casefold():
+        _identity_refusal("agent", "les logins agent et primary sont identiques.")
+
+    async def probe(which: str, *, required: bool) -> dict[str, Any] | None:
+        """Rend l'identite prouvee, ou None quand elle n'est pas exigee.
+
+        `required` est vrai pour une ecriture agent : c'est le cas que la garde
+        existe pour couvrir. Il est faux pour primary, qui gardait en 0.16 le
+        droit d'ecrire en declarant la verification manquante, et faux pour le
+        sondage de primary qui ne sert qu'a exclure un UID partage.
+        """
+        key = _identity_key(which)
+        if key in _identity_cache:
+            return _identity_cache[key]
+        try:
+            me = await kb_call("getMe", as_user=which)
+        except Exception as exc:
+            if required:
+                _identity_refusal(
+                    which, "getMe indisponible, identite non etablie.",
+                    "Verifier le token personnel du compte.",
+                )
+            logger.warning("Identite %s non verifiee : getMe indisponible (%s)", which, exc)
+            return None
+        raw_uid = me.get("id") if isinstance(me, dict) else None
+        username = me.get("username") if isinstance(me, dict) else None
+        display = me.get("name") if isinstance(me, dict) else None
+        valid_uid = type(raw_uid) is int or (
+            isinstance(raw_uid, str) and raw_uid.isascii() and raw_uid.isdecimal()
+        )
+        uid = int(raw_uid) if valid_uid else 0
+        if (uid <= 0 or not isinstance(username, str)
+                or username.strip().casefold() != key[1].strip().casefold()):
+            if required:
+                _identity_refusal(
+                    which, "identite incoherente ou absente dans getMe.",
+                    "Verifier le login et le token personnel du compte.",
+                )
+            logger.warning("Identite %s non verifiee : getMe incoherent", which)
+            return None
+        # Le nom d'affichage de la 0.16 vient de getMe.name ; le login ne le
+        # remplace pas, sinon list_accounts.resolved_name change apres ecriture.
+        return {
+            "user_id": uid, "username": username,
+            "name": display if isinstance(display, str) and display.strip() else username,
+        }
+
+    async with _identity_lock:
+        identity = await probe(account, required=(account == "agent"))
+        if identity is None:
+            # Ecriture primary dont getMe ne repond pas : comportement 0.16,
+            # l'ecriture passe et la verification manquante est dite.
+            return {
+                "user_id": 0, "username": user, "name": user,
+                "verified": False,
+                "note": "Identite primary non verifiee : getMe indisponible.",
+            }
+        if account == "agent":
+            primary = await probe("primary", required=False)
+            if primary is None:
+                logger.warning(
+                    "UID primary inconnu : la comparaison avec l'agent n'a pas pu etre faite.")
+            elif identity["user_id"] == primary["user_id"]:
+                _identity_refusal("agent", "agent et primary ont le meme user_id.")
+            else:
+                _identity_cache[_identity_key("primary")] = primary
+        _identity_cache[_identity_key(account)] = identity
+        # Une ancienne resolution par login n'est pas une preuve du porteur du token.
+        _my_id_cache[account] = identity["user_id"]
+        _my_name_cache[account] = identity["name"]
+        return identity
+
+def _author_fields(obj: Any, field: str, expected_uid: int | None) -> dict[str, Any]:
+    """Ne rend un auteur que s'il a ete relu sur l'objet cree."""
+    raw = obj.get(field) if isinstance(obj, dict) else None
+    valid_uid = type(raw) is int or (
+        isinstance(raw, str) and raw.isascii() and raw.isdecimal()
+    )
+    uid = int(raw) if valid_uid else None
+    result: dict[str, Any] = {
+        "author_user_id": uid,
+        "author_verified": uid is not None and uid == expected_uid,
+    }
+    if not result["author_verified"]:
+        result["author_warning"] = (
+            "Auteur enregistre non relu ; aucune identite supposee."
+            if uid is None else "L'auteur enregistre differe de l'identite verifiee avant ecriture."
+        )
+    return result
+
+def _creation_without_author(as_user: str) -> dict[str, Any]:
+    """Ces objets ne portent pas de champ auteur ; un assigne n'est pas un auteur."""
+    return {
+        "as_user": _get_credentials(as_user, for_write=True)[2],
+        "author_user_id": None,
+        "author_verified": False,
+        "author_verification_method": "not_exposed",
+    }
+
+async def _verify_task_state(
+    task_id: int,
+    expected: dict[str, Any],
+    as_user: str = "",
+    fields: tuple[str, ...] = ("id", "title", "column_id", "swimlane_id", "is_active", "project_id"),
+) -> tuple[bool, dict[str, Any], list[str], str]:
+    """Relit une tâche et compare son état aux valeurs attendues.
+
+    Retourne (verified, post_state, mismatch, method). La comparaison se fait
+    sur la représentation str des valeurs : Kanboard renvoie ses entiers tantôt
+    en int tantôt en string selon la méthode appelée, comparer brut produirait
+    de faux écarts.
+
+    Une relecture impossible (tâche introuvable, API en erreur) donne
+    verified=False avec la raison dans `method` : on ne renvoie jamais un
+    verified=True par défaut.
+    """
+    try:
+        task = await kb_call("getTask", {"task_id": task_id}, as_user=as_user)
+    except Exception as exc:  # relecture impossible : on le dit, on ne suppose rien
+        logger.warning("verified_write : relecture de la tache %s impossible : %s", task_id, exc)
+        return False, {}, [], f"relecture impossible ({exc})"
+
+    if not task:
+        logger.warning("verified_write : tache %s introuvable apres ecriture", task_id)
+        return False, {}, [], "relecture impossible (tache introuvable)"
+
+    post_state = {k: task.get(k) for k in fields if k in task}
+    mismatch = [
+        key for key, want in expected.items()
+        if str(task.get(key)) != str(want)
+    ]
+    if mismatch:
+        logger.warning(
+            "verified_write : ecart apres ecriture sur la tache %s - attendu %s, relu %s",
+            task_id,
+            {k: expected[k] for k in mismatch},
+            {k: task.get(k) for k in mismatch},
+        )
+    return not mismatch, post_state, mismatch, "getTask"
+
+def _verified_payload(
+    base: dict[str, Any],
+    verified: bool,
+    post_state: dict[str, Any],
+    mismatch: list[str],
+    method: str,
+) -> str:
+    """Assemble la réponse d'une écriture vérifiée."""
+    payload = dict(base)
+    payload["verified"] = verified
+    payload["verification_method"] = method
+    if post_state:
+        payload["post_state"] = post_state
+    if mismatch:
+        payload["mismatch"] = mismatch
+        payload["warning"] = (
+            "L'API a repondu succes mais la relecture ne confirme pas l'etat attendu "
+            f"sur : {', '.join(mismatch)}. Verifier avant de considerer l'operation faite."
+        )
+    elif not verified:
+        payload["warning"] = (
+            "L'API a repondu succes mais l'etat n'a pas pu etre relu : "
+            "le succes n'est pas confirme."
+        )
+    return _dumps(payload)
+
 KANBOARD_URL = os.environ.get("KANBOARD_URL", "")
 
 # --- Comptes Kanboard (multi-compte) ---------------------------------------
 # Le serveur supporte 2 jeux de credentials simultanement :
-#   - "primary" : compte humain principal — defaut pour la lecture
-#   - "agent"   : compte dedie a l'assistant IA — defaut pour les ecritures
-# Si KANBOARD_USER_ALT/KANBOARD_TOKEN_ALT sont vides, "agent" retombe sur "primary"
-# (retrocompat totale avec une config a un seul compte).
+#   - "primary" : compte humain principal - defaut pour la lecture
+#   - "agent"   : compte dedie a l'assistant IA - defaut pour les ecritures
+# Si KANBOARD_USER_ALT/KANBOARD_TOKEN_ALT sont vides, "agent" est REFUSE (0.16.0) :
+# il retombait sur "primary" jusqu'a la 0.15.0, ce qui enregistrait sous le compte
+# humain des ecritures annoncees comme celles de l'assistant. Une configuration a un
+# seul compte reste valide : elle s'utilise avec as_user="primary" ou sans as_user.
 KANBOARD_USER = os.environ.get("KANBOARD_USER", "jsonrpc")
 KANBOARD_TOKEN = os.environ.get("KANBOARD_TOKEN", "")
 KANBOARD_USER_ALT = os.environ.get("KANBOARD_USER_ALT", "")
@@ -74,10 +293,13 @@ _RETRY_DELAY = 1.0  # secondes, double à chaque tentative
 
 _request_id = 0
 
-# Caches de resolution d'IDs (evite N appels API par requete) — clefs par compte
+# Caches de resolution d'IDs (evite N appels API par requete) - clefs par compte
 _user_cache: dict[str, dict[int, str]] = {"primary": {}, "agent": {}}
 _my_id_cache: dict[str, int] = {}              # as_user -> user_id resolu
 _my_name_cache: dict[str, str] = {}            # as_user -> display name
+# Identite etablie par getMe avant le premier appel d'un compte, puis gardee.
+# (URL, login, token) -> identite verifiee ; cache en memoire uniquement.
+_identity_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 _column_cache: dict[int, dict[int, str]] = {}   # project_id -> {col_id -> name}
 _swimlane_cache: dict[int, dict[int, str]] = {}  # project_id -> {sw_id -> name}
 
@@ -107,16 +329,24 @@ def _resolve_account(as_user: str = "") -> str:
     )
 
 
-def _get_credentials(as_user: str) -> tuple[str, str, str]:
+def _get_credentials(as_user: str, *, for_write: bool = False) -> tuple[str, str, str]:
     """Retourne (user, token, effective_account) pour le compte demande.
 
-    Si "agent" est demande mais ALT est vide, fallback transparent sur primary.
+    Le repli sur primary est reserve aux lectures. Une ecriture agent exige
+    ses propres identifiants, meme lorsque le defaut configure vaut agent.
     """
     account = _resolve_account(as_user)
     if account == "agent":
         if KANBOARD_USER_ALT and KANBOARD_TOKEN_ALT:
             return KANBOARD_USER_ALT, KANBOARD_TOKEN_ALT, "agent"
-        # Fallback retrocompat
+        if for_write:
+            _identity_refusal(
+                "agent",
+                "KANBOARD_USER_ALT et KANBOARD_TOKEN_ALT ne designent pas le "
+                "compte personnel de l'agent.",
+                "Aucun repli sur primary : renseigner ces deux variables.",
+            )
+        # Compatibilite en lecture uniquement.
         return KANBOARD_USER, KANBOARD_TOKEN, "primary"
     return KANBOARD_USER, KANBOARD_TOKEN, "primary"
 
@@ -175,7 +405,7 @@ def _write_journal() -> list[str]:
 
 
 def _is_mutating_method(method: str) -> bool:
-    """Une méthode inconnue peut écrire : perdre un rejeu vaut mieux qu'un doublon."""
+    """Les RPC get/search sont des lectures ; une methode inconnue est protegee."""
     return not method.startswith(("get", "search"))
 
 
@@ -226,6 +456,26 @@ class KanboardAPIError(RuntimeError):
         ))
 
 
+class KanboardIdentityError(RuntimeError):
+    """L'identité du compte demandé n'est pas établie : aucun appel n'est émis.
+
+    Cette erreur remplace un repli. Une identité invalide n'est pas un
+    désagrément de configuration : c'est une traçabilité fausse, et une écriture
+    attribuée à quelqu'un d'autre ne se rattrape pas après coup. L'appel est donc
+    refusé avant d'atteindre le réseau, et `write_state` vaut « non appliquée » :
+    rejouer après correction est sans risque de doublon.
+    """
+
+    def __init__(self, account: str, reason: str, remedy: str = ""):
+        self.account = account
+        self.reason = reason
+        self.write_state = "non_appliquee"
+        super().__init__(_append_sentence(
+            f"Identité du compte '{account}' non établie : {reason}",
+            (" " + remedy) if remedy else "",
+        ))
+
+
 class KanboardTransportError(RuntimeError):
     """Échec réseau définitif, nommé même quand l'exception httpx est vide."""
 
@@ -272,6 +522,54 @@ def _parse_json_or_raise(resp: httpx.Response, method: str) -> Any:
         ) from exc
 
 
+async def _recorded_author(
+    read_method: str,
+    params: dict,
+    field: str,
+    expected_uid: int,
+    account: str,
+) -> tuple[dict[str, Any], str]:
+    """Relit l'auteur qu'un objet créé porte réellement côté Kanboard.
+
+    Une écriture acceptée ne prouve pas sous quel nom elle a été enregistrée : le
+    16/09/2026, la réponse annonçait l'auteur qu'on croyait écrire. Cette
+    relecture est le dernier filet, et le seul qui ne repose pas sur nos propres
+    suppositions.
+
+    Rend (champs à fusionner dans la réponse, message d'écart éventuel). Une
+    relecture impossible est dite (`author_read_error`) plutôt que silencieuse :
+    elle n'infirme pas l'écriture, elle laisse seulement la preuve manquante.
+    """
+    try:
+        obj = await kb_call(read_method, params, as_user=account)
+    except Exception as exc:  # noqa: BLE001 - l'écriture, elle, a réussi
+        return {"author_read_error": str(exc)}, ""
+    if not isinstance(obj, dict) or obj.get(field) in (None, ""):
+        return {"author_read_error": f"{read_method} n'a pas rendu {field}"}, ""
+    try:
+        recorded = int(obj.get(field) or 0)
+    except (TypeError, ValueError):
+        return {"author_read_error": f"{field} illisible : {obj.get(field)!r}"}, ""
+    out = {f"{field}_recorded" if field != "creator_id" else field: recorded}
+    if field == "user_id":
+        out = {"author_user_id_recorded": recorded}
+    mismatch = ""
+    if expected_uid > 0 and recorded != expected_uid:
+        mismatch = (f"Kanboard a enregistre l'auteur {recorded} alors que l'identite "
+                    f"verifiee du compte '{account}' est {expected_uid} : relire "
+                    "l'objet avant de s'appuyer sur cette ecriture.")
+    return out, mismatch
+
+
+async def _ensure_account_identity(account: str) -> dict[str, Any]:
+    """Diagnostic compatible avec la garde d'ecriture de la 0.17."""
+    try:
+        identity = await _ensure_write_identity(account)
+    except ValueError as exc:
+        raise KanboardIdentityError(account, str(exc), "Verifier les tokens personnels.") from exc
+    return {**identity, "verified": True, "fatal": False}
+
+
 async def kb_call(method: str, params: dict | None = None, as_user: str = "") -> Any:
     """Appel JSON-RPC 2.0 à l'API Kanboard avec rejeu et backoff exponentiel.
 
@@ -288,13 +586,24 @@ async def kb_call(method: str, params: dict | None = None, as_user: str = "") ->
     Limite : une écriture partie dont la réponse est perdue laisse un état
     indécidable côté client. Il faut relire l'objet avant de rejouer ; le
     journal rappelle aussi les écritures déjà réussies dans cet appel d'outil.
-    """
-    global _request_id
-    _request_id += 1
 
+    Avant la PREMIÈRE écriture d'un compte dans le processus, l'identité du token
+    est établie par `getMe` (cf. `_ensure_account_identity()`). Une identité non
+    établie interdit l'écriture, sans repli : rien ne part sur le réseau. Les
+    lectures ne déclenchent pas cette vérification, elles gardent le repli vers primary si les identifiants agent manquent.
+    """
     journal = _write_journal()
     mutating = _is_mutating_method(method)
-    user, token, account = _get_credentials(as_user)
+    user, token, account = _get_credentials(as_user, for_write=mutating)
+    if mutating:
+        # Levée volontairement AVANT toute requête : une écriture dont on ne peut
+        # pas nommer l'auteur ne doit pas exister.
+        identity = await _ensure_write_identity(as_user)
+        author_field = {"createTask": "creator_id", "createComment": "user_id"}.get(method)
+        if author_field:
+            params = {**(params or {}), author_field: identity["user_id"]}
+    global _request_id
+    _request_id += 1
     auth = base64.b64encode(f"{user}:{token}".encode()).decode()
     payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "id": _request_id}
     if params:
@@ -378,7 +687,11 @@ def _format_error(exc: Exception) -> str:
     Une exception vide garde son type et un libellé : l'appelant doit pouvoir
     distinguer une défaillance réseau d'un refus et décider quoi relire.
     """
-    if isinstance(exc, KanboardTransportError):
+    if isinstance(exc, KanboardIdentityError):
+        # Pas de « Erreur réseau » ni de conseil de rejeu : rien n'est parti, et
+        # rejouer à l'identique redonnera le même refus jusqu'à correction.
+        message = f"Refus : {exc}"
+    elif isinstance(exc, KanboardTransportError):
         message = f"Erreur réseau {exc}"
     elif isinstance(exc, KanboardAPIError):
         message = f"Erreur {exc}"
@@ -491,7 +804,7 @@ def _label_key(value: Any) -> str:
     - repli de casse.
 
     Ce qu'il ne fait PAS : effacer les accents. "Reunion" ne resout pas
-    "Réunion" — deux libelles distincts resteraient distincts. L'ecart est
+    "Réunion" - deux libelles distincts resteraient distincts. L'ecart est
     seulement signale dans le message d'erreur.
     """
     text = html.unescape(str(value or ""))
@@ -539,7 +852,7 @@ def _closest_hint(name: str, available: "list[str]") -> str:
     folded = _fold(wanted)
     for value in candidates:
         if _fold(_label_key(value)) == folded:
-            return (f" Valeur la plus proche : '{value}' — l'ecart ne porte que sur "
+            return (f" Valeur la plus proche : '{value}' - l'ecart ne porte que sur "
                     "les accents, la casse ou des variantes typographiques.")
     keys = {_label_key(v): v for v in candidates}
     close = difflib.get_close_matches(wanted, list(keys), n=1, cutoff=0.6)
@@ -562,7 +875,7 @@ def _resolve_label(
     1. la comparaison historique (casse et espaces de bord ignores), pour que
        tout ce qui resolvait hier resolve encore, sur la meme ligne ;
     2. le repli complet de `_label_key` ;
-    3. echec — le message enumere les valeurs disponibles et designe la plus
+    3. echec - le message enumere les valeurs disponibles et designe la plus
        proche.
 
     Une ligne exacte l'emporte donc sur une ligne qui ne correspond qu'apres
@@ -628,7 +941,7 @@ async def _get_user_name(user_id: Any, as_user: str = "") -> str:
         return ""
     if uid <= 0:
         return ""
-    account = _resolve_account(as_user)
+    account = _get_credentials(as_user)[2]
     bucket = _user_cache.setdefault(account, {})
     if uid in bucket:
         return bucket[uid]
@@ -691,7 +1004,7 @@ async def _get_my_user_id(as_user: str = "") -> tuple[int, str]:
 
     errors: list[str] = []
 
-    # Essai 1 : getMe — fonctionne avec les tokens utilisateur personnels
+    # Essai 1 : getMe - fonctionne avec les tokens utilisateur personnels
     try:
         me = await kb_call("getMe", as_user=account)
         if me:
@@ -703,7 +1016,7 @@ async def _get_my_user_id(as_user: str = "") -> tuple[int, str]:
     except Exception as e:
         errors.append(f"getMe: {e}")
 
-    # Essai 2 : getUserByLoginName — fonctionne avec les tokens admin
+    # Essai 2 : getUserByLoginName - fonctionne avec les tokens admin
     try:
         u = await kb_call("getUserByLoginName", {"login": user}, as_user=account)
         if u:
@@ -744,7 +1057,7 @@ async def _get_my_tasks(status_id: int = 1, as_user: str = "") -> tuple[list[dic
     Retourne (liste, "") en succes, ou ([], message_erreur) en echec.
     Itere sur tous les projets actifs et filtre par owner_id.
     """
-    account = _resolve_account(as_user)
+    account = _get_credentials(as_user)[2]
     my_uid, err = await _get_my_user_id(as_user=account)
     if my_uid <= 0:
         return [], err
@@ -760,7 +1073,7 @@ async def _get_my_tasks(status_id: int = 1, as_user: str = "") -> tuple[list[dic
         try:
             tasks = await kb_call("getAllTasks", {"project_id": p["id"], "status_id": status_id}, as_user=account)
         except Exception:
-            # Projet visible mais inaccessible (403, timeout, etc.) — on saute
+            # Projet visible mais inaccessible (403, timeout, etc.) - on saute
             continue
         if not tasks:
             continue
@@ -880,7 +1193,7 @@ async def kanboard_my_dashboard(as_user: str = "") -> str:
         for t in tasks:
             pname = t.get("project_name", f"Projet {t.get('project_id')}")
             by_project.setdefault(pname, []).append(await _task_summary(t, as_user=as_user))
-        return _dumps({"as_user": _resolve_account(as_user), "task_count": len(tasks), "by_project": by_project})
+        return _dumps({"as_user": _get_credentials(as_user)[2], "task_count": len(tasks), "by_project": by_project})
     except Exception as exc:
         return _format_error(exc)
 
@@ -1288,7 +1601,7 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
     resoudre demanderait un appel par tache, ce qui annulerait le gain.
     """
     try:
-        account = _resolve_account(as_user)
+        account = _get_credentials(as_user)[2]
         my_uid, err = await _get_my_user_id(as_user=account)
         if my_uid <= 0:
             return f"Erreur : {err}"
@@ -1576,7 +1889,7 @@ async def kanboard_assign_task(
 
     Resolution par nom :
     - Recherche dans les membres du projet (nom affiche ET login), en repliant
-      entites HTML, espaces superflus, casse et formes Unicode NFC/NFD — meme
+      entites HTML, espaces superflus, casse et formes Unicode NFC/NFD - meme
       traitement que les noms de colonne, swimlane et categorie. Les accents ne
       sont pas replies.
     - Erreur explicite si aucune correspondance ou ambiguite.
@@ -1716,10 +2029,8 @@ async def kanboard_add_comment(
     if not comment:
         return "Erreur : comment est obligatoire."
     try:
-        # Recuperer l'ID de l'utilisateur courant pour ce compte
-        uid, err = await _get_my_user_id(as_user=as_user)
-        if uid <= 0:
-            return f"Erreur : impossible de recuperer l'utilisateur courant. {err}"
+        identity = await _ensure_write_identity(as_user)
+        uid = identity["user_id"]
 
         comment_id = await kb_call("createComment", {
             "task_id": task_id,
@@ -1728,12 +2039,21 @@ async def kanboard_add_comment(
         }, as_user=as_user)
 
         if comment_id:
+            read_error = ""
+            try:
+                recorded = await kb_call("getComment", {"comment_id": comment_id}, as_user=as_user)
+            except Exception as exc:  # l'ecriture, elle, a reussi
+                recorded, read_error = None, str(exc)
+                logger.warning("Relecture de l'auteur du commentaire %s impossible : %s",
+                               comment_id, exc)
             return _dumps({
                 "success": True,
                 "comment_id": comment_id,
                 "task_id": task_id,
-                "as_user": _resolve_account(as_user),
-                "author_user_id": uid,
+                "as_user": _get_credentials(as_user, for_write=True)[2],
+                **_author_fields(recorded, "user_id", uid),
+                **_author_legacy(recorded, "user_id", uid, read_error),
+                "author_verification_method": "getComment",
             })
         else:
             return "Echec de la creation du commentaire."
@@ -1801,7 +2121,7 @@ async def _resolve_by_name(
     list_categories totalisaient 31 appels pour 25 creations. Les noms sont ce
     que l'appelant a sous la main.
 
-    Retourne (id, "") si trouve, (None, message) sinon — le message enumere les
+    Retourne (id, "") si trouve, (None, message) sinon - le message enumere les
     valeurs disponibles plutot que de laisser chercher.
 
     Le rapprochement passe par `_resolve_label` : entites HTML, espaces et casse
@@ -1921,7 +2241,31 @@ async def kanboard_create_task(
         task_id = await kb_call("createTask", params, as_user=as_user)
 
         if task_id:
-            return _dumps({"success": True, "task_id": task_id, "project_id": project_id, "title": title})
+            base = {
+                "success": True,
+                "task_id": task_id,
+                "project_id": project_id,
+                "title": title,
+                "as_user": _get_credentials(as_user, for_write=True)[2],
+            }
+            # verified_write : createTask renvoie un ID, ce qui ne prouve ni que
+            # la tâche existe, ni qu'elle a atterri dans le bon projet ou la
+            # bonne colonne (un column_id refusé est ignoré en silence).
+            expected: dict[str, Any] = {"title": title, "project_id": project_id}
+            if params.get("column_id"):
+                expected["column_id"] = params["column_id"]
+            verified, post_state, mismatch, method = await _verify_task_state(
+                int(task_id), expected, as_user=as_user,
+                fields=("id", "title", "column_id", "swimlane_id", "is_active", "project_id", "creator_id"),
+            )
+            identity = _identity_cache.get(_identity_key(base["as_user"]), {})
+            base.update(_author_fields(post_state, "creator_id", identity.get("user_id")))
+            base.update(_author_legacy(
+                post_state, "creator_id", identity.get("user_id"),
+                "" if post_state else f"{method} n'a pas rendu la tache",
+            ))
+            base["author_verification_method"] = "getTask"
+            return _verified_payload(base, verified, post_state, mismatch, method)
         else:
             return "Echec de la creation de la tache."
     except Exception as exc:
@@ -1996,7 +2340,7 @@ async def kanboard_create_project(name: str = "", description: str = "", as_user
             params["description"] = description
         project_id = await kb_call("createProject", params, as_user=as_user)
         if project_id:
-            return _dumps({"success": True, "project_id": project_id, "name": name})
+            return _dumps({**_creation_without_author(as_user), "success": True, "project_id": project_id, "name": name})
         return "Echec de la creation du projet."
     except Exception as exc:
         return _format_error(exc)
@@ -2103,7 +2447,7 @@ async def kanboard_create_column(
         # Invalider le cache de noms de colonnes pour ce projet
         _column_cache.pop(int(project_id), None)
         if col_id:
-            return _dumps({"success": True, "column_id": col_id, "project_id": project_id, "title": title})
+            return _dumps({**_creation_without_author(as_user), "success": True, "column_id": col_id, "project_id": project_id, "title": title})
         return "Echec de la creation de la colonne."
     except Exception as exc:
         return _format_error(exc)
@@ -2279,7 +2623,7 @@ async def kanboard_create_swimlane(
         sw_id = await kb_call("addSwimlane", params, as_user=as_user)
         _swimlane_cache.pop(int(project_id), None)
         if sw_id:
-            return _dumps({"success": True, "swimlane_id": sw_id, "project_id": project_id, "name": name})
+            return _dumps({**_creation_without_author(as_user), "success": True, "swimlane_id": sw_id, "project_id": project_id, "name": name})
         return "Echec de la creation du swimlane."
     except Exception as exc:
         return _format_error(exc)
@@ -2427,7 +2771,7 @@ async def kanboard_create_category(
             params["color_id"] = color_id
         cat_id = await kb_call("createCategory", params, as_user=as_user)
         if cat_id:
-            return _dumps({"success": True, "category_id": cat_id, "project_id": project_id, "name": name})
+            return _dumps({**_creation_without_author(as_user), "success": True, "category_id": cat_id, "project_id": project_id, "name": name})
         return "Echec de la creation de la categorie."
     except Exception as exc:
         return _format_error(exc)
@@ -2509,7 +2853,7 @@ async def kanboard_recent_activity(
 
     Utile pour faire un sync rapide en debut de session.
 
-    ATTENTION — plafond impose par l'API : Kanboard ne rend jamais plus de 50
+    ATTENTION - plafond impose par l'API : Kanboard ne rend jamais plus de 50
     evenements. La procedure getProjectActivity n'accepte que project_id ; tout
     parametre `limit` cote API ressort en erreur -32602. `limit` ici ne peut
     donc que reduire, jamais elargir. Sur un projet tres actif, ces 50
@@ -2867,7 +3211,7 @@ async def kanboard_create_subtask(
             params["time_estimated"] = time_estimated
         sid = await kb_call("createSubtask", params, as_user=as_user)
         if sid:
-            return _dumps({"success": True, "subtask_id": sid, "task_id": task_id, "title": title})
+            return _dumps({**_creation_without_author(as_user), "success": True, "subtask_id": sid, "task_id": task_id, "title": title})
         return "Echec de la creation de la sous-tache."
     except Exception as exc:
         return _format_error(exc)
@@ -3027,7 +3371,7 @@ def _other_account(account: str) -> str:
 def _not_found_or_forbidden(kind: str, obj_id: int, account: str, detail: str = "") -> str:
     """Message pour un 403 rendu par une LECTURE de commentaire.
 
-    Kanboard repond 403 — et non un resultat vide — quand l'identifiant
+    Kanboard repond 403 - et non un resultat vide - quand l'identifiant
     n'existe pas : l'autorisation n'arrive pas a resoudre le projet de l'objet
     et refuse par defaut (verifie sur 1.2.53 avec un id volontairement absurde).
     Un « permissions insuffisantes » nu envoie donc chercher un probleme de
@@ -3070,7 +3414,7 @@ def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detai
     Kanboard verifie l'auteur : hors admin, un compte ne peut modifier ou
     supprimer que ses propres commentaires. L'API se contente d'un `false`,
     qui ne dit pas lequel des deux comptes du connecteur a poste le
-    commentaire — indebogable cote client. On nomme donc l'auteur et,
+    commentaire - indebogable cote client. On nomme donc l'auteur et,
     quand un second compte existe, celui a reessayer.
     """
     author = raw.get("name") or raw.get("username") or f"user_id={raw.get('user_id')}"
@@ -3083,7 +3427,7 @@ def _comment_denied(action: str, comment_id: int, raw: dict, account: str, detai
         hint += f"Reessayer avec as_user='{_other_account(account)}'."
     else:
         # Sans second compte configure, suggerer "l'autre compte" enverrait
-        # sur une fausse piste : tout retombe sur primary.
+        # sur une fausse piste : il n'existe pas.
         hint += (
             "Aucun second compte n'est configure (KANBOARD_USER_ALT/"
             "KANBOARD_TOKEN_ALT vides) : le commentaire appartient a un autre "
@@ -3187,9 +3531,9 @@ async def kanboard_update_comment(
     if not comment:
         return "Erreur : comment est obligatoire."
     try:
-        # Compte *effectif* : si "agent" n'est pas configure, l'ecriture est
-        # signee par primary. Diagnostiquer sur le compte demande enverrait
-        # sur une fausse piste ("reessayer avec primary" alors qu'on y etait).
+        # Compte *effectif*, seul nom qui puisse figurer dans le diagnostic.
+        # Depuis la 0.16.0 il ne peut plus differer du compte demande : un "agent"
+        # non configure leve avant d'arriver ici, au lieu de signer en primary.
         _, _, account = _get_credentials(as_user)
 
         # Relecture prealable : sans elle, l'ancien texte est perdu sans recours.
@@ -3332,7 +3676,7 @@ async def kanboard_list_link_types(as_user: str = "") -> str:
 
     A appeler AVANT kanboard_create_task_link : les identifiants de types de
     liens varient d'une instance a l'autre selon la langue et les
-    personnalisations. Ne jamais coder un id en dur — le resoudre ici par son
+    personnalisations. Ne jamais coder un id en dur - le resoudre ici par son
     libelle.
 
     Les liens de jalon sont une paire : un type « etape importante » et son
@@ -3473,10 +3817,11 @@ async def kanboard_create_task_link(
         return _dumps({
             "success": True,
             "task_link_id": _int_or_none(created),
+            **_creation_without_author(as_user),
             "task_id": task_id,
             "opposite_task_id": opposite_task_id,
             "link_id": link_id,
-            "as_user": _resolve_account(as_user),
+            "as_user": _get_credentials(as_user)[2],
             "note": ("Le lien inverse a ete cree automatiquement sur la tache "
                      f"#{opposite_task_id} : ce n'est pas un doublon."),
         })
@@ -3515,7 +3860,7 @@ async def kanboard_remove_task_link(task_link_id: int = 0, as_user: str = "") ->
         return _dumps({
             "success": bool(removed),
             "task_link_id": task_link_id,
-            "as_user": _resolve_account(as_user),
+            "as_user": _get_credentials(as_user)[2],
             "note": ("Le lien inverse a ete retire en meme temps."
                      if removed else
                      "Kanboard a refuse la suppression : verifier le task_link_id."),
@@ -3532,7 +3877,7 @@ async def kanboard_remove_task_link(task_link_id: int = 0, as_user: str = "") ->
 async def _visible_projects(as_user: str) -> tuple[dict[str, str], str]:
     """Retourne ({project_id: nom}, erreur) visibles par un compte.
 
-    Passe par getMyProjectsList, qui ne demande aucun droit admin — contrairement
+    Passe par getMyProjectsList, qui ne demande aucun droit admin - contrairement
     a getAllProjects, refuse aux comptes non-administrateurs.
     """
     try:
@@ -3634,10 +3979,22 @@ async def kanboard_who_am_i(as_user: str = "") -> str:
     Parametres :
     - as_user : "primary" (humain), "agent" (assistant IA), "" (defaut configure)
 
-    Retourne le user_id, username, nom et les erreurs eventuelles.
+    Retourne le user_id, username, nom, l'etat de la verification d'identite
+    (`identity_verified`) et les erreurs eventuelles. Un compte dont l'identite
+    n'est pas etablie est dit tel quel : c'est un diagnostic, le compte effectif est annonce, y compris lors du repli en lecture vers primary.
     """
-    user, _, account = _get_credentials(as_user)
-    results: dict[str, Any] = {"as_user_requested": as_user or "(default)", "effective_account": account}
+    try:
+        user, _, account = _get_credentials(as_user)
+    except KanboardIdentityError as exc:
+        # Ne rien emettre : le diagnostic d'un compte non configure ne doit pas
+        # rendre l'identite du compte humain, ce que faisait le repli.
+        return _dumps({
+            "as_user_requested": as_user or "(default)",
+            "effective_account": _resolve_account(as_user),
+            "identity_verified": False,
+            "identity_error": str(exc),
+        })
+    results: dict[str, Any] = {"version": SERVER_VERSION, "as_user_requested": as_user or "(default)", "effective_account": account}
 
     # Essai getMe
     try:
@@ -3668,6 +4025,16 @@ async def kanboard_who_am_i(as_user: str = "") -> str:
     results["resolved_user_id"] = uid
     if err:
         results["resolution_error"] = err
+
+    # Ce que vaut cette identite pour une ecriture : c'est la question utile.
+    try:
+        identity = await _ensure_account_identity(account)
+        results["identity_verified"] = bool(identity.get("verified"))
+        if identity.get("note"):
+            results["identity_note"] = identity["note"]
+    except KanboardIdentityError as exc:
+        results["identity_verified"] = False
+        results["identity_error"] = str(exc)
 
     return _dumps(results)
 
@@ -3726,9 +4093,9 @@ async def kanboard_list_accounts() -> str:
         accounts["agent"] = {
             "login": KANBOARD_USER_ALT or "(non configure)",
             "token_set": bool(KANBOARD_TOKEN_ALT),
-            "status": "fallback_to_primary",
-            "note": ("Le compte 'agent' n'est pas configure. Tout appel as_user='agent' "
-                     "utilisera le compte primary. Pour activer un compte separe : definir "
+            "status": "read_fallback_only",
+            "note": ("Le compte 'agent' n'est pas configure. Les lectures utilisent primary ; "
+                     "les ecritures agent sont refusees. Pour activer un compte separe : definir "
                      "KANBOARD_USER_ALT et KANBOARD_TOKEN_ALT."),
         }
 

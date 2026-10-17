@@ -12,8 +12,8 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_URL` | yes | URL of the JSON-RPC endpoint, e.g. `https://kanboard.example.com/jsonrpc.php`. |
 | `KANBOARD_USER` | yes | Login of the primary (human) account. Used by default for reads. |
 | `KANBOARD_TOKEN` | yes | Personal API token of the primary account (Kanboard → Profile → API). |
-| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Empty → falls back to the primary account. |
-| `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. |
+| `KANBOARD_USER_ALT` | no | Login of a secondary account dedicated to an AI agent. Required for agent writes; missing credentials only allow a fallback for reads. |
+| `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
 ## Tools (53)
@@ -155,8 +155,24 @@ closest one, saying when the gap is only accents, case or typographic variants.
 
 Write tools accept an `as_user` argument (`primary` | `agent`). This lets a human
 and an AI agent share the same MCP server while keeping a correct authorship
-trail on comments and task changes. If the agent account is not configured, all
-calls transparently fall back to the primary account.
+trail on comments and task changes. Agent writes require both agent credentials
+and a matching `getMe` identity. They never fall back to primary. The logins must
+differ; when both identities can be established, their user IDs must differ too.
+An unavailable primary `getMe` does not block a verified agent, and primary
+writes remain possible when their own `getMe` is unavailable.
+
+The identity cache is tied to the endpoint, login and token, in memory only.
+Concurrent first writes share the same probe. Reads keep the 0.17.1 fallback to
+primary if agent credentials are missing; they do not require a `getMe` probe.
+
+Creation responses combine the historical fields (`creator_id`,
+`author_user_id_recorded`, `author_read_error`, `author_mismatch`) with
+`author_user_id`, `author_verified` and `author_warning`. Authors come from a
+read of the created object. An object without an author field reports
+`author_verification_method: not_exposed`. Display names use `getMe.name`.
+
+The canonical 0.17.1 source was reconciled with the installed extension on
+17 October 2026. See [the handover](../docs/REPRISE.md) for provenance and limits.
 
 ### Editing and deleting comments: authorship applies
 

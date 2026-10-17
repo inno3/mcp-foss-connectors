@@ -91,6 +91,25 @@ def _http_403() -> httpx.HTTPStatusError:
     )
 
 
+@pytest.fixture(autouse=True)
+def _identite_deja_etablie(monkeypatch):
+    """Ici le transport est teste apres les sondes getMe, couvertes ailleurs.
+
+    Reprise de la fixture 0.16, avec les cles (URL, login, token) de la 0.17.1.
+    Une sonde ne doit pas consommer une etape du scenario HTTP de transport.
+    """
+    monkeypatch.setattr(server, "_identity_cache", {
+        server._identity_key("primary"): {
+            "user_id": 4, "username": server.KANBOARD_USER, "name": "Synthetic Primary",
+        },
+        server._identity_key("agent"): {
+            "user_id": 84, "username": server.KANBOARD_USER_ALT, "name": "Synthetic Agent",
+        },
+    })
+    monkeypatch.setattr(server, "_my_id_cache", {})
+    monkeypatch.setattr(server, "_my_name_cache", {})
+
+
 @pytest.fixture
 def scripted(monkeypatch):
     """Installe un client scénarisé et supprime les délais de backoff."""
