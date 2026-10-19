@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -642,14 +642,20 @@ async def _with_invoice_payments(row: dict, supplier: bool, include_payments: bo
 
 
 PAYMENT_TERMS_NOTE = (
-    "Une échéance à date de facture + 1 jour peut être un défaut Dolibarr : "
-    "vérifier la condition négociée avant une relance. Dans ce cas, "
+    "Une échéance à date de facture + 1 jour correspond notamment à la condition "
+    "« À réception » (RECEP, nbjour = 1), parfois utilisée par défaut Dolibarr. "
+    "Elle ne prouve pas une absence de condition. Vérifier la condition négociée "
+    "avant une relance : si elle prévoit un délai plus long, "
     "days_late surévalue le retard de règlement."
 )
 
 
 def _due_date_is_default(date_invoice: str, date_due: str) -> bool | None:
-    """Une date illisible ne permet pas d'écarter une échéance par défaut."""
+    """Détecte l'intervalle +1 jour, notamment « À réception » (RECEP, nbjour = 1).
+
+    Cette heuristique ne prouve ni l'absence de condition ni un retard réel.
+    Une date absente ou illisible rend le résultat inconnu (None).
+    """
     from datetime import date
 
     try:
@@ -683,6 +689,48 @@ def _payment_term_values(row: dict, dictionnaire: dict) -> dict:
         if identifiant not in (None, "", 0, "0") or code or libelle else []
     )
     return valeurs
+
+
+async def _creation_payment_terms(
+    thirdparty_id: int | None, cond_reglement_id: int | None, proposal: dict | None = None,
+) -> dict:
+    """Choisit la condition à envoyer : paramètre validé, devis, puis tiers.
+
+    Les lectures complémentaires restent facultatives ; leurs erreurs sont
+    rendues sans empêcher la création. Le dictionnaire utilise le cache commun.
+    """
+    dictionnaire = await _payment_terms()
+    resultat = {
+        "cond_reglement_id": None, "code": None, "label": None,
+        "source": "aucune", "error": dictionnaire["error"],
+    }
+    if cond_reglement_id is not None:
+        identifiant, source = cond_reglement_id, "parametre"
+    else:
+        identifiant = _payment_term_values(proposal or {}, dictionnaire)["cond_reglement_id"]
+        source = "devis"
+        if not identifiant or identifiant <= 0:
+            try:
+                if not thirdparty_id:
+                    raise ValueError("Identifiant de tiers absent ou illisible.")
+                tiers = await api_get(f"thirdparties/{thirdparty_id}")
+                if not isinstance(tiers, dict) or "error" in tiers:
+                    raise ValueError("Réponse tiers illisible.")
+                identifiant = _payment_term_values(tiers, dictionnaire)["cond_reglement_id"]
+                source = "tiers"
+            except Exception as exc:
+                resultat["error"] = "; ".join(filter(None, (
+                    resultat["error"], f"Condition du tiers : {_format_error(exc)}",
+                )))
+                return resultat
+
+    if identifiant and identifiant > 0:
+        entree = dictionnaire["by_id"].get(str(identifiant), {})
+        resultat.update({
+            "cond_reglement_id": identifiant, "code": entree.get("code"),
+            "label": entree.get("label"), "source": source,
+        })
+    return resultat
 
 
 async def _payment_terms_fields(row: dict, thirdparty_cache: dict, include: bool) -> dict:
@@ -2273,10 +2321,11 @@ async def dolibarr_list_invoices(
     Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
     de règlement n'est paramétrée dans Dolibarr.
 
-    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
-    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
-    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
-    l'ancienneté de la facture, pas un retard de règlement.
+    date_due à date de facture + 1 jour correspond notamment à la condition
+    « À réception » (RECEP, nbjour = 1), parfois appliquée par défaut Dolibarr.
+    date_due_is_default signale cet intervalle (null si inconnu), sans prouver
+    l'absence de condition. Vérifier la condition négociée avant une relance :
+    days_late peut surévaluer le retard si le délai réel est plus long.
 
     Paramètres :
     - status : 'unpaid' (impayées), 'paid' (payées), 'draft' (brouillon), 'all'
@@ -2410,10 +2459,11 @@ async def dolibarr_list_supplier_invoices(
     Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
     de règlement n'est paramétrée dans Dolibarr.
 
-    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
-    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
-    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
-    l'ancienneté de la facture, pas un retard de règlement.
+    date_due à date de facture + 1 jour correspond notamment à la condition
+    « À réception » (RECEP, nbjour = 1), parfois appliquée par défaut Dolibarr.
+    date_due_is_default signale cet intervalle (null si inconnu), sans prouver
+    l'absence de condition. Vérifier la condition négociée avant une relance :
+    days_late peut surévaluer le retard si le délai réel est plus long.
 
     Paramètres :
     - status : 'unpaid', 'paid', 'draft', 'all'
@@ -4769,6 +4819,7 @@ async def dolibarr_create_proposal(
     date_validity: str = "",
     note_public: str = "",
     note_private: str = "",
+    cond_reglement_id: Annotated[int, Field(strict=True, gt=0)] | None = None,
 ) -> str:
     """Crée une proposition commerciale dans Dolibarr.
 
@@ -4786,12 +4837,23 @@ async def dolibarr_create_proposal(
                       fournir cette date, ex. aujourd'hui + 45 jours.
     - note_public   : note publique (optionnel)
     - note_private  : note privée (optionnel)
+    - cond_reglement_id : entier strictement positif, prioritaire sur la condition
+      du tiers. Omis ou None : lire le tiers avant création et reprendre sa condition.
 
-    Retourne l'ID de la proposition créée.
+    Retourne l'ID et payment_terms_applied (cond_reglement_id, code, label,
+    source : parametre, tiers ou aucune, error). Sans condition sur le tiers ou
+    si sa lecture échoue, aucun identifiant n'est envoyé ; l'erreur est rendue.
     """
     try:
         if not thirdparty_id:
             return "Le thirdparty_id est obligatoire."
+        if cond_reglement_id is not None and (
+            type(cond_reglement_id) is not int or cond_reglement_id <= 0
+        ):
+            return _dumps({
+                "success": False,
+                "error": "cond_reglement_id doit être un entier strictement positif.",
+            })
 
         data: dict[str, Any] = {
             "ref": "PROV",
@@ -4818,6 +4880,9 @@ async def dolibarr_create_proposal(
         if note_private:
             data["note_private"] = note_private
 
+        payment_terms = await _creation_payment_terms(thirdparty_id, cond_reglement_id)
+        if payment_terms["cond_reglement_id"] is not None:
+            data["cond_reglement_id"] = payment_terms["cond_reglement_id"]
         result = await api_post("proposals", data)
 
         return _dumps({
@@ -4826,6 +4891,7 @@ async def dolibarr_create_proposal(
             "thirdparty_id": thirdparty_id,
             "date_validity": date_validity or "(défaut Dolibarr)",
             "status": "brouillon",
+            "payment_terms_applied": payment_terms,
             "message": f"Proposition créée avec succès pour le tiers {thirdparty_id}. "
                        "Utilisez dolibarr_add_proposal_lines pour ajouter des lignes.",
         })
@@ -5065,10 +5131,11 @@ async def dolibarr_get_invoice(
     Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
     de règlement n'est paramétrée dans Dolibarr.
 
-    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
-    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
-    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
-    l'ancienneté de la facture, pas un retard de règlement.
+    date_due à date de facture + 1 jour correspond notamment à la condition
+    « À réception » (RECEP, nbjour = 1), parfois appliquée par défaut Dolibarr.
+    date_due_is_default signale cet intervalle (null si inconnu), sans prouver
+    l'absence de condition. Vérifier la condition négociée avant une relance :
+    days_late peut surévaluer le retard si le délai réel est plus long.
 
     Fournir soit invoice_id, soit ref. Retourne les informations complètes :
     ref, tiers, montants HT/TTC/TVA, statut, échéance, paiements associés
@@ -5226,10 +5293,11 @@ async def dolibarr_get_supplier_invoice(
     Hors de ces erreurs, null sur les deux conditions signifie qu'aucune condition
     de règlement n'est paramétrée dans Dolibarr.
 
-    date_due peut être un défaut Dolibarr (date de facture + 1 jour), sans échéance
-    négociée ; date_due_is_default signale cette heuristique (null si inconnu).
-    days_late se lit avec cette réserve : sur une échéance par défaut, il mesure
-    l'ancienneté de la facture, pas un retard de règlement.
+    date_due à date de facture + 1 jour correspond notamment à la condition
+    « À réception » (RECEP, nbjour = 1), parfois appliquée par défaut Dolibarr.
+    date_due_is_default signale cet intervalle (null si inconnu), sans prouver
+    l'absence de condition. Vérifier la condition négociée avant une relance :
+    days_late peut surévaluer le retard si le délai réel est plus long.
 
     Pendant fournisseur de dolibarr_get_invoice. Fournir soit invoice_id, soit
     ref (ref interne Dolibarr type SI2602-0084). Retourne ref interne, ref
@@ -7800,6 +7868,7 @@ async def dolibarr_create_invoice(
     note_private: str = "",
     lines: list[dict] | None = None,
     invoice_type: int = 0,
+    cond_reglement_id: Annotated[int, Field(strict=True, gt=0)] | None = None,
 ) -> str:
     """Crée une facture client (brouillon), avec ses lignes.
 
@@ -7808,8 +7877,9 @@ async def dolibarr_create_invoice(
     Paramètres :
     - thirdparty_id : ID du client (obligatoire)
     - date          : date de facture (YYYY-MM-DD, défaut : aujourd'hui)
-    - due_date      : échéance (YYYY-MM-DD). Sans elle, Dolibarr la calcule
-                      depuis les conditions de règlement du tiers.
+    - due_date      : échéance (YYYY-MM-DD), envoyée dans date_lim_reglement.
+                      Elle prime toujours sur la condition de règlement, héritée
+                      ou forcée. Sans elle, Dolibarr calcule l'échéance.
     - project_id    : projet à rattacher (optionnel)
     - ref_customer  : référence côté client, bon de commande… (optionnel)
     - note_public / note_private : notes (optionnel)
@@ -7823,16 +7893,28 @@ async def dolibarr_create_invoice(
         - fk_product : ID produit/service Dolibarr (optionnel)
         - date_start / date_end : période de prestation (optionnel)
     - invoice_type  : 0 standard, 1 remplacement, 2 avoir, 3 acompte (défaut 0)
+    - cond_reglement_id : entier strictement positif, prioritaire sur la condition
+      du tiers. Omis ou None : lire le tiers avant création et reprendre sa condition.
 
     La facture est créée en BROUILLON, avec une ref provisoire `(PROVxxx)` :
     elle reste modifiable, et ne prend sa référence définitive qu'à la
     validation (dolibarr_validate_invoice).
 
-    Retourne la facture RELUE : ref, montants, statut, lignes.
+    Retourne la facture RELUE : ref, montants, statut, lignes, et la condition
+    envoyée dans payment_terms_applied (cond_reglement_id, code, label,
+    source : parametre, tiers ou aucune, error). Sans condition sur le tiers ou
+    si sa lecture échoue, aucun identifiant n'est envoyé ; l'erreur est rendue.
     """
     try:
         if not thirdparty_id:
             return "Le thirdparty_id est obligatoire."
+        if cond_reglement_id is not None and (
+            type(cond_reglement_id) is not int or cond_reglement_id <= 0
+        ):
+            return _dumps({
+                "success": False,
+                "error": "cond_reglement_id doit être un entier strictement positif.",
+            })
         invalid = _valid_dates(date=date, due_date=due_date)
         if invalid:
             return invalid
@@ -7844,7 +7926,7 @@ async def dolibarr_create_invoice(
         }
         # `date_lim_reglement` est repris par Invoices::post() comme argument
         # $forceduedate de Facture::create() : c'est le seul moyen d'imposer une
-        # échéance, sans quoi elle est recalculée depuis les conditions du tiers.
+        # échéance, prioritaire sur la condition héritée ou forcée ci-dessous.
         if due_date:
             payload["date_lim_reglement"] = due_date
         if project_id:
@@ -7856,18 +7938,24 @@ async def dolibarr_create_invoice(
         if note_private:
             payload["note_private"] = note_private
 
+        payment_terms = await _creation_payment_terms(thirdparty_id, cond_reglement_id)
+        if payment_terms["cond_reglement_id"] is not None:
+            payload["cond_reglement_id"] = payment_terms["cond_reglement_id"]
         invoice_id = _id_int(await api_post(INVOICES_ENDPOINT, payload))
         if not invoice_id:
             return _dumps({
                 "success": False,
                 "message": "Dolibarr n'a pas renvoyé d'identifiant de facture.",
+                "payment_terms_applied": payment_terms,
             })
 
         added, warnings = await _push_invoice_lines(invoice_id, lines or [])
-        return _dumps(await _invoice_write_report(
+        report = await _invoice_write_report(
             invoice_id, requested=len(lines or []), added=added, warnings=warnings,
             created=True,
-        ))
+        )
+        report["payment_terms_applied"] = payment_terms
+        return _dumps(report)
 
     except Exception as exc:
         return _format_error(exc)
@@ -8141,6 +8229,7 @@ async def dolibarr_create_invoice_from_proposal(
     date: str = "",
     due_date: str = "",
     mark_proposal_invoiced: bool = False,
+    cond_reglement_id: Annotated[int, Field(strict=True, gt=0)] | None = None,
 ) -> str:
     """Crée une facture client en reprenant une proposition commerciale.
 
@@ -8149,10 +8238,13 @@ async def dolibarr_create_invoice_from_proposal(
     Paramètres :
     - proposal_id : ID de la proposition à facturer (obligatoire)
     - date        : date de facture (YYYY-MM-DD, défaut : aujourd'hui)
-    - due_date    : échéance (YYYY-MM-DD, optionnel)
+    - due_date    : échéance (YYYY-MM-DD, optionnel), envoyée dans date_lim_reglement.
+      Elle prime toujours sur la condition de règlement, héritée ou forcée.
     - mark_proposal_invoiced : passer la propale au statut « facturée »
       (défaut : non). L'interface Dolibarr le fait à la facturation ; l'outil
       ne touche pas au statut sans demande explicite.
+    - cond_reglement_id : entier strictement positif, prioritaire. Omis ou None :
+      reprendre la condition du devis, sinon lire celle du tiers avant création.
 
     Dolibarr n'expose de reprise que depuis une COMMANDE ou un CONTRAT
     (`POST /invoices/createfromorder`, `/createfromcontract`) : rien pour une
@@ -8161,11 +8253,21 @@ async def dolibarr_create_invoice_from_proposal(
     sont recréées, pas déplacées, et la facture est liée à la propale via
     `linked_objects` : le lien remonte dans l'onglet « Éléments liés ».
 
-    Retourne la facture créée (brouillon), relue avec ses lignes.
+    Retourne la facture créée (brouillon), relue avec ses lignes, et la condition
+    envoyée dans payment_terms_applied (cond_reglement_id, code, label,
+    source : parametre, devis, tiers ou aucune, error). Sans condition ou si la
+    lecture du tiers échoue, aucun identifiant n'est envoyé ; l'erreur est rendue.
     """
     try:
         if not proposal_id:
             return "Veuillez fournir un proposal_id."
+        if cond_reglement_id is not None and (
+            type(cond_reglement_id) is not int or cond_reglement_id <= 0
+        ):
+            return _dumps({
+                "success": False,
+                "error": "cond_reglement_id doit être un entier strictement positif.",
+            })
         invalid = _valid_dates(date=date, due_date=due_date)
         if invalid:
             return invalid
@@ -8200,11 +8302,15 @@ async def dolibarr_create_invoice_from_proposal(
         if raw.get("ref_client"):
             payload["ref_client"] = raw.get("ref_client")
 
+        payment_terms = await _creation_payment_terms(payload["socid"], cond_reglement_id, raw)
+        if payment_terms["cond_reglement_id"] is not None:
+            payload["cond_reglement_id"] = payment_terms["cond_reglement_id"]
         invoice_id = _id_int(await api_post(INVOICES_ENDPOINT, payload))
         if not invoice_id:
             return _dumps({
                 "success": False,
                 "message": "Dolibarr n'a pas renvoyé d'identifiant de facture.",
+                "payment_terms_applied": payment_terms,
             })
 
         lines = [
@@ -8227,6 +8333,7 @@ async def dolibarr_create_invoice_from_proposal(
         report = await _invoice_write_report(
             invoice_id, requested=len(lines), added=added, warnings=warnings, created=True,
         )
+        report["payment_terms_applied"] = payment_terms
         report["proposal_id"] = proposal_id
         report["proposal_ref"] = raw.get("ref")
         report["proposal_total_ht"] = _num(raw.get("total_ht"))

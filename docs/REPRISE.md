@@ -1,4 +1,91 @@
-# Reprise courante : lot MC, outillage, 17/10/2026
+# Reprise courante : conditions de règlement à la création, 19/10/2026
+
+Cette section fait foi pour ce chantier. Les sections suivantes restent
+historiques et ne prescrivent aucun changement de branche ou de worktree.
+
+## Objectif, décisions et état courant
+
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/mcp-wt-conditions/mcp-foss-connectors`.
+- Branche : `fix/dolibarr-conditions-reglement-creation`, base vérifiée
+  `origin/main` à `651f534`, arbre initial propre. Livraison : commit portant
+  cette section sur cette branche, avec le correctif et ses tests.
+- Dolibarr passe de **1.8.4 à 1.8.5** dans le source et le manifeste.
+  Le numéro pourra être réattribué à la fusion si un autre chantier utilise
+  1.8.5 avant intégration. Les autres connecteurs et le paquet restent inchangés.
+- Les créations de facture et de devis reprennent la condition du tiers.
+  La création de facture depuis un devis reprend d'abord celle du devis,
+  sinon celle du tiers. Un `cond_reglement_id` explicite est prioritaire ;
+  omis ou `null`, il active cette reprise. La validation stricte de la 1.8.4
+  est conservée : entier positif, sans booléen, chaîne ni décimal, aussi via MCP.
+- Chaque création rend `payment_terms_applied` : identifiant envoyé, code,
+  libellé, provenance (`parametre`, `devis`, `tiers`, `aucune`) et erreur.
+  Un tiers sans condition ou inaccessible laisse la création partir sans
+  `cond_reglement_id`. Les erreurs de lecture restent visibles. Le dictionnaire
+  utilise le cache existant, y compris lorsque son accès échoue.
+- `due_date` explicite reste transmis dans `date_lim_reglement` et prioritaire
+  sur la condition héritée ou forcée. Aucun changement du mode de règlement.
+  L'indicateur à +1 jour rappelle « À réception » (`RECEP`, `nbjour = 1`) :
+  cette heuristique ne prouve pas une absence de condition ni un retard réel.
+- Aucun autre worktree consulté ou modifié. Le chantier distinct
+  `mcp-wt-builddoc`, branche `fix/dolibarr-list-documents-meetingnotes`, garde
+  son rôle documentaire propre ; son état n'a pas été revérifié ici.
+  Aucun changement de branche, réseau, bundle, installation ni push.
+
+## Vérifications effectuées
+
+Venv existant : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+Les tests de création utilisent un transport simulé compté. Les anciennes
+fixtures de validité des devis simulent désormais aussi la lecture du tiers.
+
+| Vérification | Résultat mesuré |
+| --- | --- |
+| Suite complète initiale | **1 535 réussis, 1 ignoré**, 5,98 s |
+| Tests écrits avant le correctif, création + conditions + exports | **81 échecs, 99 réussis**, 1,97 s |
+| Suites ciblées après correctif, avec tiers, historique Dolibarr et manifestes | **592 réussis, 1 ignoré**, 3,30 s |
+| Suite complète finale | **1 611 réussis, 1 ignoré**, 6,49 s |
+| Ruff, dépôt complet | **0 diagnostic** |
+| `git diff --check` | **0 erreur** |
+
+Les 76 nouveaux cas de création ont tous été vus rouges avant modification
+du serveur. Les cinq autres échecs attendus portaient sur la note à +1 jour
+et le schéma MCP. Le seul test ignoré reste l'intégration Dolibarr réelle
+préexistante ; aucun test supprimé ou désactivé.
+
+Comparaison AST avec `651f534`, hors docstrings : seules les trois fonctions
+de création changent, avec un helper commun ajouté. Les **78** entrées du
+manifeste sont conservées. Aucun tiret typographique interdit ajouté.
+
+Commandes exécutées depuis la racine :
+
+```sh
+PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
+/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m ruff check --no-cache .
+git diff --check
+```
+
+## Références, limites et suite ordonnée
+
+Sources : `dolibarr_mcp/{server.py,manifest.json,README.md,CHANGELOG.md}`.
+Contrats : `tests/test_dolibarr_payment_terms_creation.py`,
+`tests/test_dolibarr_payment_terms.py`, `tests/test_dolibarr_exports.py`,
+`tests/test_dolibarr.py` et `tests/test_dolibarr_thirdparty_write.py`.
+Les fichiers d'entrée `AGENTS.md` et `CLAUDE.md` restent inchangés.
+
+Les tests prouvent les valeurs transmises et le traitement de réponses
+synthétiques. `payment_terms_applied` décrit la condition envoyée ; aucune
+recette réelle ni nouvelle vérification de persistance n'a été effectuée.
+La priorité de l'échéance repose sur le champ `date_lim_reglement`, déjà
+identifié dans le code comme l'argument `forceduedate` de la création Dolibarr.
+Le dictionnaire reste mémorisé pendant la session ; après modification du
+paramétrage ou des droits, redémarrer pour le relire.
+
+1. Relire et intégrer cette seule branche, en arbitrant le numéro 1.8.5 si nécessaire.
+2. Décider séparément d'une recette sur service réel et d'une livraison.
+   Ces opérations n'ont pas été exécutées dans ce chantier.
+
+---
+
+# Reprise historique : lot MC, outillage, 17/10/2026
 
 Cette section fait foi pour la reprise. Les sections suivantes sont historiques,
 notamment leurs commandes sur d'anciens worktrees et leurs demandes de merge.

@@ -97,6 +97,9 @@ async def test_echeance_de_la_facture_et_note(api, nom, echeance, attendu):
     assert ("payment_terms_note" in reponse) is (attendu is True)
     if attendu is True:
         assert "défaut Dolibarr" in reponse["payment_terms_note"]
+        assert "À réception" in reponse["payment_terms_note"]
+        assert "RECEP" in reponse["payment_terms_note"]
+        assert "nbjour" in reponse["payment_terms_note"]
         assert "négociée" in reponse["payment_terms_note"]
         assert "days_late surévalue" in reponse["payment_terms_note"]
     if nom in OUTILS_LISTE:

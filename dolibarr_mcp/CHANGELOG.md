@@ -1,5 +1,17 @@
 # Historique Dolibarr
 
+## 1.8.5 - 2026-10-19
+
+- Les factures et devis créés reprennent la condition de règlement du tiers.
+  Une facture issue d'un devis reprend d'abord celle du devis, puis celle du tiers.
+  `cond_reglement_id`, entier strictement positif facultatif, permet de la forcer.
+- `payment_terms_applied` rend la condition envoyée, son code, son libellé,
+  sa provenance et les erreurs de lecture. Un tiers inaccessible ne bloque pas
+  la création ; aucune condition n'est alors envoyée. Le dictionnaire est mémorisé.
+- `due_date` explicite reste prioritaire dans les deux créations de facture.
+  L'indicateur d'échéance à +1 jour rappelle la condition « À réception »
+  (`RECEP`, `nbjour = 1`) et ne présume plus une absence de condition.
+
 ## 1.8.4 - 2026-10-17
 
 - `dolibarr_update_thirdparty` accepte `cond_reglement_id`, entier strictement

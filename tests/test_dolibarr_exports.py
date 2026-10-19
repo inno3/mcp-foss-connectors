@@ -191,6 +191,16 @@ async def test_protocol_initialize_and_list_tools_in_memory(capsys):
                 assert result.serverInfo.version == manifest["version"]
                 assert len(tools.tools) == 78
                 assert len({tool.name for tool in tools.tools}) == 78
+                for nom in (
+                    "dolibarr_create_invoice", "dolibarr_create_proposal",
+                    "dolibarr_create_invoice_from_proposal",
+                ):
+                    outil = next(t for t in tools.tools if t.name == nom)
+                    parametre = outil.inputSchema["properties"]["cond_reglement_id"]
+                    assert parametre["default"] is None
+                    assert "cond_reglement_id" not in outil.inputSchema.get("required", [])
+                    assert {"type": "integer", "exclusiveMinimum": 0} in parametre["anyOf"]
+                    assert {"type": "null"} in parametre["anyOf"]
                 proposal = next(t for t in tools.tools if t.name == "dolibarr_list_proposals")
                 assert "cursor" in proposal.inputSchema["properties"]
                 for nom in (

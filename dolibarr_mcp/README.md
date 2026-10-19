@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.4.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.5.** Voir le [CHANGELOG](CHANGELOG.md).
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre
@@ -720,24 +720,48 @@ inexistante ou invalide rend `payments=null`, avec `payments_error` et un
 champ indisponible explicite. `include_payments=false` évite ces appels
 supplémentaires et signale que les paiements n'ont pas été demandés.
 
-### Conditions de règlement depuis 1.8.1
+### Conditions de règlement
+
+Depuis la 1.8.5, les créations acceptent `cond_reglement_id`, entier strictement
+positif facultatif. Zéro, valeurs négatives, booléens, chaînes et décimaux sont
+refusés avant tout appel, y compris via MCP. Omis ou `null`, il active la reprise :
+
+- `dolibarr_create_invoice` : paramètre prioritaire, sinon condition du tiers lue avant création, sinon aucune.
+- `dolibarr_create_proposal` : paramètre prioritaire, sinon condition du tiers lue avant création, sinon aucune.
+- `dolibarr_create_invoice_from_proposal` : paramètre prioritaire, sinon condition du devis, sinon celle du tiers, sinon aucune.
+
+Le tiers n'est pas lu quand le paramètre est fourni ou que le devis porte déjà
+une condition. Sans condition sur le tiers, aucun `cond_reglement_id` n'est
+envoyé. Une lecture du tiers impossible laisse aussi la création se poursuivre
+sans condition, avec l'erreur dans la réponse.
+
+`payment_terms_applied` décrit la condition envoyée : `cond_reglement_id`,
+`code`, `label`, `source` (`parametre`, `devis`, `tiers` ou `aucune`) et `error`
+(`null` en l'absence d'erreur). Le code et le libellé proviennent du dictionnaire
+en cache décrit ci-dessous. Son indisponibilité est signalée dans `error` et
+ne bloque pas l'envoi d'un identifiant connu. `source=aucune` laisse les trois
+champs de condition à `null`. Pour les deux créations de facture, `due_date`
+est envoyé dans `date_lim_reglement` et prime toujours sur le calcul lié à la
+condition, héritée ou forcée. Le mode de règlement reste inchangé.
 
 `dolibarr_list_invoices`, `dolibarr_list_supplier_invoices`,
-`dolibarr_get_invoice` et `dolibarr_get_supplier_invoice` rendent désormais
+`dolibarr_get_invoice` et `dolibarr_get_supplier_invoice` rendent depuis la 1.8.1
 `cond_reglement_id`, `cond_reglement_code`, `cond_reglement_label` pour la
 facture, et les trois champs préfixés par `thirdparty_` pour son tiers.
-La condition du tiers ne remplace jamais celle de la facture. Hors erreur de
+En lecture, la condition du tiers ne remplace jamais celle de la facture. Hors erreur de
 lecture signalée, `null` sur les deux conditions signifie qu'aucune condition
 de règlement n'est paramétrée dans Dolibarr. `dolibarr_get_thirdparty` rend
 aussi les trois champs : tous à `null`, ils indiquent l'absence de condition
-paramétrée sur le tiers, à l'origine d'échéances par défaut sur ses factures.
+paramétrée sur le tiers.
 
-`date_due` peut être une valeur par défaut Dolibarr (date de facture + 1 jour),
-sans échéance négociée. `date_due_is_default` signale cette heuristique :
+Une `date_due` à date de facture + 1 jour correspond notamment à la condition
+« À réception » (`RECEP`, `nbjour = 1`) de Dolibarr, parfois appliquée par défaut.
+Cet intervalle ne prouve pas l'absence de condition ni un retard réel.
+`date_due_is_default` signale cette heuristique :
 `true` pour cet intervalle à vérifier, `false` pour un autre intervalle, `null` si l'une des
-dates manque ou est illisible. Sur une échéance par défaut, `days_late` mesure
-l'ancienneté de la facture, pas un retard de règlement ; son calcul reste
-inchangé. Les listes donnent `date_due_default_count` sur la seule page rendue
+dates manque ou est illisible. Vérifier la condition négociée avant une relance :
+si elle prévoit un délai plus long, `days_late` surévalue le retard de règlement.
+Son calcul reste inchangé. Les listes donnent `date_due_default_count` sur la seule page rendue
 et `payment_terms_note` seulement si ce nombre est non nul. Cette même note
 accompagne le détail d'une facture dont `date_due_is_default=true`.
 

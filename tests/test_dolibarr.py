@@ -689,6 +689,17 @@ class TestBug5CreateProposalDateValidity:
     timestamp Unix absolu via _date_str_to_ts().
     """
 
+    @pytest.fixture(autouse=True)
+    def payment_terms_reads(self, monkeypatch):
+        async def get(endpoint, params=None):
+            if endpoint == server.PAYMENT_TERMS_ENDPOINT:
+                return []
+            assert endpoint == "thirdparties/1"
+            return {"id": "1"}
+
+        monkeypatch.setattr(server, "api_get", get)
+        monkeypatch.setattr(server, "_PAYMENT_TERMS_CACHE", None)
+
     @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
     async def test_date_validity_sent_as_unix_timestamp(
         self, mock_post: AsyncMock
