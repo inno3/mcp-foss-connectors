@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.5"
+__version__ = "1.8.6"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -693,19 +693,40 @@ def _payment_term_values(row: dict, dictionnaire: dict) -> dict:
 
 async def _creation_payment_terms(
     thirdparty_id: int | None, cond_reglement_id: int | None, proposal: dict | None = None,
+    *, configuration: str | None = None,
 ) -> dict:
     """Choisit la condition à envoyer : paramètre validé, devis, puis tiers.
+
+    À la création d'un tiers, configuration remplace l'héritage devis/tiers :
+    code du dictionnaire ou identifiant positif, chaîne vide pour aucun défaut.
 
     Les lectures complémentaires restent facultatives ; leurs erreurs sont
     rendues sans empêcher la création. Le dictionnaire utilise le cache commun.
     """
-    dictionnaire = await _payment_terms()
     resultat = {
         "cond_reglement_id": None, "code": None, "label": None,
-        "source": "aucune", "error": dictionnaire["error"],
+        "source": "aucune", "error": None,
     }
+    if configuration == "" and cond_reglement_id is None:
+        return resultat
+
+    dictionnaire = await _payment_terms()
+    resultat["error"] = dictionnaire["error"]
     if cond_reglement_id is not None:
         identifiant, source = cond_reglement_id, "parametre"
+    elif configuration is not None:
+        source = "configuration"
+        try:
+            identifiant = int(configuration)
+        except ValueError:
+            identifiant = dictionnaire["by_code"].get(configuration.upper(), {}).get("id")
+        if not identifiant or identifiant <= 0:
+            resultat["error"] = "; ".join(filter(None, (
+                resultat["error"],
+                f"DOLIBARR_THIRDPARTY_PAYMENT_TERM : impossible de résoudre {configuration!r} "
+                "en identifiant entier strictement positif.",
+            )))
+            return resultat
     else:
         identifiant = _payment_term_values(proposal or {}, dictionnaire)["cond_reglement_id"]
         source = "devis"
@@ -2866,6 +2887,7 @@ async def dolibarr_create_thirdparty(
     note_private: str = "",
     note_public: str = "",
     force: bool = False,
+    cond_reglement_id: Annotated[int, Field(strict=True, gt=0)] | None = None,
 ) -> str:
     """Crée un nouveau tiers dans Dolibarr.
 
@@ -2885,12 +2907,36 @@ async def dolibarr_create_thirdparty(
     - email, phone, url, address, zip_code, town, country_code : coordonnées
     - note_private, note_public : notes
     - force : créer même si un doublon potentiel (nom/email) existe déjà (défaut: False)
+    - cond_reglement_id : entier strictement positif, prioritaire sur le réglage
+      DOLIBARR_THIRDPARTY_PAYMENT_TERM. Omis ou None : utiliser ce réglage.
+
+    DOLIBARR_THIRDPARTY_PAYMENT_TERM est lu à chaque appel : code du dictionnaire
+    insensible à la casse (ex. 30D) ou identifiant entier positif. Vide ou absent :
+    aucun défaut. Un code inconnu ou un dictionnaire illisible laisse créer sans
+    condition, avec l'erreur dans la réponse. Un identifiant peut être envoyé
+    sans dictionnaire. La condition ne s'applique qu'aux clients et prospects
+    (client 1, 2 ou 3), jamais à un tiers uniquement fournisseur.
+
+    La condition est envoyée dans le POST, puis vérifiée par relecture du tiers.
+    Sans condition envoyée, pas de relecture du tiers. payment_terms_applied
+    rend cond_reglement_id, code, label, source (parametre, configuration, aucune
+    ou non_applicable), verified et error. verified compare la valeur brute relue
+    à celle envoyée ; None si rien n'est envoyé ou si la relecture échoue.
+    Une relecture impossible ou différente est signalée sans annuler le succès
+    de création ni rejouer le POST. L'anti-doublon précède le dictionnaire.
 
     Retourne l'ID du tiers créé, ou un signalement de doublon.
     """
     try:
         if not name:
             return "Le nom (name) est obligatoire."
+        if cond_reglement_id is not None and (
+            type(cond_reglement_id) is not int or cond_reglement_id <= 0
+        ):
+            return _dumps({
+                "success": False,
+                "error": "cond_reglement_id doit être un entier strictement positif.",
+            })
 
         # Anti-doublon : nom identique (insensible à la casse) ou email identique.
         # En cas d'erreur de recherche (ex. 404 "no third parties found"), on
@@ -2959,13 +3005,46 @@ async def dolibarr_create_thirdparty(
         if note_public:
             data["note_public"] = note_public
 
+        if client_val in (1, 2, 3):
+            payment_terms = await _creation_payment_terms(
+                None, cond_reglement_id,
+                configuration=os.environ.get("DOLIBARR_THIRDPARTY_PAYMENT_TERM", "").strip(),
+            )
+        else:
+            payment_terms = {
+                "cond_reglement_id": None, "code": None, "label": None,
+                "source": "non_applicable", "error": None,
+            }
+        payment_terms["verified"] = None
+        if payment_terms["cond_reglement_id"] is not None:
+            data["cond_reglement_id"] = payment_terms["cond_reglement_id"]
+
         result = await api_post("thirdparties", data)
+
+        if payment_terms["cond_reglement_id"] is not None:
+            try:
+                tiers = await api_get(f"thirdparties/{result}")
+                if (not isinstance(tiers, dict) or "error" in tiers
+                        or str(tiers.get("id")) != str(result)):
+                    raise ValueError("Le tiers relu est absent ou son identifiant ne correspond pas.")
+                raw_id = _first_present(tiers, "cond_reglement_id", "cond_reglement", "fk_cond_reglement")
+                payment_terms["verified"] = str(raw_id) == str(payment_terms["cond_reglement_id"])
+                if not payment_terms["verified"]:
+                    payment_terms["error"] = "; ".join(filter(None, (
+                        payment_terms["error"],
+                        "La condition relue ne correspond pas à la condition demandée.",
+                    )))
+            except Exception as exc:
+                payment_terms["error"] = "; ".join(filter(None, (
+                    payment_terms["error"], f"Relecture du tiers : {_format_error(exc)}",
+                )))
 
         return _dumps({
             "success": True,
             "thirdparty_id": result,
             "name": name,
             "type": type_tiers,
+            "payment_terms_applied": payment_terms,
             "message": f"Tiers '{name}' créé avec succès.",
         })
 

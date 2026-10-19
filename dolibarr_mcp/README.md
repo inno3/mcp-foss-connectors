@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.5.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.6.** Voir le [CHANGELOG](CHANGELOG.md).
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre
@@ -33,6 +33,7 @@ est inaccessible.
 |---|---|---|
 | `DOLIBARR_URL` | yes | Base URL of the Dolibarr instance, e.g. `https://erp.example.com`. No trailing slash. The REST API module must be enabled. |
 | `DOLIBARR_API_KEY` | yes | API key of a Dolibarr user (sent as the `DOLAPIKEY` header). Generate it on the user record → *API key* tab. |
+| `DOLIBARR_THIRDPARTY_PAYMENT_TERM` | no | Default payment term for new customers and prospects: dictionary code (case-insensitive) or positive integer ID. Empty or unset: no default. Read on each call; see [Conditions de règlement](#conditions-de-règlement). |
 | `DOLIBARR_WEB_LOGIN` | no | Login used **only** for the writes the REST API does not expose : today, bank reconciliation alone. Leave unset to disable that fallback. |
 | `DOLIBARR_WEB_PASSWORD` | no | Password for the account above. Needs the *bank → reconcile* permission. |
 
@@ -722,8 +723,37 @@ supplémentaires et signale que les paiements n'ont pas été demandés.
 
 ### Conditions de règlement
 
-Depuis la 1.8.5, les créations acceptent `cond_reglement_id`, entier strictement
-positif facultatif. Zéro, valeurs négatives, booléens, chaînes et décimaux sont
+Depuis la **1.8.6**, `dolibarr_create_thirdparty` accepte le paramètre facultatif
+`cond_reglement_id`, entier strictement positif, prioritaire sur le réglage
+d'installation `DOLIBARR_THIRDPARTY_PAYMENT_TERM`. Omis ou `null`, il utilise
+ce réglage. Zéro, valeurs négatives, booléens, chaînes et décimaux sont refusés
+pour le paramètre avant tout appel, y compris via MCP.
+
+La variable est lue à chaque appel : code du dictionnaire insensible à la casse
+(par exemple `30D` ou `30d`), ou identifiant entier positif (par exemple `2`).
+Elle est vide par défaut ; vide ou absente et sans paramètre explicite, aucune
+condition n'est envoyée et les appels restent ceux de la 1.8.5. Un code inconnu,
+un réglage invalide ou un dictionnaire illisible pour un code laisse créer le tiers sans condition, avec
+une erreur explicative. Un identifiant numérique reste envoyé même sans
+dictionnaire lisible. Ce défaut concerne uniquement les clients et prospects
+(`client` 1, 2 ou 3), y compris les clients également fournisseurs. Un tiers
+uniquement fournisseur ne reçoit aucune condition, même avec le paramètre.
+
+La condition est transmise dans le POST de création, puis le tiers est relu
+une seule fois par `thirdparties/{id}` si une condition a été envoyée.
+`payment_terms_applied` contient `cond_reglement_id`, `code`, `label`, `source`,
+`verified` et `error`. Les provenances sont `parametre`, `configuration`,
+`aucune` si aucune condition n'a pu être choisie, et `non_applicable` hors
+clients/prospects. `verified` vaut `true` si l'identifiant brut relu correspond
+à celui envoyé, `false` en cas d'écart ou de condition absente, `null` si rien
+n'a été envoyé ou si la relecture a échoué. L'écart ou l'erreur de relecture
+figure dans `error`, sans transformer une création réussie en échec ni rejouer
+le POST. L'anti-doublon conserve son comportement et précède toute lecture du
+dictionnaire : un doublon détecté n'entraîne aucun appel supplémentaire.
+
+Depuis la 1.8.5, les créations de facture et de devis acceptent
+`cond_reglement_id`, entier strictement positif facultatif. Zéro, valeurs
+négatives, booléens, chaînes et décimaux sont
 refusés avant tout appel, y compris via MCP. Omis ou `null`, il active la reprise :
 
 - `dolibarr_create_invoice` : paramètre prioritaire, sinon condition du tiers lue avant création, sinon aucune.
@@ -735,8 +765,8 @@ une condition. Sans condition sur le tiers, aucun `cond_reglement_id` n'est
 envoyé. Une lecture du tiers impossible laisse aussi la création se poursuivre
 sans condition, avec l'erreur dans la réponse.
 
-`payment_terms_applied` décrit la condition envoyée : `cond_reglement_id`,
-`code`, `label`, `source` (`parametre`, `devis`, `tiers` ou `aucune`) et `error`
+Pour ces factures et devis, `payment_terms_applied` décrit la condition envoyée :
+`cond_reglement_id`, `code`, `label`, `source` (`parametre`, `devis`, `tiers` ou `aucune`) et `error`
 (`null` en l'absence d'erreur). Le code et le libellé proviennent du dictionnaire
 en cache décrit ci-dessous. Son indisponibilité est signalée dans `error` et
 ne bloque pas l'envoi d'un identifiant connu. `source=aucune` laisse les trois

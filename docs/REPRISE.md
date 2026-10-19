@@ -1,7 +1,96 @@
-# Reprise courante : conditions de règlement à la création, 19/10/2026
+# Reprise courante : condition de règlement par défaut des tiers, 19/10/2026
 
 Cette section fait foi pour ce chantier. Les sections suivantes restent
 historiques et ne prescrivent aucun changement de branche ou de worktree.
+
+## Objectif, décisions et état courant
+
+- Branche vérifiée : `fix/dolibarr-tiers-condition-defaut`, base `origin/main`
+  à `77105e3` (Dolibarr 1.8.5), arbre initial propre. Le worktree courant est
+  celui du chantier conditions déjà indiqué dans la section historique suivante.
+  Le commit qui porte cette section livre le correctif sur cette seule branche.
+- Dolibarr passe de **1.8.5 à 1.8.6**, source, manifeste et README synchronisés.
+  Le numéro reste réattribuable au merge. Aucun autre connecteur ne change.
+- `dolibarr_create_thirdparty` accepte `cond_reglement_id`, entier strictement
+  positif facultatif, avec la même validation stricte que la mise à jour du tiers,
+  y compris via MCP. Il prime sur `DOLIBARR_THIRDPARTY_PAYMENT_TERM`.
+  Omis ou `null`, il active le réglage d'installation, vide par défaut et lu
+  à chaque appel : code insensible à la casse ou identifiant entier positif.
+- Seuls les clients et prospects (`client` 1, 2 ou 3) reçoivent la condition.
+  Un fournisseur seul reçoit `source=non_applicable`, même avec le paramètre.
+  Un réglage invalide ou un code non résolu laisse créer sans condition avec
+  l'erreur. Un identifiant numérique reste envoyé sans dictionnaire lisible.
+  Le helper `_creation_payment_terms()` et le cache `_payment_terms()` sont
+  réutilisés ; aucune constante globale Dolibarr n'intervient.
+- L'anti-doublon est conservé et précède toute lecture du dictionnaire.
+  Sans paramètre ni réglage, seuls les champs de réponse s'enrichissent :
+  le POST et le nombre d'appels restent ceux de la 1.8.5.
+- La condition est envoyée dans le POST, puis le tiers est relu une fois si
+  une condition a été envoyée. `payment_terms_applied` rend l'identifiant, le
+  code, le libellé, `source` (`parametre`, `configuration`, `aucune` ou
+  `non_applicable`), `verified` et `error`. La comparaison porte sur la valeur
+  brute relue. `verified=null` signifie aucune condition envoyée ou relecture
+  impossible, `false` signale un écart. Ces erreurs préservent le succès de
+  création et l'identifiant du tiers ; aucun POST n'est rejoué.
+- Choix documentaire : variable dans le README et la docstring. Le manifeste
+  lie actuellement les variables configurables à `user_config` ; il reste
+  inchangé hors version, sans nouveau champ `user_config` ni défaut ajouté.
+- Travail seul, sans réseau, instance réelle, bundle, installation ni push.
+  Aucun autre worktree consulté ou modifié, notamment le chantier documentaire
+  `mcp-wt-builddoc` déjà référencé ci-dessous. Son état reste non revérifié.
+
+## Vérifications effectuées
+
+| Vérification | Résultat mesuré |
+| --- | --- |
+| Suite complète initiale | **1 611 réussis, 1 ignoré**, 8,84 s |
+| Nouveaux tests + schéma MCP avant modification du serveur | **62 échecs, 1 réussite**, 1,93 s |
+| Créations, conditions, écriture tiers, exports et manifestes après correctif | **296 réussis**, 3,13 s |
+| Suite complète finale | **1 673 réussis, 1 ignoré**, 8,90 s |
+| Ruff, dépôt complet | Initial et final : **0 diagnostic** |
+| `git diff --check` | Initial et final : **0 erreur** |
+
+Les **62 nouveaux cas** ont été écrits avant le serveur : 61 étaient rouges,
+le garde-fou anti-doublon sans nouveau paramètre était déjà vert. Le 62e échec
+concerne le test existant du schéma MCP, étendu à la création du tiers.
+Les tests comptent les appels simulés, couvrent la configuration à l'appel,
+les priorités, les erreurs cumulées et la comparaison brute après création.
+Les trois commandes de vérification de la section 1.8.5 ci-dessous sont
+réutilisées depuis la racine avec le même venv existant.
+Le seul test ignoré reste l'intégration Dolibarr réelle préexistante ; aucun
+test n'a été supprimé ou désactivé.
+
+Comparaison AST avec `77105e3`, hors docstrings : seules
+`_creation_payment_terms()` et `dolibarr_create_thirdparty()` changent, aucune
+fonction ajoutée ou supprimée. Les **78** entrées du manifeste et sa
+configuration restent identiques, seule la version change. Aucun tiret
+typographique interdit ajouté. Les fichiers d'entrée de reprise sont identiques.
+
+## Références, limites et suite ordonnée
+
+Sources : `dolibarr_mcp/{server.py,manifest.json,README.md,CHANGELOG.md}`.
+Nouveaux contrats : `tests/test_dolibarr_thirdparty_payment_terms_creation.py`.
+Schéma MCP : `tests/test_dolibarr_exports.py`. Régressions : les tests de
+conditions et de création de la 1.8.5, de mise à jour du tiers et de manifestes.
+`AGENTS.md` et `CLAUDE.md` restent courts, identiques et pointent ici.
+
+La preuve repose sur des réponses synthétiques, sans recette réelle.
+La relecture n'est pas transactionnelle : un autre acteur peut modifier le
+tiers entre le POST et le GET. Le dictionnaire reste mémorisé, échecs compris,
+pendant la session ; modifier la variable ne vide pas ce cache. Redémarrer
+pour relire le dictionnaire après modification des conditions ou des droits.
+Les états et vérifications des sections historiques décrivent leurs commits.
+
+1. Relire et intégrer cette seule branche, avec arbitrage du numéro 1.8.6 au merge.
+2. Configurer le réglage d'installation et décider séparément d'une recette
+   réelle et d'une livraison. Ces opérations ne sont pas exécutées ici.
+
+---
+
+# Reprise historique : conditions de règlement à la création, 19/10/2026
+
+Livraison 1.8.5 intégrée dans la base `77105e3` du chantier courant. Les branches
+et états ci-dessous décrivent cette livraison antérieure.
 
 ## Objectif, décisions et état courant
 

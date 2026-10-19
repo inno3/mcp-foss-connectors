@@ -192,6 +192,7 @@ async def test_protocol_initialize_and_list_tools_in_memory(capsys):
                 assert len(tools.tools) == 78
                 assert len({tool.name for tool in tools.tools}) == 78
                 for nom in (
+                    "dolibarr_create_thirdparty",
                     "dolibarr_create_invoice", "dolibarr_create_proposal",
                     "dolibarr_create_invoice_from_proposal",
                 ):

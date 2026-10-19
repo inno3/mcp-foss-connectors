@@ -1,5 +1,24 @@
 # Historique Dolibarr
 
+## 1.8.6 - 2026-10-19
+
+- `dolibarr_create_thirdparty` accepte `cond_reglement_id`, entier strictement
+  positif facultatif, prioritaire sur `DOLIBARR_THIRDPARTY_PAYMENT_TERM`.
+  Ce réglage d'installation est lu à chaque appel : code du dictionnaire
+  insensible à la casse ou identifiant positif, vide par défaut.
+- La condition est envoyée à la création des clients et prospects uniquement.
+  Un code inconnu ou un dictionnaire illisible laisse créer sans condition et
+  rend l'erreur ; un identifiant numérique peut être envoyé sans dictionnaire.
+  Le helper de création et le cache des conditions sont réutilisés.
+- `payment_terms_applied` rend la condition, sa provenance et sa vérification
+  par relecture après le POST. Une relecture impossible (`verified=null`) ou
+  différente (`verified=false`) est signalée sans faire échouer la création.
+  Aucun POST n'est rejoué. Sans condition envoyée, aucune relecture du tiers.
+- L'anti-doublon précède le dictionnaire. Sans paramètre ni réglage, les appels
+  et le contenu du POST restent inchangés ; un fournisseur seul reçoit
+  `source=non_applicable`. Aucun champ `user_config` ajouté au manifeste :
+  le réglage est documenté dans le README et la docstring.
+
 ## 1.8.5 - 2026-10-19
 
 - Les factures et devis créés reprennent la condition de règlement du tiers.
