@@ -1,16 +1,66 @@
-# Reprise courante : condition de règlement par défaut des tiers, 19/10/2026
+# Reprise courante : 19/10/2026
 
-Cette section fait foi pour ce chantier. Les sections suivantes restent
-historiques et ne prescrivent aucun changement de branche ou de worktree.
+Objectif du lot H : aligner la reprise sur Git et distinguer source, installation
+et processus chargé. Cette section fait foi ; les suivantes sont historiques.
+
+- **Vérifié dans Git** : `main` = `edb5a36`, Dolibarr **1.8.6**, paquet
+  **0.2.0**. La référence locale `origin/main` est identique, sans contrôle
+  distant. `77105e3` (1.8.5, condition du tiers reprise sur facture/devis) et
+  `edb5a36` (1.8.6, condition configurée à la création du tiers) sont intégrés.
+  Leur intégration et l'attribution de ces numéros sont terminées.
+- **Constat fourni du poste, 19/10 à 10h36** : extensions installées et
+  rechargées, Dolibarr **1.8.5**, Kanboard **0.17.2**, HedgeDoc **1.2.0**,
+  Nextcloud **1.4.1**, WordPress **1.6.0**. Le relevé complet est dans la
+  [reprise de mcp-inno3](/home/jean/ssd_data/jean/RepoGit/mcp-inno3/docs/REPRISE.md).
+- **Vérifié sur disque pendant H** : Dolibarr est désormais en **1.8.6** ;
+  les cinq fichiers source installés sont identiques à ceux de `main`.
+  Ce constat complète le relevé de 10h36, sans prouver un nouveau rechargement.
+  L'extension métier embarquée reste en **0.8.6**, voir la
+  [reprise des extensions](/home/jean/ssd_data/jean/RepoGit/inno3-mcp-extensions/docs/REPRISE.md).
+- **Chantier ouvert** : builddoc reste hors `main`, branche
+  `fix/dolibarr-list-documents-meetingnotes`, commit `4445d44`, worktree
+  `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
+  B12/B26 et la coordination avec le builddoc métier restent à attribuer
+  et arbitrer par Benjamin. Les anciens worktrees conditions et MC sont absents.
+
+Suite ordonnée :
+
+1. **Benjamin** : confirmer le rechargement de Dolibarr 1.8.6 et décider du
+   réglage `DOLIBARR_THIRDPARTY_PAYMENT_TERM` puis de la recette réelle.
+2. **Benjamin** : organiser la reprise builddoc avec le dépôt d'extensions.
+
+Contrôles H : ascendance des commits, versions source/manifeste/README,
+worktrees, chemins et comparaison des fichiers source installés. Le diff AST avec
+1.8.5 confirme les deux seules fonctions modifiées décrites ci-dessous ;
+les 78 outils et la configuration du manifeste sont conservés. Suites de
+tests non rejouées : leurs résultats restent ceux des correctifs historiques.
+Hypothèse non retenue : fichier installé identique ne signifie pas processus
+rechargé. Aucune recette ni vérification distante pendant H.
+
+Lot H : branche `docs/reprise-2026-10-19`, base `edb5a36`, worktree
+`wt_docs/mcp-foss-connectors` repéré par `git worktree list`. Le checkout
+canonique `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors` est sur
+`main`. Références : [README](../README.md),
+[provenance](PROVENANCE_CONNECTEURS.md), sources et tests cités ci-dessous.
+`AGENTS.md` et `CLAUDE.md` restent courts, identiques et sans version figée.
+Contrôle documentaire H : liens ajoutés présents, typographie conforme et
+`git diff --check` propre ; seuls des fichiers Markdown sont modifiés.
+
+---
+
+# Reprise historique : condition de règlement par défaut des tiers, 19/10/2026
+
+Correctif livré par `edb5a36`, intégré dans `main`. Les mesures ci-dessous
+décrivent ce correctif et n'ont pas été rejouées pendant le lot H.
 
 ## Objectif, décisions et état courant
 
-- Branche vérifiée : `fix/dolibarr-tiers-condition-defaut`, base `origin/main`
-  à `77105e3` (Dolibarr 1.8.5), arbre initial propre. Le worktree courant est
-  celui du chantier conditions déjà indiqué dans la section historique suivante.
-  Le commit qui porte cette section livre le correctif sur cette seule branche.
+- Branche d'origine : `fix/dolibarr-tiers-condition-defaut`, base
+  `77105e3` (Dolibarr 1.8.5), arbre initial déclaré propre. Le chantier utilisait
+  le worktree conditions indiqué dans la section suivante. Cette branche et
+  ce worktree ne sont plus présents au contrôle H ; le correctif est dans `main`.
 - Dolibarr passe de **1.8.5 à 1.8.6**, source, manifeste et README synchronisés.
-  Le numéro reste réattribuable au merge. Aucun autre connecteur ne change.
+  Le numéro **1.8.6** est intégré. Aucun autre connecteur ne change.
 - `dolibarr_create_thirdparty` accepte `cond_reglement_id`, entier strictement
   positif facultatif, avec la même validation stricte que la mise à jour du tiers,
   y compris via MCP. Il prime sur `DOLIBARR_THIRDPARTY_PAYMENT_TERM`.
@@ -81,7 +131,7 @@ pendant la session ; modifier la variable ne vide pas ce cache. Redémarrer
 pour relire le dictionnaire après modification des conditions ou des droits.
 Les états et vérifications des sections historiques décrivent leurs commits.
 
-1. Relire et intégrer cette seule branche, avec arbitrage du numéro 1.8.6 au merge.
+1. Intégration réalisée dans `main` par `edb5a36`, en 1.8.6.
 2. Configurer le réglage d'installation et décider séparément d'une recette
    réelle et d'une livraison. Ces opérations ne sont pas exécutées ici.
 
@@ -89,8 +139,8 @@ Les états et vérifications des sections historiques décrivent leurs commits.
 
 # Reprise historique : conditions de règlement à la création, 19/10/2026
 
-Livraison 1.8.5 intégrée dans la base `77105e3` du chantier courant. Les branches
-et états ci-dessous décrivent cette livraison antérieure.
+Livraison 1.8.5 intégrée dans `main` par `77105e3`, avant la 1.8.6.
+Les branches et états ci-dessous décrivent cette livraison antérieure.
 
 ## Objectif, décisions et état courant
 
@@ -168,7 +218,7 @@ identifié dans le code comme l'argument `forceduedate` de la création Dolibarr
 Le dictionnaire reste mémorisé pendant la session ; après modification du
 paramétrage ou des droits, redémarrer pour le relire.
 
-1. Relire et intégrer cette seule branche, en arbitrant le numéro 1.8.5 si nécessaire.
+1. Intégration réalisée dans `main` par `77105e3`, en 1.8.5.
 2. Décider séparément d'une recette sur service réel et d'une livraison.
    Ces opérations n'ont pas été exécutées dans ce chantier.
 
@@ -176,9 +226,9 @@ paramétrage ou des droits, redémarrer pour le relire.
 
 # Reprise historique : lot MC, outillage, 17/10/2026
 
-Cette section fait foi pour la reprise. Les sections suivantes sont historiques,
-notamment leurs commandes sur d'anciens worktrees et leurs demandes de merge.
-`AGENTS.md` et `CLAUDE.md` renvoient à cette même source.
+Trace du lot MC intégré par `2ffac44` et `651f534`. Seule la section en tête
+fait foi pour l'état courant ; les commandes et demandes de merge ci-dessous
+décrivent le chantier du 17/10.
 
 ## État vérifié
 

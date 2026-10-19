@@ -5,6 +5,12 @@ commune aux trois dépôts. Les fichiers installés sont des copies de livraison
 jamais une branche de développement. Leur égalité avec un source ne prouve pas
 que le processus actuellement chargé utilise ce source.
 
+Actualisation du 19/10/2026 : consulter [REPRISE.md](REPRISE.md) pour l'état
+courant de `main`, du poste et des worktrees. Les bases, comptages et copies
+installées ci-dessous sont la photographie du 17/10 ; les chemins MC sont
+désormais absents. L'extension métier de `main` compte maintenant 33 outils
+en 0.8.7, tandis que sa copie installée reste en 0.8.6 avec 32 outils.
+
 ## Dépôts qui font foi
 
 | Repère | Dépôt canonique | Rôle |
