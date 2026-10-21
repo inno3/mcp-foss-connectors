@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.6"
+__version__ = "1.8.7"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -8502,7 +8502,7 @@ async def dolibarr_list_documents(
     supporté tant que ce modulepart n'existe pas côté Dolibarr : l'API répond
     500 « Modulepart meetingnotes not implemented yet ». Pour les comptes
     rendus, utiliser dolibarr_list_meetingnote_documents (extension inno³,
-    module meetingnotes 4.45.0-alpha.72 ou plus récent).
+    module meetingnotes 4.45.0-alpha.77 ou plus récent).
 
     Retourne nom, chemin relatif, taille, type et date de chaque fichier. Le
     chemin relatif est celui qu'attend dolibarr_build_document.

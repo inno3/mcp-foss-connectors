@@ -1,5 +1,16 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.7
+
+- Intégration du lot builddoc sur main 1.8.6, sans perdre les contrats des
+  conditions de règlement des tiers, factures et devis.
+- `dolibarr_list_documents` distingue un modulepart non implémenté d'un objet
+  absent : `unsupported_modulepart=true` pour cette erreur du cœur Dolibarr.
+- Les comptes rendus utilisent `dolibarr_list_meetingnote_documents`, fourni
+  par l'extension inno³ 0.8.8 avec MeetingNotes 4.45.0-alpha.77.
+- Numéro réservé le 21/10/2026 pour l'intégration ; aucun outil cœur ajouté
+  (78 outils), aucune installation ni publication.
+
 ## 1.8.6 - 2026-10-19
 
 - `dolibarr_create_thirdparty` accepte `cond_reglement_id`, entier strictement

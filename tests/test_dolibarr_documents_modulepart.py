@@ -1,4 +1,4 @@
-"""Un modulepart inconnu du cœur Dolibarr se dit comme tel (1.8.4).
+"""Un modulepart inconnu du cœur Dolibarr se dit comme tel (1.8.7).
 
 Constat du 16/10/2026 : ``dolibarr_list_documents(module="meetingnotes",
 object_id=186)`` rendait une erreur 500 brute, « Modulepart meetingnotes not

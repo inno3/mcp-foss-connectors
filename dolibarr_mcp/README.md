@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.6.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.7, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre
@@ -885,11 +885,11 @@ des tâches lues dans cet appel. `scan_truncated` signale ces agrégats partiels
 y compris à la fin du parcours, tandis que `truncated` indique uniquement une
 suite à lire. `scan_note` explique cette différence. Ces minorants ne se somment pas.
 
-## Modulepart non servis par le cœur (1.8.4)
+## Modulepart non servis par le cœur (1.8.7)
 
 L'API documents de Dolibarr code en dur les modulepart qu'elle connaît. Un
 module maison n'en fait pas partie : `dolibarr_list_documents(module="meetingnotes")`
 reçoit un 500 « Modulepart meetingnotes not implemented yet ». L'outil le rend
 désormais comme `unsupported_modulepart: true`, sans le confondre avec un objet
 absent. Les comptes rendus se listent par `dolibarr_list_meetingnote_documents`
-(extension inno³, module meetingnotes 4.45.0-alpha.72).
+(extension inno³ 0.8.8, module meetingnotes 4.45.0-alpha.77).
