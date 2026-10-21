@@ -33,7 +33,7 @@ logger = logging.getLogger("kanboard-mcp")
 
 mcp = FastMCP("kanboard")
 
-SERVER_VERSION = "0.17.2"
+SERVER_VERSION = "0.17.3"
 _identity_lock = asyncio.Lock()
 
 def _identity_refusal(account: str, reason: str, remedy: str = "") -> None:
@@ -1277,8 +1277,10 @@ async def _task_summary(t: dict, as_user: str = "") -> dict:
         # Rendu tel quel, "0" etait une chaine vraie : une carte fermee relue
         # par un appelant qui teste la verite se lisait ouverte.
         "is_active": _is_active_flag(t.get("is_active")),
-        # Le dernier signal recu par une carte n'etait lisible par aucun outil
-        # de liste : il fallait un get_task par carte pour dater une dormance.
+        # La date de derniere modification n'etait lisible par aucun outil de
+        # liste : il fallait un get_task par carte. Elle ne date pas tout signal
+        # pour autant, un commentaire ne la fait pas avancer (voir la docstring
+        # de kanboard_list_tasks).
         "date_created": _ts_to_datetime(t.get("date_creation")),
         "date_modified": _ts_to_datetime(t.get("date_modification")),
         "color_id": t.get("color_id", ""),
@@ -1406,9 +1408,10 @@ async def kanboard_list_tasks(
     - offset : nombre de taches a sauter avant de decouper (pagination)
     - modified_before : ne garder que les cartes dont la derniere modification
       est STRICTEMENT anterieure a cette date (AAAA-MM-JJ, ou AAAA-MM-JJ HH:MM).
-      Sert a repondre a la dormance (« aucun signal depuis quatorze jours »)
-      sans un appel par carte. Voir plus bas ce qu'il advient des cartes sans
-      date lisible.
+      Repere sans un appel par carte celles qu'on n'a ni editees ni deplacees
+      depuis cette date. Ce n'est PAS « sans aucune activite » : un commentaire
+      ne compte pas, voir « Ce que mesure date_modified » plus bas, ainsi que
+      ce qu'il advient des cartes sans date lisible.
 
     Retourne : total_available (apres filtrage, avant pagination), offset,
     count, has_more, next_offset (present seulement quand has_more vaut true),
@@ -1428,6 +1431,25 @@ async def kanboard_list_tasks(
     Le filtre s'applique AVANT la pagination : `total_available` compte le
     perimetre filtre, pas le projet entier. La borne s'entend dans le fuseau
     du serveur MCP, comme toutes les dates rendues ici.
+
+    Ce que mesure `date_modified` (champ `date_modification` de Kanboard), et
+    donc `modified_before` :
+    - la date AVANCE quand un champ de la carte est modifie (titre,
+      description, echeance, porteur, categorie, priorite...), quand la carte
+      change de colonne ou de swimlane, et quand elle est fermee ou rouverte ;
+    - elle N'AVANCE PAS quand la carte est commentee, quand une sous-tache est
+      creee, modifiee, cochee ou supprimee, quand un lien est ajoute ou retire,
+      ni quand la carte est reordonnee dans sa colonne.
+    Une carte qui ne vit que par ses commentaires sort donc comme non modifiee
+    depuis longtemps. Constate sur l'instance le 29/09/2026 : la carte 7970,
+    commentee le 27/09, gardait une modification au 24/09, et la 8012,
+    commentee a 10 h 09, gardait sa date de creation de 9 h 22. Le reste est lu
+    dans la source de Kanboard (TaskModificationModel, TaskPositionModel,
+    TaskStatusModel, CommentModel, SubtaskModel, TaskLinkModel).
+    Un critere de dormance qui tient compte des commentaires demande de relire
+    ceux des cartes candidates par kanboard_list_comments, un appel par carte :
+    l'API JSON-RPC ne rend pas le dernier commentaire de chaque carte en un
+    appel, et kanboard_recent_activity plafonne a 50 evenements.
 
     La reponse etait auparavant une liste JSON nue, coupee a `limit` sans rien
     en dire : un projet de 109 taches fermees interroge a limit=100 se lisait
@@ -1860,6 +1882,11 @@ async def kanboard_get_board(
     categorie, `is_active`, `date_created` et `date_modified`. `is_active` est
     rendu quelle que soit la valeur de `status`, pour que le perimetre d'une
     reponse se lise sur la carte et pas seulement sur l'appel.
+
+    `date_modified` date la derniere edition, le dernier changement de colonne
+    ou de swimlane, la derniere fermeture ou reouverture. Un commentaire, une
+    sous-tache ou un lien ne la font pas avancer : ce n'est pas la date du
+    dernier signal recu par la carte. Detail dans kanboard_list_tasks.
 
     Une colonne dont les cartes ont ete tronquees porte truncated=true avec
     shown/total, comptes sur le perimetre filtre.

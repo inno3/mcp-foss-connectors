@@ -2775,3 +2775,45 @@ class TestDecodedLabelErrorReadPaths:
         assert f"'{query}' introuvable" in error
         assert "Valeurs disponibles : ['Projet &amp; suivi']" in error
         assert "Valeur la plus proche : 'Projet &amp; suivi'" in error
+
+
+# ---------------------------------------------------------------------------
+# Non-regression : ce que mesure date_modified (0.17.3, 21/10/2026)
+# ---------------------------------------------------------------------------
+
+
+class TestDateModifiedIsNotALastSignal:
+    """La docstring promettait « aucun signal depuis quatorze jours ».
+
+    Or Kanboard n'avance pas date_modification sur un commentaire. Constate le
+    29/09/2026 : la carte 7970, commentee le 27/09, gardait une modification au
+    24/09 ; la 8012, commentee a 10 h 09, gardait sa creation de 9 h 22. Une
+    carte qui ne vit que par ses commentaires sortait dormante a tort, et rien
+    dans la description de l'outil ne le laissait prevoir.
+    """
+
+    @staticmethod
+    def _doc(tool) -> str:
+        return " ".join((tool.__doc__ or "").split())
+
+    def test_list_tasks_no_longer_promises_any_signal(self) -> None:
+        assert "aucun signal depuis" not in self._doc(kanboard_list_tasks)
+
+    def test_list_tasks_says_what_does_not_move_the_date(self) -> None:
+        doc = self._doc(kanboard_list_tasks)
+        assert "N'AVANCE PAS" in doc
+        for event in ("commente", "sous-tache", "lien", "reordonne"):
+            assert event in doc, event
+
+    def test_list_tasks_says_what_moves_the_date(self) -> None:
+        doc = self._doc(kanboard_list_tasks)
+        assert "AVANCE quand" in doc
+        for event in ("colonne", "swimlane", "fermee ou rouverte"):
+            assert event in doc, event
+
+    def test_list_tasks_points_to_the_costly_but_complete_route(self) -> None:
+        assert "kanboard_list_comments" in self._doc(kanboard_list_tasks)
+
+    def test_board_warns_that_a_comment_does_not_move_the_date(self) -> None:
+        doc = self._doc(kanboard_get_board)
+        assert "commentaire" in doc and "date_modified" in doc

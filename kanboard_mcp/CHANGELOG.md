@@ -1,5 +1,19 @@
 # Changelog Kanboard
 
+## 0.17.3 (21/10/2026)
+
+- La documentation de `modified_before` promettait de repérer les cartes sans
+  « aucun signal ». Or Kanboard n'avance pas `date_modification` quand une
+  carte est commentée, quand une sous-tâche ou un lien change, ni quand la carte
+  est réordonnée dans sa colonne. Constaté sur l'instance le 29/09/2026 (cartes
+  7970 et 8012) et confirmé dans la source de Kanboard. Une carte qui ne vit que
+  par ses commentaires sortait dormante à tort.
+- Les docstrings de `kanboard_list_tasks` et `kanboard_get_board`, le README et
+  ce journal disent désormais ce qui fait avancer la date et ce qui ne la fait
+  pas, et comment obtenir un critère qui compte les commentaires.
+- Aucun changement de comportement : mêmes 53 outils, mêmes paramètres, mêmes
+  données rendues.
+
 ## 0.17.2 — 17/10/2026
 
 ### Complément du lot K2

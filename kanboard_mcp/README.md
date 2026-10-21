@@ -16,6 +16,21 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
+## Version 0.17.3: what `date_modified` measures
+
+`date_modified` is Kanboard's `date_modification`. It moves when a task field
+is edited, when the task changes column or swimlane, and when it is closed or
+reopened. It does **not** move when the task is commented, when a subtask is
+created, edited, checked or removed, when a link is added or removed, or when
+the task is reordered within its column.
+
+`modified_before` therefore finds tasks that nobody edited or moved since a
+date. It does not find tasks without any activity: a task that only receives
+comments looks untouched. A dormancy criterion that counts comments has to read
+the comments of each candidate task, one call per task, because the JSON-RPC API
+does not return the latest comment of every task in one call and the project
+activity feed stops at 50 events. Only the documentation changes in 0.17.3.
+
 ## Version 0.17.2: board status, dates and readable text
 
 The [changelog](CHANGELOG.md) also tracks the identity corrections in 0.17.2.
