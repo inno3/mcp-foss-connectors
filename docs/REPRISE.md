@@ -17,6 +17,16 @@ et processus chargé. Cette section fait foi ; les suivantes sont historiques.
   Ce constat complète le relevé de 10h36, sans prouver un nouveau rechargement.
   L'extension métier embarquée reste en **0.8.6**, voir la
   [reprise des extensions](/home/jean/ssd_data/jean/RepoGit/inno3-mcp-extensions/docs/REPRISE.md).
+- **Kanboard, mis à jour le 21/10/2026** : la 0.17.2 est intégrée à `main`
+  (lot K `86eecc5`, lot K2 jusqu'à `c3d2c1a`), poussée, et installée le 17/10
+  à 17h42 avec un `server.py` identique à `main`. Recette réelle du 21/10 sur
+  le projet 262, processus chargé en 0.17.2 : somme des `task_count` du tableau
+  égale aux 466 cartes actives, aucune carte fermée rendue, aucune colonne
+  `status_filter_incomplete`, titre de la carte 7970 décodé, dates présentes,
+  `modified_before` opérant. Les trois branches K à archiver n'existent plus.
+  La **0.17.3** (`b0f14e8`, documentation seule : un commentaire ne fait pas
+  avancer `date_modified`) est intégrée à `main`, **non poussée**, et installée
+  le 21/10 ; elle sera chargée au prochain redémarrage du client.
 - **Chantier ouvert** : builddoc reste hors `main`, branche
   `fix/dolibarr-list-documents-meetingnotes`, commit `4445d44`, worktree
   `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
@@ -28,6 +38,10 @@ Suite ordonnée :
 1. **Benjamin** : confirmer le rechargement de Dolibarr 1.8.6 et décider du
    réglage `DOLIBARR_THIRDPARTY_PAYMENT_TERM` puis de la recette réelle.
 2. **Benjamin** : organiser la reprise builddoc avec le dépôt d'extensions.
+3. **Benjamin** : pousser `main` (Kanboard 0.17.3), redémarrer le client, puis
+   trancher les deux points Kanboard ouverts depuis K2 : vérifier sur le service
+   réel l'attribution de l'auteur sans identité primary prouvée, et décider des
+   relectures après déplacement, fermeture et réouverture.
 
 Contrôles H : ascendance des commits, versions source/manifeste/README,
 worktrees, chemins et comparaison des fichiers source installés. Le diff AST avec
@@ -276,6 +290,47 @@ et `../MC-inno3-mcp-extensions` (reprise documentaire), même branche MC.
 
 # Reprise du dépôt mcp-foss-connectors
 
+## 21/10/2026 : Kanboard 0.17.3, ce que mesure `date_modified`
+
+### Objectif et état
+
+La docstring de `modified_before` promettait « aucun signal depuis quatorze
+jours ». Kanboard n'avance pas `date_modification` sur un commentaire : constaté
+sur l'instance (cartes 7970 et 8012), puis confirmé dans la source, qui exclut
+aussi les sous-tâches, les liens et le réordonnancement dans une colonne. La
+date avance sur une édition de champ, un changement de colonne ou de swimlane,
+une fermeture ou une réouverture. Correction documentaire seule : docstrings de
+`kanboard_list_tasks` et `kanboard_get_board`, README, CHANGELOG, version
+0.17.3. Ni comportement ni signature ne changent.
+
+- Commit `b0f14e8` sur `main` par avance rapide depuis
+  `fix/kanboard-0.17.3-date-modification`, branche supprimée. Non poussé.
+- Installation en place le 21/10/2026 selon `docs/RELEASE.md` 4bis. Sauvegarde :
+  `~/.config/Claude/Claude Extensions/.backup-kanboard-inno3-v7-2026-10-21-v0.17.2`.
+  `src/server.py` remplacé, seule `version` modifiée dans le manifeste installé.
+  Les `tools` installés sont conservés : mêmes 53 noms que le dépôt, seules les
+  descriptions diffèrent, comme à l'installation du 17/10. `src/lib` inchangé.
+
+### Vérifications
+
+- Cinq tests de docstring, rouges avant la correction, verts après. Suite
+  complète : 1 681 réussis, 1 ignoré ; ruff propre.
+- `scripts/check_mcp_stdio.py` sur la copie installée, sous `/usr/bin/python3`
+  (3.14.4) avec son `src/lib` : 53 outils uniques, `kanboard_list_tasks` et
+  `kanboard_get_board` présents. Le script sort pourtant en échec sur ce
+  connecteur : il refuse toute sortie d'erreur, et le serveur journalise ses
+  requêtes en INFO. Même résultat sur la sauvegarde 0.17.2. `serverInfo.version`
+  rend la version de la bibliothèque mcp (1.29.1), pas celle du connecteur.
+
+### Limites et suite
+
+- Le processus chargé reste la 0.17.2 jusqu'au redémarrage du client, sans
+  différence de comportement attendue.
+- Un critère de dormance qui compte les commentaires demande un appel
+  `kanboard_list_comments` par carte candidate. Non implémenté, à décider selon
+  le besoin réel.
+- Pousser `main`.
+
 ## 17/10/2026 : préparation de l'intégration MB, n8n 1.3.1
 
 Le correctif `03b4e10` utilise POST avec un objet JSON vide pour activer et
@@ -499,6 +554,10 @@ et le traitement de réponses synthétiques, pas le comportement du service.
 4. Claude Code pourra archiver, après intégration, `fix/kanboard-identite-agent`,
    `lot/2026-10-10-kanboard-identite` et
    `fix/kanboard-0.17.0-board-status-entites-dates`. Aucune branche supprimée ici.
+
+État au 21/10/2026 : 1 et 4 sont faits (intégration dans `main`, branches
+supprimées) ; 2 l'est pour l'installation et la recette du tableau, pas pour le
+cas primary sans `getMe` ; 3 reste ouvert. Voir la reprise courante.
 
 Ne pas reprendre les consignes de poste périmées des branches historiques ; les
 autres worktrees restent des chantiers distincts. Le répertoire interdit
