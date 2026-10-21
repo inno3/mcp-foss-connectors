@@ -20,7 +20,7 @@ en 0.8.7, tandis que sa copie installée reste en 0.8.6 avec 32 outils.
 | M | `/home/jean/ssd_data/jean/RepoGit/mcp-inno3` | CalDAV, CardDAV, IMAP Bluemind, IMAP Fastmail, Forgejo, Hermine, Mastodon, WordPress Commons |
 
 Bases MC vérifiées : F `11d691f`, E `aa9ede6`, M `6e20a6d`. Les trois
-worktrees `MC-*` de `_codex_wt` utilisent `codex/2026-10-17-outillage`.
+worktrees `MC-*` de `_lots_wt` utilisent `lot/2026-10-17-outillage`.
 Le checkout canonique E est encore sur `wip/meetingnotes-diffusion-par-principe`
 à `a139253` : son emplacement ne suffit pas à identifier la branche à livrer.
 
@@ -98,4 +98,4 @@ Vérifier la branche et le commit retenus avant une livraison ; une migration
 de configuration ou de dépendances exige sa propre recette.
 
 Preuves et commandes du lot :
-[MC.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_execution-2026-10-17/MC.rapport.md).
+[MC.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).

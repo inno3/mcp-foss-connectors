@@ -8,6 +8,15 @@ ont été réécrits de la même façon. Les empreintes citées dans les fichier
 ont été mises à jour ; pour une citation ancienne trouvée ailleurs, cette table donne
 la nouvelle empreinte.
 
+## Nommage neutre du 21/10/2026
+
+Les noms de branches de lot et de dossiers de travail cités dans la documentation
+et dans les sorties de validation ont été neutralisés : préfixe de branche `lot/`,
+dossier de travail `RepoGit/_lots_wt/`. Les branches citées sous ce préfixe sont
+fusionnées et n'existent plus ; les étiquettes `archive/lot/` pointent les mêmes
+commits que celles qu'elles remplacent. Les mesures enregistrées sont inchangées,
+seuls les chemins et les noms de branche cités le sont.
+
 96 commits concernés.
 
 | Date | Ancienne | Nouvelle | Sujet |

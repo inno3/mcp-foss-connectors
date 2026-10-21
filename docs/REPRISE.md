@@ -172,7 +172,7 @@ Les branches et états ci-dessous décrivent cette livraison antérieure.
 
 ## Vérifications effectuées
 
-Venv existant : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+Venv existant : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
 Les tests de création utilisent un transport simulé compté. Les anciennes
 fixtures de validité des devis simulent désormais aussi la lecture du tiers.
 
@@ -197,8 +197,8 @@ manifeste sont conservées. Aucun tiret typographique interdit ajouté.
 Commandes exécutées depuis la racine :
 
 ```sh
-PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
-/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m ruff check --no-cache .
+PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
+/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
 git diff --check
 ```
 
@@ -232,8 +232,8 @@ décrivent le chantier du 17/10.
 
 ## État vérifié
 
-- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/MC-mcp-foss-connectors`,
-  branche `codex/2026-10-17-outillage`, base `11d691f`, initialement propre.
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/MC-mcp-foss-connectors`,
+  branche `lot/2026-10-17-outillage`, base `11d691f`, initialement propre.
 - `main` local : `11d691f`. K/K2, L et S sont intégrés. MB l'est aussi :
   `03b4e10`, merge `f72e12d`, numérotation n8n `11d691f` en **1.3.1**.
   L'ancien blocage de permission décrit plus bas est donc périmé.
@@ -258,7 +258,7 @@ préexistante. Ruff sur les deux fichiers Python touchés : **0 diagnostic**.
 Le constructeur n'a été exécuté que sur des fixtures avec pip simulé ; aucun
 bundle de livraison ni dépendance n'a été installé.
 
-[Rapport MC](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_execution-2026-10-17/MC.rapport.md).
+[Rapport MC](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).
 Les worktrees associés sont `../MC-mcp-inno3` (repack, manifestes, distribution)
 et `../MC-inno3-mcp-extensions` (reprise documentaire), même branche MC.
 
@@ -281,7 +281,7 @@ et `../MC-inno3-mcp-extensions` (reprise documentaire), même branche MC.
 Le correctif `03b4e10` utilise POST avec un objet JSON vide pour activer et
 désactiver les workflows. Les 19 régressions couvrent aussi le transport,
 les réponses perdues et le journal des écritures déjà acceptées. Les sources
-ont été vérifiées sur `codex/2026-10-17-n8n-activation`, base `37f73a5`.
+ont été vérifiées sur `lot/2026-10-17-n8n-activation`, base `37f73a5`.
 
 Version corrective préparée : **1.3.1**, après maximum du manifeste dépôt
 **1.3.0** et de l'installation locale, où aucun manifeste n8n n'a été trouvé.
@@ -296,7 +296,7 @@ Le merge et la numérotation sur `main` ont été bloqués pendant le lot IM par
 la permission en lecture seule du répertoire `.git` ; ces résultats ne sont
 pas une validation du `main` intégré. Réexécuter la suite après application
 et consigner le commit final. Détails dans
-[IM.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_execution-2026-10-17/IM.rapport.md).
+[IM.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/IM.rapport.md).
 Recette réelle et diffusion : **à arbitrer par Benjamin**.
 
 ## 17/10/2026 : lot S, conditions de règlement du tiers en 1.8.4
@@ -307,15 +307,15 @@ Ajouter `cond_reglement_id` à `dolibarr_update_thirdparty`, avec validation
 avant toute requête et relecture après écriture. Décision appliquée en version
 **1.8.4**, source, manifeste, README et CHANGELOG synchronisés.
 
-- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/S-mcp-foss-connectors`.
-- Branche existante conservée : `codex/2026-10-17-tiers-reglement`.
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/S-mcp-foss-connectors`.
+- Branche existante conservée : `lot/2026-10-17-tiers-reglement`.
 - Départ vérifié : `cc67fc6`, arbre propre. Commit fonctionnel : `422f0d2`.
 - Extension associée : `../S-inno3-mcp-extensions`, branche
-  `codex/2026-10-17-carnets-commande`, départ `e388488`, version livrée **0.8.6**.
+  `lot/2026-10-17-carnets-commande`, départ `e388488`, version livrée **0.8.6**.
   Sa reprise décrit la preuve par commande. Commit fonctionnel : `acb8cc8`.
 - Les versions installées 1.8.3 et 0.8.5 proviennent de la mission ; aucune
   installation inspectée ni modifiée. Travail seul, hors ligne, sans push ni tag.
-- Rapport commun : [S.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/S.rapport.md).
+- Rapport commun : [S.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/S.rapport.md).
 
 Cette section décrit les worktrees du lot S. Les sections plus anciennes sont
 historiques ; leurs chemins et assertions de poste n'ont pas été revalidés.
@@ -350,7 +350,7 @@ y compris dans les textes historiques, conformément à la règle rédactionnell
 
 ### Vérifications exécutées
 
-Venv existant : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+Venv existant : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
 Commande de base depuis la racine :
 `PYTHONPATH=. <venv>/bin/python -m pytest tests -q -p no:cacheprovider`.
 
@@ -386,7 +386,7 @@ ne sont pas transactionnels ; un autre acteur peut changer le tiers entre eux.
 2. Recette sur service réel, construction, installation et publication :
    **à arbitrer par Benjamin**, non exécutées ici.
 3. Après intégration, faire archiver par l'orchestration les branches
-   `codex/2026-10-17-tiers-reglement` et `codex/2026-10-17-carnets-commande`.
+   `lot/2026-10-17-tiers-reglement` et `lot/2026-10-17-carnets-commande`.
    Aucune branche supprimée dans ce lot.
 
 ---
@@ -402,13 +402,13 @@ Corriger le diagnostic primary sans changer de version, compléter les contrats
 d'auteur des commentaires, supprimer l'injection d'un auteur égal à zéro et
 garder les fichiers d'entrée limités au renvoi vers ce document.
 
-- Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/K-mcp-foss-connectors`.
-- Branche existante vérifiée : `codex/2026-10-17-kanboard-0.17.2` ; départ K2
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/K-mcp-foss-connectors`.
+- Branche existante vérifiée : `lot/2026-10-17-kanboard-0.17.2` ; départ K2
   **`86eecc5`**, arbre initial propre. Aucun autre worktree consulté.
 - État fonctionnel livré en **`c3d2c1a`**, après **`5b95f82`** (identité) et
   **`1b5b706`** (contrats des commentaires). Le commit documentaire qui porte
   cette section termine le lot K2. Source et manifeste restent en **0.17.2**.
-- Venv partagé : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp`.
+- Venv partagé : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
 - Sans réseau, installation, changement de branche, tag ni push ; travail seul.
 - Les trois branches à archiver indiquées dans le lot K existent toujours.
 - Source de vérité : ce document ; historique du lot K conservé ci-dessous.
@@ -416,7 +416,7 @@ garder les fichiers d'entrée limités au renvoi vers ce document.
   `validation/kanboard-0172-known-limits.json` décrivent **`86eecc5`**, pas les
   corrections K2. Leurs empreintes et limites ne décrivent plus le HEAD courant.
 - Rapport K2 :
-  `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K2.rapport.md`.
+  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/K2.rapport.md`.
   Le rapport K reste le relevé historique de l'alignement précédent.
 
 ### Avancée K2 et vérifications
@@ -497,7 +497,7 @@ et le traitement de réponses synthétiques, pas le comportement du service.
 3. Extension des relectures après déplacement, fermeture et réouverture :
    **à arbitrer par Benjamin** ; elle reste hors du périmètre K2, comme dans K.
 4. Claude Code pourra archiver, après intégration, `fix/kanboard-identite-agent`,
-   `codex/2026-10-10-kanboard-identite` et
+   `lot/2026-10-10-kanboard-identite` et
    `fix/kanboard-0.17.0-board-status-entites-dates`. Aucune branche supprimée ici.
 
 Ne pas reprendre les consignes de poste périmées des branches historiques ; les
@@ -523,8 +523,8 @@ d'instance. Aucun autre connecteur n'est à reprendre depuis les branches ancien
 
 ### État courant
 
-- Worktree autorisé : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/K-mcp-foss-connectors`.
-- Branche : `codex/2026-10-17-kanboard-0.17.2`, base `82fcbed`.
+- Worktree autorisé : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/K-mcp-foss-connectors`.
+- Branche : `lot/2026-10-17-kanboard-0.17.2`, base `82fcbed`.
 - Alignement 0.17.1 committé en **`c0f006e`** : source installé repris intégralement, classe
   `KanboardIdentityError` comprise ; `_identity_refusal` appelle directement
   cette classe au lieu du mécanisme conditionnel de la surcouche, sans différence
@@ -547,7 +547,7 @@ d'instance. Aucun autre connecteur n'est à reprendre depuis les branches ancien
 ### Vérifications exécutées
 
 Depuis la racine, avec le venv partagé
-`/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp` :
+`/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp` :
 
 - État initial : `PYTHONPATH=. <venv>/bin/python -m pytest tests -q -p no:cacheprovider`
   → **1 220 réussis, 1 ignoré**, en 5,08 s. Aucun test rouge préexistant.
@@ -558,7 +558,7 @@ Depuis la racine, avec le venv partagé
   (cache d'identité absent). Le lanceur à garde réseau constate **0 tentative réseau**.
 - Empreinte et signatures extraites du fichier installé : **53 outils**.
 - Après alignement 0.17.1 : **1 285 réussis, 1 ignoré** pour la suite complète.
-  **114 contrats** (identité, compatibilité, Codex, création, transport) rejoués
+  **114 contrats** (identité, compatibilité, seconde lignée, création, transport) rejoués
   sur le fichier réellement installé : tous réussis, **0 tentative réseau**.
 - Comparaison AST à l'installé : aucune fonction ajoutée ni supprimée ; seul
   `_identity_refusal` diffère (appel direct de la même exception). Manifestes :
@@ -621,7 +621,7 @@ hors docstrings (dont `_identity_refusal`, équivalent fonctionnellement).
 - `tests/fixtures/kanboard_0171_signatures.json` : signatures extraites de l'installé.
 - `scripts/test_kanboard_crosscheck_offline.py` : lanceur avec garde réseau.
 - Rapport final :
-  `/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/K.rapport.md`.
+  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/K.rapport.md`.
 
 Prochaines actions, dans l'ordre : relire les deux commits et les limites
 ci-dessous ; intégrer cette branche dans le dépôt canonique ; décider d'une
@@ -653,7 +653,7 @@ Claude Code se chargera ensuite de l'archivage de ces branches ; elles ne sont
 pas supprimées ici :
 
 - `fix/kanboard-identite-agent` : garde d'identité 0.16.
-- `codex/2026-10-10-kanboard-identite` : contre-vérification de cette garde.
+- `lot/2026-10-10-kanboard-identite` : contre-vérification de cette garde.
 - `fix/kanboard-0.17.0-board-status-entites-dates` : correctifs de lecture `adc1df0`.
 
 Les autres worktrees du dépôt sont des chantiers distincts. En particulier,
@@ -664,9 +664,9 @@ Les autres worktrees du dépôt sont des chantiers distincts. En particulier,
 
 ### Objectif, branche et état vérifié
 
-Réunir les lignées Claude et Codex du lot A sans remplacer la base actuelle.
-Worktree : `/home/jean/ssd_data/jean/RepoGit/_codex_wt/L-mcp-foss-connectors`.
-Branche : `codex/2026-10-17-carnets`, partie de `main` à `82fcbed`.
+Réunir les deux lignées parallèles du lot A sans remplacer la base actuelle.
+Worktree : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/L-mcp-foss-connectors`.
+Branche : `lot/2026-10-17-carnets`, partie de `main` à `82fcbed`.
 Dernier commit fonctionnel : `310d6f6`. Dolibarr **1.8.3**, Nextcloud **1.4.1**,
 paquet commun inchangé **0.2.0**. Les commits documentaires suivants ne changent
 pas les sources testées ; reprendre depuis le HEAD de la branche du lot.
@@ -702,8 +702,8 @@ lecture complémentaires restent signalées sans rendre la facture illisible.
 Depuis la racine du worktree, avec le venv partagé existant :
 
 ```sh
-PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
-/home/jean/ssd_data/jean/RepoGit/_codex_wt/_venv-mcp/bin/python -m ruff check --no-cache .
+PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
+/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
 git diff --check
 ```
 
@@ -753,11 +753,11 @@ Références : `dolibarr_mcp/{server.py,README.md,CHANGELOG.md,manifest.json}`,
 
 Sources consultées par Git uniquement : `fix/dolibarr-carnets-echeances`
 (`852659f`, worktree historique `mcp-wt-carnets/mcp-foss-connectors`) et
-`codex/2026-10-10-dolibarr-nextcloud` (`76a307b`, `_codex_wt/a-mcp-foss-connectors`).
+`lot/2026-10-10-dolibarr-nextcloud` (`76a307b`, `_lots_wt/a-mcp-foss-connectors`).
 Leur rôle est celui de sources historiques à archiver après intégration ; leurs
 worktrees n'ont pas été modifiés. Aucun fichier de `mcp-wt-builddoc` n'a été lu.
 
-Le rapport transversal est [L.rapport.md](/home/jean/ssd_data/jean/RepoGit/_codex_wt/_rapports-2026-10-17/L.rapport.md).
+Le rapport transversal est [L.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/L.rapport.md).
 Il contient le classement de chaque commit source, les commandes de recette,
 les branches à archiver et la construction depuis `git archive`, non exécutée.
 
