@@ -1971,6 +1971,93 @@ class TestListTimeEntries:
         assert "project_id" in await dolibarr_list_time_entries()
 
 
+@pytest.fixture
+def host_tz(request):
+    """Place le poste du connecteur dans un fuseau donné, puis le rétablit.
+
+    Le défaut ne se voit que hors UTC : une suite lancée sur une machine en
+    UTC passe, que le code soit juste ou faux. Fixer le fuseau est donc la
+    seule façon de mesurer quelque chose.
+    """
+    import time as _time
+
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = request.param
+    _time.tzset()
+    yield request.param
+    if previous is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = previous
+    _time.tzset()
+
+
+#: Écriture réelle 3936 du 25/09/2026 sur la production : saisie « 2026-09-25
+#: 23:59 », horodatage 1790380740 (GMT). Relue « 2026-09-26 » depuis Paris.
+_LATE_GMT_TS = 1790380740
+
+
+@pytest.mark.asyncio
+class TestTimeEntryDateIsTheGmtDay:
+    """`date` et `datehour` d'une écriture de temps disent le même jour.
+
+    Constaté le 25/09/2026 : une écriture faite au 25/09 à 23:59 se relisait
+    `datehour` « 2026-09-25 23:59:00 » mais `date` « 2026-09-26 », et le filtre
+    date_start / date_end, qui porte sur `date`, ne la retrouvait pas. Les
+    deux champs viennent du même horodatage ; `datehour` était formaté en GMT,
+    `date` dans le fuseau local du poste qui fait tourner le connecteur.
+    """
+
+    @pytest.mark.parametrize("host_tz", ["Europe/Paris", "America/New_York", "UTC"],
+                             indirect=True)
+    async def test_date_and_datehour_name_the_same_day(self, host_tz) -> None:
+        from dolibarr_mcp.server import _format_time_entry
+
+        entry = _format_time_entry(_entry(3936, timespent_line_datehour=_LATE_GMT_TS,
+                                          timespent_line_date=_LATE_GMT_TS))
+
+        assert entry["datehour"] == "2026-09-25 23:59:00"
+        assert entry["date"] == "2026-09-25"
+
+    @pytest.mark.parametrize("host_tz", ["Europe/Paris"], indirect=True)
+    async def test_the_date_filter_finds_what_was_written(self, host_tz) -> None:
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(3936, timespent_line_datehour=_LATE_GMT_TS,
+                                       timespent_line_date=_LATE_GMT_TS)]
+            data = json.loads(await dolibarr_list_time_entries(
+                task_id=482, date_start="2026-09-25", date_end="2026-09-25"))
+
+        assert data["matched"] == 1
+        assert data["entries"][0]["entry_id"] == 3936
+
+    @pytest.mark.parametrize("host_tz", ["Europe/Paris"], indirect=True)
+    async def test_the_next_day_no_longer_catches_it(self, host_tz) -> None:
+        # Le pendant exact du défaut : filtrée sur le lendemain, l'écriture
+        # remontait ; elle ne doit plus.
+        with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
+            get.return_value = [_entry(3936, timespent_line_datehour=_LATE_GMT_TS)]
+            data = json.loads(await dolibarr_list_time_entries(
+                task_id=482, date_start="2026-09-26", date_end="2026-09-26"))
+
+        assert data["matched"] == 0
+
+    @pytest.mark.parametrize("host_tz", ["America/New_York"], indirect=True)
+    async def test_without_datehour_the_date_is_read_in_gmt_too(self, host_tz) -> None:
+        from dolibarr_mcp.server import _format_time_entry
+
+        # Ligne sans heure : seule la date, à minuit GMT. À l'ouest de l'UTC,
+        # l'heure locale la faisait reculer d'un jour.
+        entry = _format_time_entry(_entry(1, timespent_line_datehour=None,
+                                          timespent_line_date=1770854400))
+
+        assert entry["date"] == "2026-02-12"
+        assert entry["datehour"] == ""
+
+    async def test_the_docstring_says_which_day_the_filter_uses(self) -> None:
+        doc = dolibarr_list_time_entries.__doc__ or ""
+        assert "GMT" in doc
+
+
 @pytest.mark.asyncio
 class TestUpdateAndDeleteTimeEntry:
     """L'API amont réécrit la ligne entière : ses défauts sont destructeurs."""

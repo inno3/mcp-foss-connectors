@@ -1,5 +1,27 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.8
+
+- `dolibarr_list_time_entries` : `date` est désormais le jour GMT de
+  `datehour`, et le filtre date_start / date_end porte sur ce jour-là. Les
+  deux champs viennent du même horodatage, mais `datehour` était formaté en
+  GMT et `date` dans le fuseau local du poste du connecteur. Vu de Paris, une
+  écriture passée à partir de 22:00 GMT (minuit à Paris l'été) se relisait au
+  lendemain, et le filtre sur le jour écrit ne la retrouvait pas (constaté le
+  25/09/2026, écriture 3936 : « 2026-09-25 23:59 » relue au 26). À l'ouest de
+  l'UTC, la date reculait d'un jour pour toute écriture sans heure.
+- Aucune donnée de production n'était touchée au 21/10/2026 : les 102
+  écritures du projet Ledger sont toutes horodatées avant 22:00 GMT. Le défaut
+  était muet, pas encore coûteux.
+- Les autres dates du connecteur (factures, projets, tickets) passent
+  toujours par `_ts_to_date`, en heure locale du poste : sans effet depuis
+  Paris pour une date à minuit GMT, mais un jour trop tôt à l'ouest de l'UTC.
+  Changement de sens pour les horodatages de création, laissé à une décision
+  distincte.
+- 7 tests, fuseau du poste fixé (Paris, New York, UTC) : sans cela la suite
+  passe sur une machine en UTC, que le code soit juste ou faux. Suite
+  complète verte dans les trois fuseaux.
+
 ## Non publié : 1.8.7
 
 - Intégration du lot builddoc sur main 1.8.6, sans perdre les contrats des

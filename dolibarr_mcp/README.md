@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.7, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.8, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre

@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.7"
+__version__ = "1.8.8"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1813,6 +1813,19 @@ async def dolibarr_unassign_task_user(
 # ---------------------------------------------------------------------------
 
 
+def _gmt_day(value: Any) -> str:
+    """Jour GMT (YYYY-MM-DD) d'un horodatage Dolibarr, ou '' s'il manque.
+
+    Une écriture de temps porte une date et une heure lues en GMT, comme
+    `datehour`. La date doit être le jour de CE même instant : la lire dans le
+    fuseau local du poste qui fait tourner le connecteur la décalait d'un jour
+    dès 22:00 GMT vue de Paris (25/09/2026, écriture 3936), et d'un jour en
+    arrière à l'ouest de l'UTC. Une chaîne déjà au format date est rendue
+    telle quelle.
+    """
+    return _ts_to_datetime(value)[:10] or _ts_to_date(value)
+
+
 def _format_time_entry(raw: dict) -> dict:
     """Normalise une ligne de tasks/{id}/timespent.
 
@@ -1827,8 +1840,10 @@ def _format_time_entry(raw: dict) -> dict:
         "task_label": raw.get("task_label"),
         "project_id": _id_int(raw.get("fk_project")),
         "project_ref": raw.get("project_ref"),
-        "date": _ts_to_date(raw.get("timespent_line_datehour")
-                            or raw.get("timespent_line_date")),
+        # Même instant, même fuseau que datehour : sinon le filtre par date,
+        # qui porte sur ce champ, manque les écritures du soir.
+        "date": (_gmt_day(raw.get("timespent_line_datehour"))
+                 or _gmt_day(raw.get("timespent_line_date"))),
         "datehour": _ts_to_datetime(raw.get("timespent_line_datehour")),
         # Timestamp brut conservé : c'est lui qu'on renvoie tel quel lors d'une
         # correction, pour qu'une simple retouche de note ne décale pas l'heure.
@@ -1886,6 +1901,14 @@ async def dolibarr_list_time_entries(
 
     Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
     Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
+
+    Dates et heures sont en GMT, comme l'API les rend et comme
+    dolibarr_log_time les ecrit : `date` est le jour GMT de `datehour`, et
+    date_start / date_end filtrent sur ce jour-la. Une ecriture faite le 25 a
+    23:59 GMT est donc du 25, meme si l'interface Dolibarr, qui affiche
+    l'heure de Paris, la montre au 26 a 01:59. Jusqu'a la 1.8.8, `date` etait
+    lu dans le fuseau du poste du connecteur : il pouvait differer d'un jour
+    de `datehour`, et le filtre manquait l'ecriture.
     """
     import base64
     import math
