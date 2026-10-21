@@ -27,6 +27,20 @@ et processus chargé. Cette section fait foi ; les suivantes sont historiques.
   La **0.17.3** (`b0f14e8`, documentation seule : un commentaire ne fait pas
   avancer `date_modified`) est intégrée à `main`, poussée et installée le
   21/10 ; elle sera chargée au prochain redémarrage du client.
+- **Dolibarr 1.8.8, mis à jour le 21/10/2026** (`be7304d`, poussé) : dans
+  `dolibarr_list_time_entries`, `date` est désormais le jour GMT de `datehour`
+  et le filtre porte sur ce jour. Avant, `date` était lu dans le fuseau du
+  poste : vu de Paris, une écriture à partir de 22:00 GMT changeait de jour
+  et le filtre la manquait (écriture 3936 du 25/09). Impact mesuré avant
+  correction : nul, les 102 écritures Ledger sont avant 22:00 GMT. Installé le
+  21/10 (`server.py` seul, `serverInfo` 1.8.8, 113 outils, sauvegarde
+  `.backup-dolibarr-erp-inno3-v2-2026-10-21-v1.8.7`) ; chargé au prochain
+  redémarrage du client. Hors périmètre : les autres dates restent en heure
+  locale via `_ts_to_date` (un jour trop tôt à l'ouest de l'UTC).
+  **Piège de test** : `server.py` porte `__version__`, que
+  `test_protocol_initialize_and_list_tools_in_memory` compare au manifeste ;
+  ce test est sauté hors du venv du hook. Vérifier avec
+  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python`.
 - **Chantier ouvert** : builddoc reste hors `main`, branche
   `fix/dolibarr-list-documents-meetingnotes`, commit `4445d44`, worktree
   `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
@@ -38,7 +52,9 @@ Suite ordonnée :
 1. **Benjamin** : confirmer le rechargement de Dolibarr 1.8.6 et décider du
    réglage `DOLIBARR_THIRDPARTY_PAYMENT_TERM` puis de la recette réelle.
 2. **Benjamin** : organiser la reprise builddoc avec le dépôt d'extensions.
-3. **Benjamin** : redémarrer le client pour charger Kanboard 0.17.3, puis
+3. **Benjamin** : redémarrer le client pour charger Kanboard 0.17.3 et
+   Dolibarr 1.8.8 ; recette réelle de la 1.8.8 = une écriture à 23:59 GMT,
+   filtrée sur son jour, puis supprimée. Puis
    trancher les deux points Kanboard ouverts depuis K2 : vérifier sur le service
    réel l'attribution de l'auteur sans identité primary prouvée, et décider des
    relectures après déplacement, fermeture et réouverture.
