@@ -25,8 +25,8 @@ et processus chargé. Cette section fait foi ; les suivantes sont historiques.
   `status_filter_incomplete`, titre de la carte 7970 décodé, dates présentes,
   `modified_before` opérant. Les trois branches K à archiver n'existent plus.
   La **0.17.3** (`b0f14e8`, documentation seule : un commentaire ne fait pas
-  avancer `date_modified`) est intégrée à `main`, **non poussée**, et installée
-  le 21/10 ; elle sera chargée au prochain redémarrage du client.
+  avancer `date_modified`) est intégrée à `main`, poussée et installée le
+  21/10 ; elle sera chargée au prochain redémarrage du client.
 - **Chantier ouvert** : builddoc reste hors `main`, branche
   `fix/dolibarr-list-documents-meetingnotes`, commit `4445d44`, worktree
   `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
@@ -38,7 +38,7 @@ Suite ordonnée :
 1. **Benjamin** : confirmer le rechargement de Dolibarr 1.8.6 et décider du
    réglage `DOLIBARR_THIRDPARTY_PAYMENT_TERM` puis de la recette réelle.
 2. **Benjamin** : organiser la reprise builddoc avec le dépôt d'extensions.
-3. **Benjamin** : pousser `main` (Kanboard 0.17.3), redémarrer le client, puis
+3. **Benjamin** : redémarrer le client pour charger Kanboard 0.17.3, puis
    trancher les deux points Kanboard ouverts depuis K2 : vérifier sur le service
    réel l'attribution de l'auteur sans identité primary prouvée, et décider des
    relectures après déplacement, fermeture et réouverture.
@@ -304,7 +304,9 @@ une fermeture ou une réouverture. Correction documentaire seule : docstrings de
 0.17.3. Ni comportement ni signature ne changent.
 
 - Commit `b0f14e8` sur `main` par avance rapide depuis
-  `fix/kanboard-0.17.3-date-modification`, branche supprimée. Non poussé.
+  `fix/kanboard-0.17.3-date-modification`, branche supprimée. Poussé le
+  21/10/2026 avec ce document ; le hook pre-push a sauté ses tests faute
+  d'interpréteur pytest, la suite complète avait été passée juste avant.
 - Installation en place le 21/10/2026 selon `docs/RELEASE.md` 4bis. Sauvegarde :
   `~/.config/Claude/Claude Extensions/.backup-kanboard-inno3-v7-2026-10-21-v0.17.2`.
   `src/server.py` remplacé, seule `version` modifiée dans le manifeste installé.
@@ -329,7 +331,6 @@ une fermeture ou une réouverture. Correction documentaire seule : docstrings de
 - Un critère de dormance qui compte les commentaires demande un appel
   `kanboard_list_comments` par carte candidate. Non implémenté, à décider selon
   le besoin réel.
-- Pousser `main`.
 
 ## 17/10/2026 : préparation de l'intégration MB, n8n 1.3.1
 
