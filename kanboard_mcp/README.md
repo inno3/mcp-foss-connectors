@@ -16,6 +16,29 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
+## Version 0.18.0: read back task state after writes
+
+`kanboard_move_task`, `kanboard_close_task` and `kanboard_open_task` now read
+the task through `getTask` after the API reports success, using the same
+`as_user`, just like task creation. Moving checks `column_id` and `swimlane_id`
+(including the current swimlane when none is requested); closing checks
+`is_active=0`, reopening checks `is_active=1`. The position within a column
+is not checked.
+
+The response keeps all existing keys. `success` still describes the API's
+reply, while `verified` confirms the expected state. `verification_method`
+names the read or explains why it failed; `post_state` contains the available
+fields read from the task. A mismatch adds `mismatch` and `warning`. An
+unavailable task or a read error returns `verified=false` and a warning,
+without `post_state` or `mismatch`. `success=true` alone is not proof that
+the requested state was reached.
+
+No write is replayed by this verification. Write errors and refusals retain
+their existing behavior. All 53 tools and their parameters are preserved;
+`kanboard_assign_task` is unchanged. The read is a snapshot, not a transaction:
+another actor may change the task between the write and the read. A task
+already in the expected state is verified without proving a new transition.
+
 ## Version 0.17.3: what `date_modified` measures
 
 `date_modified` is Kanboard's `date_modification`. It moves when a task field
@@ -68,7 +91,7 @@ the decoded text are intentional changes in returned data.
 - `kanboard_search_tasks` — Recherche de taches par mot-cle dans tous les projets accessibles
 - `kanboard_my_overdue` — Liste mes taches en retard dans tous les projets
 - `kanboard_get_board` — Etat du tableau Kanboard d'un projet
-- `kanboard_move_task` — Deplace une tache vers une colonne du tableau
+- `kanboard_move_task` : Deplace une tache et verifie la colonne et le swimlane relus
 - `kanboard_update_task` — Modifie une tache existante dans Kanboard
 - `kanboard_assign_task` — Assigne (ou desassigne) le porteur d'une tache existante
 - `kanboard_add_comment` — Ajoute un commentaire a une tache Kanboard
@@ -76,8 +99,8 @@ the decoded text are intentional changes in returned data.
 - `kanboard_get_comment` — Detail d'un commentaire par son ID, contenu integral
 - `kanboard_update_comment` — Modifie le texte d'un commentaire existant
 - `kanboard_remove_comment` — Supprime definitivement un commentaire
-- `kanboard_close_task` — Ferme (clôture) une tâche dans Kanboard
-- `kanboard_open_task` — Rouvre une tâche dans Kanboard
+- `kanboard_close_task` : Ferme une tache et verifie le statut inactif relu
+- `kanboard_open_task` : Rouvre une tache et verifie le statut actif relu
 - `kanboard_create_task` — Cree une nouvelle tache dans un projet Kanboard
 - `kanboard_delete_task` — Supprime definitivement une tache Kanboard
 - `kanboard_create_project` — Cree un nouveau projet Kanboard

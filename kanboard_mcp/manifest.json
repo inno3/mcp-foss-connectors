@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
-  "version": "0.17.3",
+  "version": "0.18.0",
   "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
   "author": {
     "name": "inno³",

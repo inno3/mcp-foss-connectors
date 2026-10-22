@@ -1,5 +1,23 @@
 # Changelog Kanboard
 
+## 0.18.0 (22/10/2026)
+
+- `kanboard_move_task`, `kanboard_close_task` et `kanboard_open_task` relisent
+  désormais la tâche après un succès de l'API, avec le même `as_user`, comme
+  `kanboard_create_task`. Un déplacement ignoré ou une fermeture/réouverture
+  sans effet sur l'état demandé sont signalés.
+- Le contrat est additif : `success`, `task_id`, `moved_to`, `swimlane` et
+  `action` gardent leur sens et leurs conditions de présence. `verified`
+  confirme la colonne et le swimlane, ou le statut `is_active`, avec
+  `verification_method` et l'état relu dans `post_state`. Un écart ajoute
+  `mismatch` et `warning` ; une relecture impossible rend `verified=false`
+  et un avertissement explicite. `success=true` seul reste la réponse de
+  l'API, pas une preuve de l'état final.
+- Les helpers de création sont réutilisés sans modification. Aucun rejeu
+  d'écriture n'est ajouté ; les refus et erreurs d'écriture gardent leur
+  contrat. L'assignation reste hors périmètre. Les 53 outils et leurs
+  paramètres sont conservés ; la position dans la colonne n'est pas vérifiée.
+
 ## 0.17.3 (21/10/2026)
 
 - La documentation de `modified_before` promettait de repérer les cartes sans
