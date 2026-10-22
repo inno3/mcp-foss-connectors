@@ -1,7 +1,94 @@
-# Reprise courante : 19/10/2026
+# Reprise courante : Kanboard 0.18.0, 22/10/2026
+
+Objectif du lot : porter les relectures après déplacement, fermeture et
+réouverture dans le dépôt canonique. Cette section fait foi pour le lot courant ;
+les sections suivantes conservent les constats historiques et leurs limites.
+
+## État vérifié et décisions
+
+- Worktree : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/2026-10-22-kanboard-relecture`.
+  Branche : `lot/2026-10-22-kanboard-relecture`, partie de `main` à **`184012d`**,
+  arbre initial propre. Commit fonctionnel : **`c663013`**.
+- Kanboard **0.18.0** dans le manifeste et `SERVER_VERSION`. Le paquet reste en
+  **0.2.0** ; aucun autre connecteur n'est modifié. Les 53 outils et toutes leurs
+  signatures sont conservés. `main` reste à `184012d` ; aucun merge ni push.
+- `kanboard_move_task`, `kanboard_close_task` et `kanboard_open_task` utilisent
+  les helpers existants `_verify_task_state` et `_verified_payload`, inchangés.
+  Après réponse positive de l'API, un `getTask` relit avec le même `as_user`.
+  Le déplacement compare `column_id` et `swimlane_id`, la fermeture `is_active=0`,
+  la réouverture `is_active=1`.
+- Contrat additif : `success` reste la réponse de l'API ; `verified` porte la
+  confirmation de l'état. `verification_method`, `post_state` si disponible,
+  `mismatch` et `warning` si nécessaire suivent le contrat de création.
+  Une relecture impossible donne `verified=false` et un avertissement, sans
+  perdre les clés historiques ni rejouer l'écriture. Les refus et erreurs
+  d'écriture gardent leur contrat ; le transport reste inchangé.
+- Les **5 cas historiques laissés hors alignement par K/K2 sont portés** dans
+  `tests/test_kanboard_verified_write.py`, sans retirer aucune assertion.
+  Les 12 anciens tests de ce fichier sont inchangés. Douze cas complémentaires
+  couvrent les erreurs de relecture sur les trois outils, les erreurs et refus
+  d'écriture sans rejeu, les swimlanes et la réouverture sans effet.
+- Choix conservateur : `kanboard_assign_task` reste hors périmètre et inchangé.
+  La création, la garde d'identité et le transport ne changent pas non plus.
+
+## Vérifications du lot
+
+| Contrôle | Résultat |
+| --- | --- |
+| Suite complète initiale | **1 688 réussis, 1 ignoré**, 6,54 s |
+| Tests de relecture ajoutés avant correctif | **11 échecs, 18 réussis**, 0,24 s |
+| Même fichier après correctif | **29 réussis**, 0,13 s |
+| Manifestes et signatures | **27 réussis**, 1,33 s |
+| Suite complète finale | **1 705 réussis, 1 ignoré**, 6,50 s |
+| Suite complète sous garde réseau | **1 705 réussis, 1 ignoré**, 6,07 s, aucune tentative réseau |
+| Ruff sur tout le dépôt | **0 diagnostic** |
+| `git diff --check` | **0 erreur** |
+
+Les cinq cas demandés et les trois cas de relecture impossible étaient rouges
+sur `KeyError: 'verified'`, puis verts. Les refus et erreurs d'écriture étaient
+déjà verts avant correction et le restent. Le seul test ignoré est l'intégration
+Dolibarr réelle préexistante. Aucun test n'est supprimé, désactivé ou affaibli.
+La comparaison AST confirme que seules les trois fonctions visées changent
+hors docstrings ; aucun helper ajouté ou modifié, aucune fonction supprimée.
+Le manifeste ne change que de version. SHA-256 du serveur final :
+`b5e1e38cc821a9e1e293662e0dcd25f513445efe05ecf89e115d900f6509bfd4`.
+
+## Références, limites et prochaines actions
+
+- [Rapport du lot](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-22/kanboard-relecture.md) :
+  preuves rouge puis vert, commandes, exemples avant/après et risques résiduels.
+- Sources : `kanboard_mcp/{server.py,manifest.json,README.md,CHANGELOG.md}` ;
+  contrats : `tests/test_kanboard_verified_write.py`, transport, manifestes et
+  signatures. `AGENTS.md` et `CLAUDE.md` restent identiques et pointent ici.
+- Référence historique lue seulement : `/home/jean/RepoGit/mcp-inno3`, commit
+  **`7f8ecf3`** du 17/08/2026 et ses cinq tests d'état. Aucun helper historique
+  recopié ; les helpers du dépôt canonique sont réutilisés.
+- Le checkout principal `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors`
+  reste sur `main`. Le worktree builddoc, branche
+  `fix/dolibarr-list-documents-meetingnotes` à `4445d44`, est toujours enregistré ;
+  son contenu n'a pas été consulté ni modifié. Les anciens chemins K/K2 sont
+  historiques et ne doivent pas servir de consignes de checkout.
+- Version installée **0.17.3** selon le constat de mission, non inspectée dans
+  ce lot. Aucune installation, construction de paquet, recette réelle ni
+  publication exécutée. Les tests utilisent des réponses synthétiques.
+- La relecture n'est pas transactionnelle et ne prouve pas une transition :
+  une tâche déjà dans l'état attendu est vérifiée. La position dans la colonne
+  n'est pas comparée. Un `success=true` doit se lire avec `verified`.
+
+1. Relire le commit fonctionnel et les preuves, puis intégrer la branche dans
+   `main` sur demande explicite.
+2. Décider séparément d'une recette réelle et de la livraison 0.18.0.
+3. L'attribution de l'auteur sans identité primary prouvée reste à confirmer
+   sur service réel, comme dans K2. Une extension aux assignations est une
+   évolution distincte ; aucun arbitrage ne bloque le présent portage.
+
+---
+
+# Reprise historique : lot H du 19/10/2026, complétée le 21/10
 
 Objectif du lot H : aligner la reprise sur Git et distinguer source, installation
-et processus chargé. Cette section fait foi ; les suivantes sont historiques.
+et processus chargé. Les états ci-dessous sont ceux de ces dates ; la section
+en tête donne l'état du lot courant.
 
 - **Vérifié dans Git** : `main` = `edb5a36`, Dolibarr **1.8.6**, paquet
   **0.2.0**. La référence locale `origin/main` est identique, sans contrôle
@@ -694,6 +781,9 @@ hors docstrings (dont `_identity_refusal`, équivalent fonctionnellement).
   exigeant une relecture après déplacement/fermeture/réouverture échouent sur
   l'installé (champ `verified` absent) : comportement hors alignement, non porté.
   Ce constat ne concerne pas la suite initiale du dépôt, verte.
+  **Portage réalisé le 22/10/2026** sur `lot/2026-10-22-kanboard-relecture`,
+  commit **`c663013`**, en **0.18.0** : les 5 cas sont verts,
+  avec leurs assertions d'origine conservées. Voir la reprise courante.
 - `tests/fixtures/kanboard_0171_signatures.json` : signatures extraites de l'installé.
 - `scripts/test_kanboard_crosscheck_offline.py` : lanceur avec garde réseau.
 - Rapport final :
@@ -721,9 +811,10 @@ les deux sources, sans tentative réseau. Résultats dans
   paramètres n'a pas été testée. Correction éventuelle **à arbitrer par Benjamin**.
 
 La relecture après déplacement/fermeture/réouverture, présente dans les tests
-du source autonome `mcp-inno3` mais absente de l'extension, reste aussi
-**à arbitrer par Benjamin**. Les 5 cas correspondants n'ont pas été maquillés
-en tests verts : ils ne font pas partie de l'alignement importé (voir plus haut).
+du source autonome `mcp-inno3` mais absente de l'extension, restait
+**à arbitrer par Benjamin au terme de K**. Les 5 cas n'appartenaient pas à cet
+alignement. Ils sont désormais portés en **0.18.0** sur la branche du lot du
+22/10/2026, commit **`c663013`** (voir la reprise courante).
 
 Claude Code se chargera ensuite de l'archivage de ces branches ; elles ne sont
 pas supprimées ici :
