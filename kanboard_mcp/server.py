@@ -33,7 +33,7 @@ logger = logging.getLogger("kanboard-mcp")
 
 mcp = FastMCP("kanboard")
 
-SERVER_VERSION = "0.17.3"
+SERVER_VERSION = "0.18.0"
 _identity_lock = asyncio.Lock()
 
 def _identity_refusal(account: str, reason: str, remedy: str = "") -> None:
@@ -1999,6 +1999,13 @@ async def kanboard_move_task(
 
     Resout les noms de colonne et swimlane en IDs automatiquement.
 
+    Apres succes de l'API, relit la tache via getTask avec le meme as_user.
+    `success` conserve la reponse de l'API ; `verified` confirme la colonne et
+    le swimlane attendus, pas la position dans la colonne. La reponse ajoute
+    `verification_method`, `post_state` si disponible, et `mismatch`/`warning`
+    en cas d'ecart. Une relecture impossible donne `verified=false` avec un
+    avertissement, sans rejouer l'ecriture.
+
     Le rapprochement des noms replie les entites HTML (`&amp;` se lit `&`,
     `&nbsp;` se lit comme une espace), les suites d'espaces, les espaces de bord,
     la casse et les formes Unicode NFC/NFD : un nom recopie depuis une page HTML
@@ -2059,7 +2066,10 @@ async def kanboard_move_task(
             result: dict[str, Any] = {"success": True, "task_id": task_id, "moved_to": column_name}
             if swimlane_name:
                 result["swimlane"] = swimlane_name
-            return _dumps(result)
+            verified, post_state, mismatch, method = await _verify_task_state(
+                task_id, {"column_id": col_id, "swimlane_id": swimlane_id}, as_user=as_user
+            )
+            return _verified_payload(result, verified, post_state, mismatch, method)
         else:
             return "Echec du deplacement (la tache est peut-etre deja dans cette colonne)."
     except Exception as exc:
@@ -2337,15 +2347,22 @@ async def kanboard_close_task(task_id: int = 0, as_user: str = "") -> str:
     - task_id : ID de la tache (obligatoire)
     - as_user : compte qui ferme la tache ("" = defaut, "primary"/"agent")
 
-    La tache passe en statut inactif (is_active=0).
-    Retourne True en cas de succes.
+    Apres succes de l'API, relit la tache via getTask avec le meme as_user.
+    `success` conserve la reponse de l'API ; `verified` confirme is_active=0.
+    La reponse ajoute `verification_method`, `post_state` si disponible, et
+    `mismatch`/`warning` en cas d'ecart. Une relecture impossible donne
+    `verified=false` avec un avertissement, sans rejouer l'ecriture.
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
     try:
         success = await kb_call("closeTask", {"task_id": task_id}, as_user=as_user)
         if success:
-            return _dumps({"success": True, "task_id": task_id, "action": "closed"})
+            base = {"success": True, "task_id": task_id, "action": "closed"}
+            verified, post_state, mismatch, method = await _verify_task_state(
+                task_id, {"is_active": 0}, as_user=as_user
+            )
+            return _verified_payload(base, verified, post_state, mismatch, method)
         else:
             return "Echec de la fermeture de la tache."
     except Exception as exc:
@@ -2362,15 +2379,22 @@ async def kanboard_open_task(task_id: int = 0, as_user: str = "") -> str:
     - task_id : ID de la tache (obligatoire)
     - as_user : compte qui rouvre la tache ("" = defaut, "primary"/"agent")
 
-    La tache passe en statut actif (is_active=1).
-    Retourne True en cas de succes.
+    Apres succes de l'API, relit la tache via getTask avec le meme as_user.
+    `success` conserve la reponse de l'API ; `verified` confirme is_active=1.
+    La reponse ajoute `verification_method`, `post_state` si disponible, et
+    `mismatch`/`warning` en cas d'ecart. Une relecture impossible donne
+    `verified=false` avec un avertissement, sans rejouer l'ecriture.
     """
     if not task_id:
         return "Erreur : task_id est obligatoire."
     try:
         success = await kb_call("openTask", {"task_id": task_id}, as_user=as_user)
         if success:
-            return _dumps({"success": True, "task_id": task_id, "action": "opened"})
+            base = {"success": True, "task_id": task_id, "action": "opened"}
+            verified, post_state, mismatch, method = await _verify_task_state(
+                task_id, {"is_active": 1}, as_user=as_user
+            )
+            return _verified_payload(base, verified, post_state, mismatch, method)
         else:
             return "Echec de la reouverture de la tache."
     except Exception as exc:

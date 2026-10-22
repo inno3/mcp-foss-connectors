@@ -11,6 +11,12 @@ installées ci-dessous sont la photographie du 17/10 ; les chemins MC sont
 désormais absents. L'extension métier de `main` compte maintenant 33 outils
 en 0.8.7, tandis que sa copie installée reste en 0.8.6 avec 32 outils.
 
+Actualisation du 22/10/2026 : les huit copies de M et leurs tests sont
+**retirés** de M (branche `lot/2026-10-22-mcp-inno3-menage`), après portage
+des deux comportements qu'elles étaient seules à porter. Le tableau ci-dessous
+garde la comparaison du 17/10 ; les colonnes « Apports propres » sont
+complétées des deux écarts trouvés le 22/10.
+
 ## Dépôts qui font foi
 
 | Repère | Dépôt canonique | Rôle |
@@ -27,25 +33,29 @@ Le checkout canonique E est encore sur `wip/meetingnotes-diffusion-par-principe`
 ## Comparaison des huit copies communes
 
 Comptages AST des outils réellement déclarés, pas des anciens tableaux README.
-Les huit fichiers `server.py` divergent. Toutes les copies et leurs tests dans
-M restent conservés ; ils sont exclus de sa distribution Python et du repack.
+Les huit fichiers `server.py` divergent. Les copies et leurs tests ont été
+retirés de M le 22/10/2026 ; ils restent lisibles dans son historique (`86cf2dd`,
+`main` de M). La garde du repack de M refuse toujours de les empaqueter.
 
 | Connecteur | M | F | Apports propres et décision |
 | --- | ---: | ---: | --- |
-| Dolibarr | 63 | 78 + 32 E | Les 22 noms propres à M existent tous dans E ; le résumé métier dispose de `dolibarr_get_revenue_summary_inno3`. Utiliser F avec E, jamais le monolithe M. |
+| Dolibarr | 63 | 78 + 32 E | Les 22 noms propres à M existent tous dans E ; le résumé métier dispose de `dolibarr_get_revenue_summary_inno3`. Utiliser F avec E, jamais le monolithe M. **22/10/2026** : deux protections du monolithe (0.8.7 du 30/07) n'avaient jamais atteint E, créée le 31/07 : aperçu de l'ordre du jour coupé sans signal dans `list_meetingnotes`, et contrat de format du corps des CR. Portées en E 0.9.0. |
 | GitLab | 18 | 18 | Aucun outil propre ni signature propre à M ; F porte le contrat de transport. |
 | HedgeDoc | 8 | 8 | Aucun outil propre ni signature propre à M ; F porte le contrat de transport et le journal des écritures. |
-| Kanboard | 53 | 53 | F contient les lots K/K2 et la gestion d'auteur sans identité primary. Les signatures de cinq outils diffèrent ; la recette doit conserver les usages d'identité. |
+| Kanboard | 53 | 53 | F contient les lots K/K2 et la gestion d'auteur sans identité primary. Les signatures de cinq outils diffèrent ; la recette doit conserver les usages d'identité. **22/10/2026** : M relisait la tâche après `move`, `close` et `open` (`7f8ecf3`), F non ; constat du lot K resté sans suite. Porté en F 0.18.0. |
 | Matrix | 10 | 22 | F ajoute notamment fils, réactions, fichiers et suivi de lecture ; aucun nom propre à M. |
 | n8n | 17 | 22 | L'activation POST avec objet vide, utile dans M, est désormais intégrée dans F par MB (`03b4e10`, merge `f72e12d`, numérotation `11d691f`). Aucun portage supplémentaire ici. |
 | Nextcloud | 14 | 14 | Aucun outil propre ni signature propre à M ; F porte les correctifs du lot L et le contrat de transport. |
-| WordPress | 26 | 34 | F ajoute publications, révisions, taxonomies et contrat de transport. WordPress Commons reste un dérivé distinct dans M, conservé par prudence. |
+| WordPress | 26 | 34 | F ajoute publications, révisions, taxonomies et contrat de transport. WordPress Commons reste un dérivé distinct dans M, conservé par prudence ; sa seule capacité propre est l'URL `?rest_route=` (permaliens « simples »), absente de F (22/10/2026). |
 
 Les variables lues par `os.getenv`/`os.environ.get` dans M sont toutes présentes
 dans F. F ajoute les identifiants Web facultatifs Dolibarr et les sous-sites
 WordPress. Cela ne prouve pas une équivalence fonctionnelle exhaustive : les
-signatures et les contrats publics évoluent. Aucune particularité privée n'est
-effacée. Le maintien séparé de WordPress Commons et sa migration éventuelle
+signatures et les contrats publics évoluent. L'affirmation du 17/10 selon
+laquelle aucune particularité privée n'était effacée s'est révélée fausse le
+22/10 : les deux écarts Dolibarr et Kanboard ci-dessus logeaient dans des
+fonctions de même nom, qu'une comparaison par noms ne voit pas. Ils ont été
+retrouvés en jouant contre F les tests propres à M. Le maintien séparé de WordPress Commons et sa migration éventuelle
 restent **à arbitrer par Benjamin** (B10).
 
 ## Copies installées sur disque

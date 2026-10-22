@@ -1,15 +1,14 @@
-"""Relecture de creation, telle que livree par l'extension 0.17.1.
+"""Relecture apres creation, deplacement, fermeture et reouverture.
 
-Sous-ensemble de mcp-inno3/main:tests/test_kanboard_verified_write.py.
-Les cinq cas de deplacement/fermeture/reouverture exigent un comportement
-absent du source installe ; ils ne sont pas portes dans ce lot d'alignement.
-Les helpers et la verification de creation sont bien exposes par l'installe.
-Tous les appels sont simules.
+Les cinq regressions d'etat de mcp-inno3 sont portees en 0.18.0.
+`success` conserve la reponse de l'API ; seul `verified` prouve l'etat attendu.
+Une relecture impossible ou un ecart ne provoque jamais de rejeu d'ecriture.
+Tous les appels sont simules, y compris les erreurs de transport.
 """
 
 import json
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
@@ -18,10 +17,13 @@ os.environ.setdefault("KANBOARD_TOKEN", "test-token")
 os.environ.setdefault("KANBOARD_USER", "alice")
 
 from kanboard_mcp.server import (
+    KanboardTransportError,
     _verified_payload,
     _verify_task_state,
     kanboard_close_task,
     kanboard_create_task,
+    kanboard_move_task,
+    kanboard_open_task,
 )
 
 COLUMNS = [
@@ -110,8 +112,223 @@ class TestVerifiedPayload:
         assert "mismatch" not in out
 
 
+class TestMoveTaskVerified:
+    def _kb(self, post_column: str, post_swimlane: str = "1"):
+        """Lecture initiale, resolution, ecriture, puis etat relu distinct."""
+        reads = 0
+
+        async def _call(method, params=None, as_user=""):
+            nonlocal reads
+            if method == "getColumns":
+                return COLUMNS
+            if method == "getActiveSwimlanes":
+                return [{"id": "2", "name": "Urgent"}]
+            if method == "moveTaskPosition":
+                return True
+            if method == "getTask":
+                reads += 1
+                return {
+                    "id": "7", "project_id": "262", "swimlane_id": "1" if reads == 1 else post_swimlane,
+                    "column_id": "11" if reads == 1 else post_column, "title": "t", "is_active": "1",
+                }
+            raise AssertionError(f"Appel inattendu : {method}")
+
+        return AsyncMock(side_effect=_call)
+
+    @pytest.mark.asyncio
+    async def test_deplacement_reel_est_verifie(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb(post_column="12")) as rpc:
+            out = json.loads(await kanboard_move_task(task_id=7, column_name="En cours"))
+        assert out["success"] is True
+        assert out["verified"] is True
+        assert out["moved_to"] == "En cours"
+        assert "warning" not in out
+        assert out["task_id"] == 7
+        assert out["verification_method"] == "getTask"
+        assert out["post_state"]["column_id"] == "12"
+        assert out["post_state"]["swimlane_id"] == "1"
+        assert "mismatch" not in out
+        assert rpc.await_args_list == [
+            call("getTask", {"task_id": 7}, as_user=""),
+            call("getColumns", {"project_id": 262}, as_user=""),
+            call("moveTaskPosition", {
+                "project_id": 262, "task_id": 7, "column_id": 12, "position": 1, "swimlane_id": 1,
+            }, as_user=""),
+            call("getTask", {"task_id": 7}, as_user=""),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_silent_failure_est_signale(self) -> None:
+        """L'API dit true, la tache n'a pas bouge."""
+        with patch("kanboard_mcp.server.kb_call", new=self._kb(post_column="11")) as rpc:
+            out = json.loads(await kanboard_move_task(task_id=7, column_name="En cours"))
+        assert out["success"] is True, "on ne masque pas la réponse de l'API"
+        assert out["verified"] is False
+        assert "column_id" in out["mismatch"]
+        assert "warning" in out
+        assert out["task_id"] == 7
+        assert out["moved_to"] == "En cours"
+        assert out["verification_method"] == "getTask"
+        assert out["post_state"]["column_id"] == "11"
+        assert [c.args[0] for c in rpc.await_args_list] == [
+            "getTask", "getColumns", "moveTaskPosition", "getTask",
+        ]
+
+    @pytest.mark.parametrize("post_swimlane", ["1", "2"])
+    @pytest.mark.asyncio
+    async def test_swimlane_demande_est_verifie(self, post_swimlane) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb("12", post_swimlane)) as rpc:
+            out = json.loads(await kanboard_move_task(
+                task_id=7, column_name="En cours", swimlane_name="Urgent", as_user="agent",
+            ))
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["moved_to"] == "En cours"
+        assert out["swimlane"] == "Urgent"
+        assert out["verified"] is (post_swimlane == "2")
+        assert out["verification_method"] == "getTask"
+        assert out["post_state"]["swimlane_id"] == post_swimlane
+        if post_swimlane == "1":
+            assert out["mismatch"] == ["swimlane_id"]
+            assert "swimlane_id" in out["warning"]
+        else:
+            assert "mismatch" not in out
+            assert "warning" not in out
+        assert rpc.await_args_list == [
+            call("getTask", {"task_id": 7}, as_user="agent"),
+            call("getColumns", {"project_id": 262}, as_user="agent"),
+            call("getActiveSwimlanes", {"project_id": 262}, as_user="agent"),
+            call("moveTaskPosition", {
+                "project_id": 262, "task_id": 7, "column_id": 12, "position": 1, "swimlane_id": 2,
+            }, as_user="agent"),
+            call("getTask", {"task_id": 7}, as_user="agent"),
+        ]
 
 
+class TestCloseOpenVerified:
+    def _kb(self, post_active: str):
+        async def _call(method, params=None, as_user=""):
+            if method in ("closeTask", "openTask"):
+                return True
+            if method == "getTask":
+                return {"id": "7", "is_active": post_active, "title": "t"}
+            raise AssertionError(f"Appel inattendu : {method}")
+
+        return AsyncMock(side_effect=_call)
+
+    @pytest.mark.asyncio
+    async def test_close_verifie(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb("0")) as rpc:
+            out = json.loads(await kanboard_close_task(task_id=7))
+        assert out["verified"] is True
+        assert out["action"] == "closed"
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["verification_method"] == "getTask"
+        assert out["post_state"]["is_active"] == "0"
+        assert "warning" not in out
+        assert "mismatch" not in out
+        assert rpc.await_args_list == [
+            call("closeTask", {"task_id": 7}, as_user=""),
+            call("getTask", {"task_id": 7}, as_user=""),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_close_sans_effet_est_signale(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb("1")) as rpc:
+            out = json.loads(await kanboard_close_task(task_id=7))
+        assert out["verified"] is False
+        assert out["mismatch"] == ["is_active"]
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["action"] == "closed"
+        assert out["post_state"]["is_active"] == "1"
+        assert "is_active" in out["warning"]
+        assert [c.args[0] for c in rpc.await_args_list] == ["closeTask", "getTask"]
+
+    @pytest.mark.asyncio
+    async def test_open_verifie(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb("1")) as rpc:
+            out = json.loads(await kanboard_open_task(task_id=7, as_user="agent"))
+        assert out["verified"] is True
+        assert out["action"] == "opened"
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["verification_method"] == "getTask"
+        assert out["post_state"]["is_active"] == "1"
+        assert "warning" not in out
+        assert "mismatch" not in out
+        assert rpc.await_args_list == [
+            call("openTask", {"task_id": 7}, as_user="agent"),
+            call("getTask", {"task_id": 7}, as_user="agent"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_open_sans_effet_est_signale(self) -> None:
+        with patch("kanboard_mcp.server.kb_call", new=self._kb("0")) as rpc:
+            out = json.loads(await kanboard_open_task(task_id=7))
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["action"] == "opened"
+        assert out["verified"] is False
+        assert out["mismatch"] == ["is_active"]
+        assert out["post_state"]["is_active"] == "0"
+        assert "is_active" in out["warning"]
+        assert [c.args[0] for c in rpc.await_args_list] == ["openTask", "getTask"]
+
+
+@pytest.mark.parametrize(("tool", "write_method", "params", "before", "failure"), [
+    pytest.param(
+        kanboard_move_task, "moveTaskPosition", {"task_id": 7, "column_name": "En cours"},
+        [{"id": "7", "project_id": "262", "column_id": "11", "swimlane_id": "1"}, COLUMNS],
+        "Echec du deplacement (la tache est peut-etre deja dans cette colonne).", id="deplacement",
+    ),
+    pytest.param(
+        kanboard_close_task, "closeTask", {"task_id": 7}, [],
+        "Echec de la fermeture de la tache.", id="fermeture",
+    ),
+    pytest.param(
+        kanboard_open_task, "openTask", {"task_id": 7}, [],
+        "Echec de la reouverture de la tache.", id="reouverture",
+    ),
+])
+@pytest.mark.asyncio
+class TestStateWriteFailures:
+    async def test_relecture_en_erreur_sans_rejeu(self, tool, write_method, params, before, failure):
+        rpc = AsyncMock(side_effect=[*before, True, RuntimeError("lecture indisponible")])
+        with patch("kanboard_mcp.server.kb_call", new=rpc):
+            out = json.loads(await tool(**params, as_user="agent"))
+        assert out["success"] is True
+        assert out["task_id"] == 7
+        assert out["verified"] is False
+        assert out["verification_method"] == "relecture impossible (lecture indisponible)"
+        assert "le succes n'est pas confirme" in out["warning"]
+        assert "post_state" not in out
+        assert "mismatch" not in out
+        assert rpc.await_count == len(before) + 2
+        assert rpc.await_args_list[-2].args[0] == write_method
+        assert rpc.await_args_list[-1] == call("getTask", {"task_id": 7}, as_user="agent")
+        assert all(c.kwargs["as_user"] == "agent" for c in rpc.await_args_list)
+
+    async def test_erreur_ecriture_conserve_le_contrat(self, tool, write_method, params, before, failure):
+        error = KanboardTransportError("ReadTimeout", write_method, 1, False)
+        rpc = AsyncMock(side_effect=[*before, error])
+        with patch("kanboard_mcp.server.kb_call", new=rpc):
+            out = await tool(**params, as_user="agent")
+        assert out == f"Erreur réseau {error}"
+        assert "inconnu" in out
+        assert "non rejouée" in out
+        assert rpc.await_count == len(before) + 1
+        assert rpc.await_args_list[-1].args[0] == write_method
+        assert all(c.kwargs["as_user"] == "agent" for c in rpc.await_args_list)
+
+    async def test_refus_ecriture_conserve_le_message(self, tool, write_method, params, before, failure):
+        rpc = AsyncMock(side_effect=[*before, False])
+        with patch("kanboard_mcp.server.kb_call", new=rpc):
+            out = await tool(**params, as_user="agent")
+        assert out == failure
+        assert rpc.await_count == len(before) + 1
+        assert rpc.await_args_list[-1].args[0] == write_method
 
 
 class TestCreateTaskVerified:
