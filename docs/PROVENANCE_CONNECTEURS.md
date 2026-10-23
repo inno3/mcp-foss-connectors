@@ -34,7 +34,7 @@ Le checkout canonique E est encore sur `wip/meetingnotes-diffusion-par-principe`
 
 Comptages AST des outils réellement déclarés, pas des anciens tableaux README.
 Les huit fichiers `server.py` divergent. Les copies et leurs tests ont été
-retirés de M le 22/10/2026 ; ils restent lisibles dans son historique (`86cf2dd`,
+retirés de M le 22/10/2026 ; ils restent lisibles dans son historique (`bcc4c47`,
 `main` de M). La garde du repack de M refuse toujours de les empaqueter.
 
 | Connecteur | M | F | Apports propres et décision |
@@ -57,7 +57,7 @@ laquelle aucune particularité privée n'était effacée s'est révélée fausse
 fonctions de même nom, qu'une comparaison par noms ne voit pas. Ils ont été
 retrouvés en jouant contre F les tests propres à M. L'arbitrage B10 est tranché le 23/10/2026 : WordPress Commons est retiré de M, son
 site cible n'existant plus. Un futur site en permaliens « simples » demanderait
-de porter ici l'URL `?rest_route=`, lisible dans M au commit `7199ba5`.
+de porter ici l'URL `?rest_route=`, lisible dans M au commit `38466ac`.
 
 ## Copies installées sur disque
 
