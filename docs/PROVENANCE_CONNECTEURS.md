@@ -23,7 +23,7 @@ complétées des deux écarts trouvés le 22/10.
 | --- | --- | --- |
 | F | `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors` | Les huit connecteurs publics ci-dessous |
 | E | `/home/jean/ssd_data/jean/RepoGit/inno3-mcp-extensions` | Outils métier Dolibarr, chargés par entry-point |
-| M | `/home/jean/ssd_data/jean/RepoGit/mcp-inno3` | CalDAV, CardDAV, IMAP Bluemind, IMAP Fastmail, Forgejo, Hermine, Mastodon, WordPress Commons |
+| M | `/home/jean/ssd_data/jean/RepoGit/mcp-inno3` | CalDAV, CardDAV, IMAP Bluemind, IMAP Fastmail, Forgejo, Hermine, Mastodon (WordPress Commons retiré le 23/10/2026) |
 
 Bases MC vérifiées : F `11d691f`, E `aa9ede6`, M `6e20a6d`. Les trois
 worktrees `MC-*` de `_lots_wt` utilisent `lot/2026-10-17-outillage`.
@@ -46,7 +46,7 @@ retirés de M le 22/10/2026 ; ils restent lisibles dans son historique (`86cf2dd
 | Matrix | 10 | 22 | F ajoute notamment fils, réactions, fichiers et suivi de lecture ; aucun nom propre à M. |
 | n8n | 17 | 22 | L'activation POST avec objet vide, utile dans M, est désormais intégrée dans F par MB (`03b4e10`, merge `f72e12d`, numérotation `11d691f`). Aucun portage supplémentaire ici. |
 | Nextcloud | 14 | 14 | Aucun outil propre ni signature propre à M ; F porte les correctifs du lot L et le contrat de transport. |
-| WordPress | 26 | 34 | F ajoute publications, révisions, taxonomies et contrat de transport. WordPress Commons reste un dérivé distinct dans M, conservé par prudence ; sa seule capacité propre est l'URL `?rest_route=` (permaliens « simples »), absente de F (22/10/2026). |
+| WordPress | 26 | 34 | F ajoute publications, révisions, taxonomies et contrat de transport. WordPress Commons, dérivé distinct dans M, en a été retiré le 23/10/2026 (B10) ; sa seule capacité propre était l'URL `?rest_route=` (permaliens « simples »), absente de F (22/10/2026). |
 
 Les variables lues par `os.getenv`/`os.environ.get` dans M sont toutes présentes
 dans F. F ajoute les identifiants Web facultatifs Dolibarr et les sous-sites
@@ -55,8 +55,9 @@ signatures et les contrats publics évoluent. L'affirmation du 17/10 selon
 laquelle aucune particularité privée n'était effacée s'est révélée fausse le
 22/10 : les deux écarts Dolibarr et Kanboard ci-dessus logeaient dans des
 fonctions de même nom, qu'une comparaison par noms ne voit pas. Ils ont été
-retrouvés en jouant contre F les tests propres à M. Le maintien séparé de WordPress Commons et sa migration éventuelle
-restent **à arbitrer par Benjamin** (B10).
+retrouvés en jouant contre F les tests propres à M. L'arbitrage B10 est tranché le 23/10/2026 : WordPress Commons est retiré de M, son
+site cible n'existant plus. Un futur site en permaliens « simples » demanderait
+de porter ici l'URL `?rest_route=`, lisible dans M au commit `7199ba5`.
 
 ## Copies installées sur disque
 
