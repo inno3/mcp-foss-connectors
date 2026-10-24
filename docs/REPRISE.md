@@ -1,4 +1,28 @@
-# Reprise courante : Kanboard 0.18.0, 22/10/2026
+# Reprise vérifiée le 24/10/2026
+
+Main et origin/main sont alignés à la base 1e8c14f après fetch. Le lot
+Kanboard 0.18.0 est intégré et publié. Les sources installées Dolibarr 1.8.8,
+Kanboard 0.18.0, Nextcloud 1.4.1, HedgeDoc 1.2.0 et WordPress 1.6.0 sont
+identiques octet par octet aux sources de main. L'extension métier associée
+est en 0.9.0 et correspond au main de son propre dépôt. Aucun redémarrage
+applicatif : les versions effectivement chargées ne sont pas attestées ici.
+
+Suite complète rejouée sous garde réseau : 1 705 réussites, un test
+d'intégration réelle ignoré, zéro tentative réseau. Contrôle de style conforme.
+La vérification native des modules Dolibarr et la recette des services sont
+documentées séparément dans le dossier d'audit ; ces tests hors ligne ne s'y
+substituent pas.
+
+La branche historique fix/dolibarr-list-documents-meetingnotes n'est pas un
+correctif manquant : le report 8293d17, puis la numérotation 576f5bd, sont
+dans main. Ses tests sont identiques hors numéro de version en documentation.
+La branche et son worktree restent préservés. Pas de fusion de l'ancien
+historique ni de suppression de copie de travail pour ce seul écart Git.
+
+Preuves : ../../_lots_wt/audit-depots-2026-10-23/preuves/prolongation-2410/.
+Cette section prime sur les états historiques ci-dessous.
+
+# Reprise historique : Kanboard 0.18.0, 22/10/2026
 
 Objectif du lot : porter les relectures après déplacement, fermeture et
 réouverture dans le dépôt canonique. Cette section fait foi pour le lot courant ;
