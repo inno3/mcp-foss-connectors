@@ -34,7 +34,7 @@ logger = logging.getLogger("kanboard-mcp")
 
 mcp = FastMCP("kanboard")
 
-SERVER_VERSION = "0.19.0"
+SERVER_VERSION = "0.19.1"
 _identity_lock = asyncio.Lock()
 
 # kanboard_my_overdue(with_columns=True) : getBoard rend toutes les cartes du
@@ -1779,7 +1779,7 @@ async def kanboard_search_tasks(
 
 async def _board_positions(
     project_ids: list[int], as_user: str,
-) -> tuple[dict[str, tuple[str, str]], list[dict]]:
+) -> tuple[dict[str, tuple[str, str]], list[dict], int]:
     """Colonne et swimlane des cartes, par un seul getBoard par projet.
 
     Rend aussi les projets non resolus avec leur raison : un projet illisible ou
@@ -1787,12 +1787,15 @@ async def _board_positions(
     """
     deadline = time.monotonic() + OVERDUE_COLUMNS_BUDGET_SECONDS
     semaphore = asyncio.Semaphore(OVERDUE_COLUMNS_CONCURRENCY)
+    calls = 0
 
     async def read_board(project_id: int) -> Any:
+        nonlocal calls
         async with semaphore:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError
+            calls += 1
             return await asyncio.wait_for(
                 kb_call("getBoard", {"project_id": project_id}, as_user=as_user), remaining
             )
@@ -1806,13 +1809,20 @@ async def _board_positions(
         elif isinstance(board, BaseException):
             unresolved.append({"project_id": project_id, "reason": _format_error(board)})
         else:
-            for swimlane in board or []:
-                for column in swimlane.get("columns", []):
-                    for task in column.get("tasks", []):
-                        positions[str(task.get("id"))] = (
-                            _text(column.get("title", "")), _text(swimlane.get("name", "")),
-                        )
-    return positions, unresolved
+            try:
+                if not isinstance(board, list):
+                    raise ValueError("Tableau invalide")
+                project_positions = {}
+                for swimlane in board:
+                    for column in swimlane["columns"]:
+                        for task in column["tasks"]:
+                            project_positions[str(task["id"])] = (
+                                _text(column.get("title", "")), _text(swimlane.get("name", "")),
+                            )
+                positions.update(project_positions)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                unresolved.append({"project_id": project_id, "reason": "invalid_board"})
+    return positions, unresolved, calls
 
 
 async def _resolve_overdue_columns(tasks: list[dict], as_user: str) -> dict:
@@ -1820,22 +1830,24 @@ async def _resolve_overdue_columns(tasks: list[dict], as_user: str) -> dict:
     started = time.monotonic()
     project_ids = sorted({
         int(t["project_id"]) for t in tasks
-        if not t.get("column_name") and str(t.get("project_id") or "").isdigit()
+        if (not t.get("column_name") or not t.get("swimlane_name"))
+        and str(t.get("project_id") or "").isdigit()
     })
-    positions, unresolved_projects = await _board_positions(project_ids, as_user)
+    positions, unresolved_projects, calls = await _board_positions(project_ids, as_user)
     unresolved_tasks = 0
     for task in tasks:
         position = positions.get(str(task.get("id")))
-        if position and not task.get("column_name"):
+        if position:
             task["column_name"], task["swimlane_name"] = position
         task["column_resolved"] = bool(task.get("column_name"))
-        unresolved_tasks += not task["column_resolved"]
+        task["swimlane_resolved"] = bool(task.get("swimlane_name"))
+        unresolved_tasks += not (task["column_resolved"] and task["swimlane_resolved"])
     return {
         "with_columns": True,
         "columns_complete": not unresolved_tasks,
         "columns_unresolved_tasks": unresolved_tasks,
         "columns_unresolved_projects": unresolved_projects,
-        "columns_board_calls": len(project_ids),
+        "columns_board_calls": calls,
         "columns_budget_seconds": OVERDUE_COLUMNS_BUDGET_SECONDS,
         "columns_elapsed_seconds": round(time.monotonic() - started, 2),
     }
@@ -1853,9 +1865,9 @@ async def kanboard_my_overdue(as_user: str = "", with_columns: bool = False) -> 
     - with_columns : resout aussi colonne et swimlane (defaut non), par un seul
       getBoard par projet concerne. Budget global de 20 secondes : au-dela, ou si
       un projet est illisible, le resultat est partiel et le dit. Chaque carte porte
-      alors `column_resolved`, et la reponse `columns_complete`,
+      alors `column_resolved` et `swimlane_resolved`. La reponse porte `columns_complete`,
       `columns_unresolved_tasks`, `columns_unresolved_projects` (project_id et
-      raison), `columns_board_calls`, `columns_budget_seconds` et
+      raison), `columns_board_calls` (appels commences), `columns_budget_seconds` et
       `columns_elapsed_seconds`.
 
     Repose sur la procedure `getOverdueTasks`, qui rend en UN appel les taches

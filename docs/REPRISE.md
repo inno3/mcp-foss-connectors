@@ -111,6 +111,39 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
    `tests/test_dolibarr_live_readonly.py` ici et `tests/test_lecture_outils_meetingnotes.py`
    dans l'extension.
 3. Retour si besoin : `bascule-dolibarr.sh retour`, puis redémarrage de Claude Desktop.
+# Reprise L01 : contrôle du cœur, 01/11/2026
+
+Cette section prime sur les états historiques ci-dessous. Le dossier canonique
+est [le lot L01](../../../REPRISE.md), avec ses [preuves](../../../preuves/coeur-revue.md).
+Worktree : `travaux/mcp-foss-connectors`, branche `vague/2026-11-01-l01`,
+base `4d6d989`. Le dépôt de références du lot est `travaux/coeur.git` ; il
+réutilise les objets du dépôt initial sans en modifier les références.
+
+Objectif : relire les correctifs antérieurs Dolibarr 1.8.9 et Kanboard 0.19.0,
+les vérifier hors ligne et préparer leur recette sans installation.
+
+- Dolibarr 1.8.9 conservé : `agendaevents` est départagé sur `t.id`, avec
+  `t.datep` en premier ; porteur, co-assignés et repli sur auteur sont couverts.
+  Audit des treize valeurs littérales `sortfield` et du défaut de balayage.
+- La recette réelle contrôle désormais chaque code HTTP avant les
+  normalisations du transport. Tout code autre que 200 échoue ; seules les
+  méthodes GET sont autorisées par sa garde. Contre-épreuves hors ligne ajoutées.
+- Kanboard 0.19.1 préparé : swimlane manquante recherchée même si la colonne
+  existe, complétude portant sur les deux, tableau malformé isolé du reste des
+  résultats, compteur limité aux appels commencés avant la fin du budget.
+- Suite initiale : 1 733 réussis, 3 ignorés ; finale : 1 747 réussis, 3 ignorés.
+  Zéro tentative réseau dans les deux cas ; contrôle de style conforme.
+  Les trois sauts sont les deux recettes Dolibarr et la recette réelle Kanboard.
+- Aucune installation, aucun redémarrage, aucun appel de production dans cette
+  relecture. La recette distante et les paquets relèvent de la consolidation L01.
+
+Limites : le budget de 20 secondes borne la résolution des tableaux, pas la
+recherche initiale des retards ni les résolutions historiques de noms. Les
+réponses restent des lectures à un instant donné. Le contrôle statique des tris
+ne remplace pas la recette sur le schéma effectivement servi.
+
+Prochaine étape : construire depuis ces sources, vérifier le démarrage puis
+exécuter la recette distante en lecture avec statuts strictement contrôlés.
 
 ---
 

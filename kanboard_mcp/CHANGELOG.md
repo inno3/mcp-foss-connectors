@@ -1,5 +1,15 @@
 # Changelog Kanboard
 
+## 0.19.1 (01/11/2026)
+
+- La complétude de `with_columns` exige la colonne et la swimlane. Une carte
+  déjà pourvue de sa colonne peut donc compléter sa swimlane manquante ;
+  `swimlane_resolved` annonce séparément cette résolution.
+- Un tableau malformé conserve les cartes et les résultats des autres projets,
+  avec la raison `invalid_board`. Les positions d'un tableau invalide sont ignorées.
+- `columns_board_calls` compte les appels commencés, sans inclure les projets
+  restés en attente lorsque le budget expire.
+
 ## 0.19.0 (01/11/2026)
 
 - `kanboard_my_overdue` prend `with_columns` (faux par défaut) : colonne et

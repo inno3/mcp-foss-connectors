@@ -151,3 +151,47 @@ async def test_rows_that_already_carry_their_column_need_no_board() -> None:
     assert "getBoard" not in calls
     assert data["columns_complete"] is True
     assert data["columns_board_calls"] == 0
+
+
+async def test_une_swimlane_absente_declenche_la_resolution() -> None:
+    tasks = [{"id": "10", "project_id": "262", "column_name": "En cours", "swimlane_name": ""}]
+    calls: list = []
+    with patch("kanboard_mcp.server.kb_call", side_effect=_dispatcher(calls)):
+        result = await server._resolve_overdue_columns(tasks, "agent")
+    assert tasks[0]["swimlane_name"] == "Actions & suivi"
+    assert result["columns_complete"] is True
+    assert [c[1] for c in calls if c[0] == "getBoard"] == [262]
+
+
+async def test_un_tableau_malforme_preserve_les_autres_resultats() -> None:
+    async def board(project_id):
+        return {"unexpected": []} if project_id == 263 else BOARDS[project_id]
+    data = await _overdue([], board, with_columns=True)
+    assert data["overdue_count"] == 3
+    assert data["columns_complete"] is False
+    assert data["columns_unresolved_tasks"] == 1
+    assert data["columns_unresolved_projects"] == [{"project_id": 263, "reason": "invalid_board"}]
+
+
+async def test_une_swimlane_non_resolue_ne_certifie_pas_la_completude() -> None:
+    async def board(project_id):
+        return [{"columns": [{"title": "En cours", "tasks": [{"id": "20"}]}]}] if project_id == 263 else BOARDS[project_id]
+    data = await _overdue([], board, with_columns=True)
+    assert data["columns_complete"] is False
+    assert data["columns_unresolved_tasks"] == 1
+    task = next(t for t in data["tasks"] if t["id"] == "20")
+    assert task["column_resolved"] is True
+    assert task["swimlane_resolved"] is False
+
+
+async def test_le_compteur_ne_compte_que_les_appels_commences() -> None:
+    async def board(project_id):
+        await asyncio.sleep(30)
+    calls: list = []
+    with patch.object(server, "OVERDUE_COLUMNS_BUDGET_SECONDS", 0.02), patch.object(
+        server, "OVERDUE_COLUMNS_CONCURRENCY", 1,
+    ):
+        data = await _overdue(calls, board, with_columns=True)
+    assert data["columns_board_calls"] == len([c for c in calls if c[0] == "getBoard"]) == 1
+    assert data["overdue_count"] == 3
+    assert data["columns_complete"] is False

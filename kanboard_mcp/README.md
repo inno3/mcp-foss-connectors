@@ -16,6 +16,13 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
+## Version 0.19.1 : complétude des positions
+
+La réponse distingue `column_resolved` et `swimlane_resolved` par carte ;
+`columns_complete` exige les deux. Un tableau malformé donne une réponse
+partielle conservant les autres projets. `columns_board_calls` compte seulement
+les requêtes commencées dans le budget.
+
 ## Version 0.19.0: column and swimlane for overdue tasks
 
 `kanboard_my_overdue` takes an optional `with_columns` (default false): see the
