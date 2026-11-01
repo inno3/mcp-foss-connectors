@@ -89,6 +89,13 @@ merged["version"] = new_manifest["version"]
 Back the installation up first — `manifest.json` and `src/` — and after the
 restart, check that the server actually reappears rather than assuming it did.
 
+When a package is vendored for its entry points, as the Dolibarr extension is,
+replace its `*.dist-info` with the new one and never leave a second beside it.
+`importlib.metadata.entry_points()` keeps only the first `.dist-info` it reads for
+a distribution name, in `os.listdir` order. Verified on 01/11/2026: a leftover
+holding only `METADATA` hid the entry point after the machine was reinstalled, and
+the server started with 78 tools instead of 113, without any error.
+
 ## 5. Dolibarr extension point (generic core stays generic)
 
 The public core must expose **only** its generic tools; org-specific tools come

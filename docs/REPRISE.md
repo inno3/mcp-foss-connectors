@@ -1,3 +1,89 @@
+# Reprise vérifiée le 01/11/2026 : correctifs connecteurs relevés le 30/10
+
+Cette section prime sur les suivantes. Elle couvre trois dépôts, branche
+`lot/2026-11-01-correctifs-connecteurs`, worktrees sous
+`/home/bjean/RepoGit/_lots_wt/2026-11-01-correctifs-connecteurs/`. Bases : `2e27d59`
+ici, `d2cca0b` pour l'extension, `6c6eaf3` pour mcp-inno3. Commits : `34fde26`
+(Dolibarr 1.8.9) et `9abe8d0` (Kanboard 0.19.0) ici, `e2153a5` (test de fumée) dans
+l'extension, `55b928e` (CalDAV 0.6.0) dans mcp-inno3. **Rien n'est fusionné ni
+poussé. L'installé est donc en avance sur `main` des trois dépôts.**
+
+## Faits vérifiés
+
+- Comparaison des 12 extensions installées : 10 identiques à `main` au démarrage du
+  lot. Kanboard installé en 0.17.3 pour 0.18.0 dans `main`. Extension métier en 0.8.8
+  pour 0.9.0. La réinstallation du poste a repris des copies antérieures, malgré
+  l'état décrit le 24/10 ci-dessous.
+- Actions ouvertes : le bundle était identique à `main`, le défaut était dans le
+  code. `_scan_list` ajoutait `t.rowid` à tout tri, or `llx_actioncomm` a pour clé
+  `id`. Reproduit en production le 01/11. Les routes projets, factures, factures
+  fournisseur, devis, tiers, contacts, tickets, utilisateurs et produits répondent en
+  production ; `bankaccounts` n'est vérifiée que sur le source amont.
+- Second défaut, masqué par le 503 : les lignes portent les propriétés d'`ActionComm`
+  (`userownerid`, `socid`, `percentage`, `datef`). Établi sur le source amont 23.0 et
+  24.0, pas encore observé sur l'instance.
+- Outils MeetingNotes et carnets : même serveur, pas de serveur séparé. Le bundle
+  contenait deux `dist-info` de l'extension. `entry_points()` ne garde que le premier
+  lu, dans l'ordre de `os.listdir` ; celui de la 0.8.8, réduit à `METADATA`, masquait
+  le point d'entrée de la 0.8.6. Démarrage à 78 outils au lieu de 113, sans erreur.
+- Volume CalDAV réel, 48 événements, 56 267 caractères : participants 17 438, URL
+  9 357, descriptions 6 575. `_parse_component` coupait déjà toute description à 300
+  caractères, y compris pour `caldav_get_event`, et la recherche ne lisait que ce
+  début. Forme compacte sur ces données : 18 253 caractères, 19 058 dans le pire cas
+  de descriptions pleines.
+
+## Décisions
+
+- `compact` reste **faux par défaut**, contrairement à la première préférence du
+  relevé : `cycle-reunion-preparation`, `brief-quotidien`, `demarrage-journee`,
+  `session-start-coordination`, `revue-hebdo-direction` et `smart-time-logging` lisent
+  les participants dans cette réponse. Les passer d'abord en `compact=True` ou par
+  `caldav_get_event`, puis basculer le défaut.
+- `assigned_to` retient porteur et co-assignés, puis l'auteur si aucun assigné, et
+  reste appliqué après le balayage : le filtre serveur `user_ids` ignore les
+  co-assignés.
+- Pas de trailer d'outil dans les messages de commit (retirés le 23/10/2026).
+
+## Installation et contrôles
+
+Installé sur place selon RELEASE 4bis, manifeste installé conservé hors `tools` et
+`version`, sauvegardes `.backup-*-2026-11-01-v*` dans
+`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Bundles repackés depuis
+l'installé, donc py314 : `dist/dolibarr-erp-inno3-v2.mcpb`, `dist/kanboard-inno3-v7.mcpb`
+ici, `archives/caldav-bluemind-0.6.0.mcpb` et `caldav-bluemind.mcpb` dans mcp-inno3.
+Poignée de main sous `/usr/bin/python3` : Dolibarr 1.8.9 à 113 outils, Kanboard 53,
+CalDAV 9. Tests écrits avant correction, vus rouges. Suites finales : cœur 1 733
+réussis, 3 ignorés ; mcp-inno3 1 287 réussis ; extension 482 réussis. Cœur et mcp-inno3
+rejoués sous garde réseau, aucune tentative. Ruff propre sauf 32 signalements de
+`caldav_mcp/server.py`, identiques sur `main`.
+
+## Limites, non vérifié
+
+- **Les processus chargés restent les anciens jusqu'au redémarrage du client.** Aucun
+  correctif n'est encore observé sur un service réel.
+- Coût du balayage des actions non mesuré : `percent<>100` inclut les événements
+  automatiques à -1, et la route relit chaque ligne côté serveur.
+- Version de production non lue : 23.0.3 selon le relevé, 24.0.1 selon la mémoire.
+- `caldav_search_events` n'a pas de forme compacte. `my_status` est absent pour un
+  alias de l'adresse du compte. Budget Kanboard fixe, 20 secondes.
+
+## Suite ordonnée
+
+1. **Benjamin** : redémarrer Claude Desktop.
+2. Recette en lecture seule : `dolibarr_list_actions_open(limit=5)` puis avec
+   `assigned_to=5`, en relevant durée et `scan_truncated` ; `dolibarr_list_meetingnotes`,
+   `dolibarr_get_meetingnote`, `dolibarr_list_meetingnotes_actions`,
+   `dolibarr_list_support_carnets`, `dolibarr_check_missing_carnets` ;
+   `caldav_list_events` du 30/10 au 04/11 avec `compact=True`, moins de 20 000
+   caractères ; `caldav_get_event` sur une longue invitation ;
+   `kanboard_my_overdue(with_columns=True)`. Hors session : `DOLIBARR_LIVE_READONLY=1`
+   active `tests/test_dolibarr_live_readonly.py`.
+3. **Benjamin** : trancher le défaut de `compact`, fusionner et pousser les trois
+   branches, puis actualiser la table installée de la provenance.
+4. Créer la carte Kanboard de suivi : aucune écriture dans ce lot, par consigne.
+
+---
+
 # Reprise vérifiée le 24/10/2026
 
 Main et origin/main sont alignés à la base 1e8c14f après fetch. Le lot
