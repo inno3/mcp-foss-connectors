@@ -133,7 +133,8 @@ les vérifier hors ligne et préparer leur recette sans installation.
   résultats, compteur limité aux appels commencés avant la fin du budget.
 - Suite initiale : 1 733 réussis, 3 ignorés ; finale : 1 747 réussis, 3 ignorés.
   Zéro tentative réseau dans les deux cas ; contrôle de style conforme.
-  Les trois sauts sont les deux recettes Dolibarr et la recette réelle Kanboard.
+  Les trois sauts sont les deux recettes Dolibarr en lecture et un test
+  historique d’intégration Dolibarr en écriture, exclu du périmètre autorisé.
 - Aucune installation, aucun redémarrage, aucun appel de production dans cette
   relecture. La recette distante et les paquets relèvent de la consolidation L01.
 
