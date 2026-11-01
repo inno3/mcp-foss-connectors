@@ -1,5 +1,16 @@
 # Changelog Kanboard
 
+## 0.19.0 (01/11/2026)
+
+- `kanboard_my_overdue` prend `with_columns` (faux par défaut) : colonne et
+  swimlane sont résolues par un seul `getBoard` par projet concerné, et non un
+  appel par tâche. Budget global de 20 secondes, au plus quatre tableaux à la fois.
+  Un projet hors budget ou illisible donne un résultat partiel annoncé :
+  `column_resolved` par carte, `columns_complete`, `columns_unresolved_tasks`,
+  `columns_unresolved_projects`, `columns_board_calls`, `columns_budget_seconds`
+  et `columns_elapsed_seconds`. Sans le paramètre, la réponse et le nombre d'appels
+  ne changent pas.
+
 ## 0.18.0 (22/10/2026)
 
 - `kanboard_move_task`, `kanboard_close_task` et `kanboard_open_task` relisent

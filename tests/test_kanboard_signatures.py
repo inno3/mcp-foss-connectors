@@ -20,10 +20,11 @@ def test_tools_and_existing_parameters_preserve_installed_0171():
     }
     assert len(reference["tools"]) == 53
     expected = dict(reference["tools"])
-    # Deux extensions additives, sans deplacer ni modifier un parametre 0.17.1.
+    # Trois extensions additives, sans deplacer ni modifier un parametre 0.17.1.
     for name, addition in {
         "kanboard_get_board": "status: int=1",
         "kanboard_list_tasks": "modified_before: str=''",
+        "kanboard_my_overdue": "with_columns: bool=False",
     }.items():
         expected[name] = expected[name].replace(") ->", f", {addition}) ->")
     assert actual == expected

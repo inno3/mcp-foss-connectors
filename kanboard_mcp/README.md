@@ -16,6 +16,12 @@ environment variables — no host, login or secret is baked into the code.
 | `KANBOARD_TOKEN_ALT` | no | Personal API token of the agent account. Required for agent writes. |
 | `KANBOARD_DEFAULT_AS_USER` | no | `primary` or `agent`: which account is used when a tool's `as_user` argument is empty. Default `primary`. |
 
+## Version 0.19.0: column and swimlane for overdue tasks
+
+`kanboard_my_overdue` takes an optional `with_columns` (default false): see the
+section on overdue tasks below. Without it, the response and the call count do
+not change.
+
 ## Version 0.18.0: read back task state after writes
 
 `kanboard_move_task`, `kanboard_close_task` and `kanboard_open_task` now read
@@ -288,8 +294,10 @@ once for the whole instance and filters on `owner_id` client-side, since that
 procedure returns everybody's overdue tasks. Where the account may not call it,
 the tool falls back to the project sweep and says so through `source`
 (`getOverdueTasks` or `scan_projets`). The fast path carries no column,
-swimlane, category or priority — `getOverdueTasks` does not return them, and
-resolving them would cost one call per task.
+swimlane, category or priority, because `getOverdueTasks` does not return them.
+`with_columns=True` resolves column and swimlane with one `getBoard` per project
+concerned, under a 20-second budget. A project out of budget or unreadable gives
+a partial result that says so (`columns_complete`, `column_resolved` per task).
 
 Run `kanboard_check_project_access` before writing to find out which account can
 reach a given project, rather than discovering it as a 403 at post time. Without

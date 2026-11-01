@@ -16,6 +16,7 @@ import html
 import json
 import logging
 import os
+import time
 import unicodedata
 from contextvars import ContextVar
 from datetime import datetime
@@ -33,8 +34,13 @@ logger = logging.getLogger("kanboard-mcp")
 
 mcp = FastMCP("kanboard")
 
-SERVER_VERSION = "0.18.0"
+SERVER_VERSION = "0.19.0"
 _identity_lock = asyncio.Lock()
+
+# kanboard_my_overdue(with_columns=True) : getBoard rend toutes les cartes du
+# projet, fermees comprises, d'ou un budget global et un parallelisme borne.
+OVERDUE_COLUMNS_BUDGET_SECONDS = 20.0
+OVERDUE_COLUMNS_CONCURRENCY = 4
 
 def _identity_refusal(account: str, reason: str, remedy: str = "") -> None:
     """Refus type, rendu en « Refus » et write_state = non_appliquee."""
@@ -1771,8 +1777,72 @@ async def kanboard_search_tasks(
         return _format_error(exc)
 
 
+async def _board_positions(
+    project_ids: list[int], as_user: str,
+) -> tuple[dict[str, tuple[str, str]], list[dict]]:
+    """Colonne et swimlane des cartes, par un seul getBoard par projet.
+
+    Rend aussi les projets non resolus avec leur raison : un projet illisible ou
+    hors budget ne doit pas priver les autres de leur reponse.
+    """
+    deadline = time.monotonic() + OVERDUE_COLUMNS_BUDGET_SECONDS
+    semaphore = asyncio.Semaphore(OVERDUE_COLUMNS_CONCURRENCY)
+
+    async def read_board(project_id: int) -> Any:
+        async with semaphore:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            return await asyncio.wait_for(
+                kb_call("getBoard", {"project_id": project_id}, as_user=as_user), remaining
+            )
+
+    boards = await asyncio.gather(*(read_board(pid) for pid in project_ids), return_exceptions=True)
+    positions: dict[str, tuple[str, str]] = {}
+    unresolved: list[dict] = []
+    for project_id, board in zip(project_ids, boards):
+        if isinstance(board, TimeoutError):
+            unresolved.append({"project_id": project_id, "reason": "budget"})
+        elif isinstance(board, BaseException):
+            unresolved.append({"project_id": project_id, "reason": _format_error(board)})
+        else:
+            for swimlane in board or []:
+                for column in swimlane.get("columns", []):
+                    for task in column.get("tasks", []):
+                        positions[str(task.get("id"))] = (
+                            _text(column.get("title", "")), _text(swimlane.get("name", "")),
+                        )
+    return positions, unresolved
+
+
+async def _resolve_overdue_columns(tasks: list[dict], as_user: str) -> dict:
+    """Complete les cartes sans colonne et rend le bilan, partiel s'il le faut."""
+    started = time.monotonic()
+    project_ids = sorted({
+        int(t["project_id"]) for t in tasks
+        if not t.get("column_name") and str(t.get("project_id") or "").isdigit()
+    })
+    positions, unresolved_projects = await _board_positions(project_ids, as_user)
+    unresolved_tasks = 0
+    for task in tasks:
+        position = positions.get(str(task.get("id")))
+        if position and not task.get("column_name"):
+            task["column_name"], task["swimlane_name"] = position
+        task["column_resolved"] = bool(task.get("column_name"))
+        unresolved_tasks += not task["column_resolved"]
+    return {
+        "with_columns": True,
+        "columns_complete": not unresolved_tasks,
+        "columns_unresolved_tasks": unresolved_tasks,
+        "columns_unresolved_projects": unresolved_projects,
+        "columns_board_calls": len(project_ids),
+        "columns_budget_seconds": OVERDUE_COLUMNS_BUDGET_SECONDS,
+        "columns_elapsed_seconds": round(time.monotonic() - started, 2),
+    }
+
+
 @mcp.tool()
-async def kanboard_my_overdue(as_user: str = "") -> str:
+async def kanboard_my_overdue(as_user: str = "", with_columns: bool = False) -> str:
     """Liste mes taches en retard dans tous les projets.
 
     Retourne les taches actives assignees a l'utilisateur courant
@@ -1780,6 +1850,13 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
 
     Parametres :
     - as_user : compte cible ("primary" = humain, "agent" = assistant IA, "" = defaut)
+    - with_columns : resout aussi colonne et swimlane (defaut non), par un seul
+      getBoard par projet concerne. Budget global de 20 secondes : au-dela, ou si
+      un projet est illisible, le resultat est partiel et le dit. Chaque carte porte
+      alors `column_resolved`, et la reponse `columns_complete`,
+      `columns_unresolved_tasks`, `columns_unresolved_projects` (project_id et
+      raison), `columns_board_calls`, `columns_budget_seconds` et
+      `columns_elapsed_seconds`.
 
     Repose sur la procedure `getOverdueTasks`, qui rend en UN appel les taches
     en retard de toute l'instance : le balayage projet par projet coutait ~70
@@ -1793,8 +1870,9 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
     dit laquelle des deux voies a repondu.
 
     Les lignes de `getOverdueTasks` ne portent ni colonne, ni swimlane, ni
-    categorie, ni priorite : ces champs ressortent vides sur cette voie. Les
-    resoudre demanderait un appel par tache, ce qui annulerait le gain.
+    categorie, ni priorite : ces champs ressortent vides sur cette voie, sauf
+    colonne et swimlane avec `with_columns`. getBoard rend toutes les cartes du
+    projet : le cout depend de la taille des tableaux, pas du nombre de retards.
     """
     try:
         account = _get_credentials(as_user)[2]
@@ -1836,12 +1914,15 @@ async def kanboard_my_overdue(as_user: str = "") -> str:
 
         # Trier par date d'echeance croissante (plus ancien en premier)
         overdue.sort(key=lambda x: x.get("due_date", ""))
-        return _dumps({
+        payload = {
             "as_user": account,
             "source": source,
             "overdue_count": len(overdue),
             "tasks": overdue,
-        })
+        }
+        if with_columns:
+            payload.update(await _resolve_overdue_columns(overdue, account))
+        return _dumps(payload)
     except Exception as exc:
         return _format_error(exc)
 
