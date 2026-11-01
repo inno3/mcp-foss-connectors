@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.8"
+__version__ = "1.8.9"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -478,6 +478,9 @@ def _clamp_limit(limit: int) -> int:
 # Contrat commun des exports. Le plafond borne les appels HTTP, pas le rendu.
 EXPORT_SCAN_PAGE = 100
 EXPORT_SCAN_MAX_PAGES = 100
+# Clé de départage des routes dont la table ne suit pas la convention rowid.
+# llx_actioncomm se clé par id : y trier sur t.rowid rend un HTTP 503.
+EXPORT_SCAN_PRIMARY_KEYS = {"agendaevents": "id"}
 
 
 class ExportRows(list):
@@ -515,9 +518,10 @@ async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None) -
     base = dict(params or {})
     base.pop("page", None)
     base["limit"] = EXPORT_SCAN_PAGE
-    field = base.get("sortfield", "t.rowid")
-    if "rowid" not in field:
-        field += "," + (field.split(".")[0] + "." if "." in field else "") + "rowid"
+    key = EXPORT_SCAN_PRIMARY_KEYS.get(endpoint.split("/")[0], "rowid")
+    field = base.get("sortfield", f"t.{key}")
+    if key not in [part.rsplit(".", 1)[-1] for part in field.split(",")]:
+        field += "," + (field.split(".")[0] + "." if "." in field else "") + key
     base["sortfield"] = field
     result = ExportRows()
     fingerprints = set()
@@ -4445,6 +4449,15 @@ def _month_last_day(year: int, month: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _action_user_ids(action: dict) -> list[int]:
+    """Utilisateurs d'une action : son porteur et ses co-assignés, triés."""
+    assigned = action.get("userassigned") or {}
+    rows = assigned.values() if isinstance(assigned, dict) else assigned
+    ids = {_id_int(row.get("id")) for row in rows if isinstance(row, dict)}
+    ids.add(_id_int(action.get("userownerid") or action.get("fk_user_action")))
+    return sorted(i for i in ids if i)
+
+
 @mcp.tool()
 async def dolibarr_list_actions_open(
     project_id: int=0,
@@ -4458,16 +4471,20 @@ async def dolibarr_list_actions_open(
     Export : total, returned, count, truncated et next_cursor. Passer cursor
     avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
-    Retourne les actions non terminées (percent < 100), triées par date prévue ascendante.
+    Retourne les actions non terminées (percent < 100), triées par date prévue
+    ascendante puis par identifiant.
     Utile pour le suivi des engagements client et des actions projet.
 
     Paramètres :
     - project_id : filtrer par projet (ID, 0 = tous)
     - thirdparty_id : filtrer par tiers (ID, 0 = tous)
-    - assigned_to : filtrer par utilisateur assigné (ID Dolibarr, 0 = tous)
+    - assigned_to : filtrer par utilisateur assigné (ID Dolibarr, 0 = tous).
+      Retient le porteur et les co-assignés ; une action sans aucun assigné
+      revient à son auteur. Ce filtre s'applique après le balayage.
     - limit : nombre max de résultats (défaut 20, max 100)
 
-    Retourne : id, label, code type, tiers, projet, date prévue, progression, assigné.
+    Retourne : id, label, code type, tiers, projet, date prévue, progression,
+    porteur (assigned_to) et tous les assignés (assigned_users).
     """
     try:
         params: dict[str, Any] = {
@@ -4491,10 +4508,13 @@ async def dolibarr_list_actions_open(
 
         results = []
         for a in actions:
+            # La route rend les propriétés d'ActionComm (userownerid, socid,
+            # percentage, datef), pas les colonnes SQL : lire les deux.
+            user_ids = _action_user_ids(a)
             # Optional: client-side filter by assigned user
             if assigned_to:
-                user_id = a.get("fk_user_action") or a.get("fk_user_author")
-                if str(user_id) != str(assigned_to):
+                candidates = user_ids or [_id_int(a.get("authorid") or a.get("fk_user_author"))]
+                if assigned_to not in candidates:
                     continue
 
             results.append({
@@ -4502,13 +4522,14 @@ async def dolibarr_list_actions_open(
                 "label": a.get("label") or (a.get("note") or "")[:100],
                 "code": a.get("code"),
                 "type": a.get("type"),
-                "percent": a.get("percent"),
+                "percent": a.get("percent") if a.get("percent") is not None else a.get("percentage"),
                 "date": _ts_to_date(a.get("datep")),
-                "date_end": _ts_to_date(a.get("datep2")),
+                "date_end": _ts_to_date(a.get("datep2") or a.get("datef")),
                 "project_id": a.get("fk_project"),
-                "thirdparty_id": a.get("fk_soc"),
-                "contact_id": a.get("fk_contact"),
-                "assigned_to": a.get("fk_user_action"),
+                "thirdparty_id": a.get("fk_soc") or a.get("socid"),
+                "contact_id": a.get("fk_contact") or a.get("contact_id"),
+                "assigned_to": a.get("fk_user_action") or a.get("userownerid"),
+                "assigned_users": user_ids,
                 "location": a.get("location"),
                 "fulldayevent": a.get("fulldayevent"),
             })

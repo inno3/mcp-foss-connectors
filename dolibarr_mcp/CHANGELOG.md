@@ -1,5 +1,20 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.9
+
+- `dolibarr_list_actions_open` ne répondait plus que par un HTTP 503 (« Unknown
+  column 't.rowid' in 'order clause' ») : `_scan_list` ajoutait `t.rowid` à tout
+  tri, or `llx_actioncomm` a pour clé primaire `id`. Le départage suit désormais
+  la clé de la route (`EXPORT_SCAN_PRIMARY_KEYS`), soit `t.datep,t.id` ici. Les
+  autres routes balayées gardent `rowid`.
+- Même outil, défaut que le 503 masquait : les lignes de la route portent les
+  propriétés d'`ActionComm` (`userownerid`, `socid`, `percentage`, `datef`), pas
+  les colonnes SQL lues jusqu'ici. `assigned_to` aurait écarté toutes les actions
+  sans le dire, et `percent`, `date_end`, `thirdparty_id` et `assigned_to` seraient
+  sortis vides. Les deux formes se lisent. Le filtre retient le porteur et les
+  co-assignés, puis l'auteur pour une action sans assigné.
+- Ajout additif : `assigned_users`, liste des identifiants assignés.
+
 ## Non publié : 1.8.8
 
 - `dolibarr_list_time_entries` : `date` est désormais le jour GMT de
