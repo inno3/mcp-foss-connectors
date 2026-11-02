@@ -268,10 +268,10 @@ KANBOARD_URL = os.environ.get("KANBOARD_URL", "")
 # --- Comptes Kanboard (multi-compte) ---------------------------------------
 # Le serveur supporte 2 jeux de credentials simultanement :
 #   - "primary" : compte humain principal - defaut pour la lecture
-#   - "agent"   : compte dedie a l'assistant IA - defaut pour les ecritures
+#   - "agent"   : compte secondaire - defaut pour les ecritures
 # Si KANBOARD_USER_ALT/KANBOARD_TOKEN_ALT sont vides, "agent" est REFUSE (0.16.0) :
 # il retombait sur "primary" jusqu'a la 0.15.0, ce qui enregistrait sous le compte
-# humain des ecritures annoncees comme celles de l'assistant. Une configuration a un
+# humain des ecritures destinees au compte secondaire. Une configuration a un
 # seul compte reste valide : elle s'utilise avec as_user="primary" ou sans as_user.
 KANBOARD_USER = os.environ.get("KANBOARD_USER", "jsonrpc")
 KANBOARD_TOKEN = os.environ.get("KANBOARD_TOKEN", "")
@@ -294,7 +294,7 @@ COMMENT_PREVIEW_CHARS = 500
 
 # Plafond d'activite impose par l'API Kanboard, non configurable : la procedure
 # getProjectActivity ne prend que project_id (tout parametre `limit` ressort en
-# -32602 "Too many arguments"), et le modele coupe a 50 evenements. Le plafond
+# -32602 "Too many arguments"), et l'API borne la liste a 50 evenements. Le plafond
 # est GLOBAL, pas par projet : getProjectActivities sur plusieurs projets rend
 # 50 evenements au total, un projet peu actif pouvant n'en avoir aucun.
 # Verifie sur Kanboard 1.2.53.
@@ -1310,7 +1310,7 @@ async def kanboard_my_dashboard(as_user: str = "") -> str:
     groupees par projet. Inclut les taches actives uniquement.
 
     Parametres :
-    - as_user : compte cible ("primary" = humain, "agent" = assistant IA, "" = defaut)
+    - as_user : compte cible ("primary" = humain, "agent" = compte secondaire, "" = defaut)
 
     Les entites HTML des noms utilises comme cles de by_project sont
     decodees une fois, comme les textes des taches. Les identifiants et
@@ -1865,7 +1865,7 @@ async def kanboard_my_overdue(as_user: str = "", with_columns: bool = False) -> 
     dont la date d'echeance est depassee, triees par anciennete.
 
     Parametres :
-    - as_user : compte cible ("primary" = humain, "agent" = assistant IA, "" = defaut)
+    - as_user : compte cible ("primary" = humain, "agent" = compte secondaire, "" = defaut)
     - with_columns : resout aussi colonne et swimlane (defaut non), par un seul
       getBoard par projet concerne. Budget global de 20 secondes : au-dela, ou si
       un projet est illisible, le resultat est partiel et le dit. Chaque carte porte
@@ -4438,7 +4438,7 @@ async def kanboard_who_am_i(as_user: str = "") -> str:
     et my_overdue.
 
     Parametres :
-    - as_user : "primary" (humain), "agent" (assistant IA), "" (defaut configure)
+    - as_user : "primary" (humain), "agent" (compte secondaire), "" (defaut configure)
 
     Retourne le user_id, username, nom, l'etat de la verification d'identite
     (`identity_verified`) et les erreurs eventuelles. Un compte dont l'identite

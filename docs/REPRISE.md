@@ -120,7 +120,10 @@ Worktree : `/home/bjean/RepoGit/_lots_wt/vague-2026-11-01/L01-connecteurs/travau
 
 Objectif : reformuler les mentions et ponctuations interdites des remises
 Dolibarr et Kanboard, sans modification fonctionnelle, sans installation.
-Les serveurs et manifestes de remise sont versionnés ici. Les manifestes
+Les serveurs et manifestes de remise sont versionnés ici. Une seconde passe
+sémantique reformule aussi les descriptions de compte vers « compte secondaire »
+et la description du plafond de listes vers « API ». Les valeurs publiques
+de sélection de compte restent identiques. Les manifestes
 `packaging/remise-l01/*/manifest.json` reprennent la configuration des archives
 historiques avec leurs seuls textes descriptifs corrigés. Les manifestes
 ordinaires du dépôt sont également corrigés quand concernés.
