@@ -4458,6 +4458,19 @@ def _action_user_ids(action: dict) -> list[int]:
     return sorted(i for i in ids if i)
 
 
+def _action_is_system(action: dict) -> bool:
+    """Événement automatique ou progression sans objet, même sous forme texte."""
+    if str(action.get("type") or "").strip().lower() == "systemauto":
+        return True
+    percent = action.get("percent")
+    if percent is None:
+        percent = action.get("percentage")
+    try:
+        return float(percent) == -1
+    except (TypeError, ValueError):
+        return False
+
+
 @mcp.tool()
 async def dolibarr_list_actions_open(
     project_id: int=0,
@@ -4465,14 +4478,18 @@ async def dolibarr_list_actions_open(
     assigned_to: int=0,
     limit: int=DEFAULT_LIMIT,
     cursor: str='',
+    include_system: bool=False,
+    date_from: str='',
+    date_to: str='',
 ) -> str:
     """Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr.
 
     Export : total, returned, count, truncated et next_cursor. Passer cursor
     avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
-    Retourne les actions non terminées (percent < 100), triées par date prévue
-    ascendante puis par identifiant.
+    Retourne les actions dont percent diffère de 100, triées par date prévue
+    ascendante puis par identifiant. Par défaut, exclut type=systemauto et
+    percent=-1 (sans objet), qui ne sont pas des tâches ouvertes.
     Utile pour le suivi des engagements client et des actions projet.
 
     Paramètres :
@@ -4482,31 +4499,59 @@ async def dolibarr_list_actions_open(
       Retient le porteur et les co-assignés ; une action sans aucun assigné
       revient à son auteur. Ce filtre s'applique après le balayage.
     - limit : nombre max de résultats (défaut 20, max 100)
+    - include_system : inclure aussi les événements automatiques ou sans objet
+      (défaut faux), sans inclure les actions terminées à 100.
+    - date_from, date_to : dates prévues YYYY-MM-DD, facultatives et inclusives.
+      Filtrent t.datep côté API, du début au dernier instant du jour selon le
+      calendrier du serveur. Une borne seule est acceptée.
+
+    excluded_system compte les événements écartés dans le périmètre des filtres,
+    après assignation et avant pagination (0 avec include_system=true).
+    excluded_system_exact est faux si le balayage est incomplet ; le compteur
+    est alors un minimum observé. total porte uniquement sur les lignes retenues.
 
     Retourne : id, label, code type, tiers, projet, date prévue, progression,
     porteur (assigned_to) et tous les assignés (assigned_users).
     """
     try:
+        from datetime import date
+
+        for name, value in (("date_from", date_from), ("date_to", date_to)):
+            if value:
+                try:
+                    if date.fromisoformat(value).isoformat() != value:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise ValueError(f"Format {name} invalide. Attendu : YYYY-MM-DD.") from None
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from doit précéder ou égaler date_to.")
+
         params: dict[str, Any] = {
             "sortfield": "t.datep",
             "sortorder": "ASC",
             "limit": _clamp_limit(limit),
         }
 
-        # Build sqlfilters: open = percent < 100 (0, -1, or any in-progress value)
+        # Conserver les événements sans objet dans le balayage permet de
+        # compter les exclusions sans lancer un second parcours distant.
         sql_parts: list[str] = ["(t.percent:<>:100)"]
         if project_id:
             sql_parts.append(f"(t.fk_project:=:{project_id})")
         if thirdparty_id:
             sql_parts.append(f"(t.fk_soc:=:{thirdparty_id})")
+        if date_from:
+            sql_parts.append(f"(t.datep:>=:'{date_from} 00:00:00')")
+        if date_to:
+            sql_parts.append(f"(t.datep:<=:'{date_to} 23:59:59')")
         params["sqlfilters"] = " AND ".join(sql_parts)
 
         actions = await _scan_list("agendaevents", params)
 
         if not isinstance(actions, list):
-            return _dumps(_export_payload({"count": 0, "actions": []}, "actions", limit, cursor, scan=actions))
+            return _dumps(_export_payload({"count": 0, "actions": [], "excluded_system": 0, "excluded_system_exact": False}, "actions", limit, cursor, scan=actions))
 
         results = []
+        excluded_system = 0
         for a in actions:
             # La route rend les propriétés d'ActionComm (userownerid, socid,
             # percentage, datef), pas les colonnes SQL : lire les deux.
@@ -4516,6 +4561,10 @@ async def dolibarr_list_actions_open(
                 candidates = user_ids or [_id_int(a.get("authorid") or a.get("fk_user_author"))]
                 if assigned_to not in candidates:
                     continue
+
+            if not include_system and _action_is_system(a):
+                excluded_system += 1
+                continue
 
             results.append({
                 "id": a.get("id"),
@@ -4534,7 +4583,11 @@ async def dolibarr_list_actions_open(
                 "fulldayevent": a.get("fulldayevent"),
             })
 
-        return _dumps(_export_payload({"count": len(results), "actions": results}, "actions", limit, cursor, scan=actions))
+        return _dumps(_export_payload({
+            "count": len(results), "actions": results,
+            "excluded_system": excluded_system,
+            "excluded_system_exact": getattr(actions, "complete", True),
+        }, "actions", limit, cursor, scan=actions))
 
     except Exception as exc:
         return _format_error(exc)

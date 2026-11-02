@@ -6,6 +6,14 @@
   une extension corrigée, pour qu'une seule version soit à vérifier une fois installé.
 - Régression réelle en lecture seule : `dolibarr_list_actions_open` reste trié par date
   prévue croissante d'une page à l'autre, sans doublon.
+- Actions ouvertes : exclusion par défaut des événements `systemauto` et des
+  progressions sans objet à -1, option `include_system` pour les rétablir.
+- Période facultative `date_from` / `date_to`, validée avant toute requête et
+  appliquée par l'API à la date prévue, bornes journalières incluses.
+- `excluded_system` est calculé après assignation et avant pagination ;
+  `excluded_system_exact` distingue un décompte complet d'un minimum observé.
+- Les co-assignés, le repli sur auteur, le tri et les métadonnées d'export
+  existants sont conservés. Aucun autre outil d'agenda modifié.
 
 ## Non publié : 1.8.9
 

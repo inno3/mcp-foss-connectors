@@ -111,6 +111,26 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
    `tests/test_dolibarr_live_readonly.py` ici et `tests/test_lecture_outils_meetingnotes.py`
    dans l'extension.
 3. Retour si besoin : `bascule-dolibarr.sh retour`, puis redémarrage de Claude Desktop.
+# Reprise C03 : actions ouvertes, 02/11/2026
+
+Cette section prime sur les états historiques. Source de vérité du lot :
+[reprise C03](../../../REPRISE.md), avec rapport, décisions et preuves.
+Worktree : `C03-actions-ouvertes/travaux/mcp-foss-connectors`, branche
+`vague/2026-11-01-c03`, base `b4fc0485da1a60554fa0bf5ca86ac9cdb9844354`.
+Le dépôt local `../coeur.git` partage les objets des références L01.
+
+Version préparée : Dolibarr 1.8.10. Actions ouvertes hors `systemauto` et
+progression -1 par défaut, option `include_system`, dates strictes côté API,
+compteur après assignation et avant pagination, exactitude liée au balayage.
+Le retour est 1.8.9 corrigé par C01. La couche métier reste 0.9.0.
+
+Les tests, lectures réelles et empreintes sont consignés au fil de l'eau dans
+le dossier du lot. Aucun déploiement, redémarrage, push ni merge autorisé.
+L01 et C01 restent intacts. Prochaine étape : consulter le rapport du lot et
+les preuves finales avant toute décision d'installation.
+
+---
+
 # Reprise C01 : correction des remises L01, 02/11/2026
 
 Cette section prime sur les états historiques ci-dessous. Source de vérité du

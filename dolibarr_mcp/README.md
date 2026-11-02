@@ -689,7 +689,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | `list_contacts` | `contacts`, id, identité, email, téléphone, poste | thirdparty_id obligatoire | Toutes dates, ID croissant, REST paginé |
 | `search_contacts` | `contacts`, id, identité, tiers, email, téléphone | search ou email obligatoire, union des critères | Toutes dates, ID croissant, REST paginé |
 | `list_tickets` | `tickets`, id, ref, sujet, statut, sévérité, tiers, assignation | status natif, thirdparty_id, severity | Toutes dates, REST paginé |
-| `list_actions_open` | `actions`, id, libellé, dates, progression, projet, tiers | project_id, thirdparty_id, assigned_to, actions non terminées | Toutes dates, REST paginé |
+| `list_actions_open` | `actions`, id, libellé, dates, progression, projet, tiers | project_id, thirdparty_id, assigned_to, include_system, date_from, date_to | Hors système et sans objet par défaut ; période facultative sur date prévue, REST paginé |
 | `list_bank_accounts` | `accounts`, id, libellé, type, devise, solde, rapprochement | include_closed faux par défaut | Comptes ouverts par défaut, REST paginé, solde agrégé sur la sélection |
 | `list_bank_entries` | `entries`, id, dates, montant signé, solde cumulé, rapprochement, liens | account_id obligatoire, reconciled yes, no ou vide, with_links, sort, offset | date_start et date_end incluses, début à 90 jours avant date_end ou aujourd'hui par défaut, collection complète de la fenêtre |
 | `list_invoice_payments` | `payments`, date, montant, mode, référence, type, ligne bancaire | invoice_id obligatoire, supplier faux par défaut | Tous règlements et imputations de la facture, collection complète |
@@ -893,3 +893,28 @@ reçoit un 500 « Modulepart meetingnotes not implemented yet ». L'outil le ren
 désormais comme `unsupported_modulepart: true`, sans le confondre avec un objet
 absent. Les comptes rendus se listent par `dolibarr_list_meetingnote_documents`
 (extension inno³ 0.8.8, module meetingnotes 4.45.0-alpha.77).
+
+
+### Actions ouvertes : événements système et période
+
+`dolibarr_list_actions_open` écarte par défaut `type=systemauto` et la
+progression `percent=-1` ou `percentage=-1`, qui signifie sans objet.
+`include_system=True` les rétablit dans le périmètre des actions dont la
+progression diffère de 100. L'assignation conserve le porteur et les co-assignés,
+ou l'auteur en l'absence d'assigné.
+
+`date_from` et `date_to` sont des dates calendaires strictes `YYYY-MM-DD`,
+facultatives et inclusives, appliquées par l'API à `t.datep`, la date prévue.
+Une borne seule est acceptée. Les jours suivent l'horloge du serveur. Une
+période inversée ou une date invalide est refusée avant tout appel distant.
+
+`total` compte les actions retenues après filtrage, avant pagination.
+`excluded_system` compte les événements uniques écartés dans le même périmètre,
+y compris l'assignation, avant pagination ; il vaut 0 avec `include_system=True`.
+Si le balayage est incomplet, `total` reste nul et `excluded_system_exact=False`
+signale que le compteur d'exclusion est seulement un minimum observé. Chaque
+page recalcule ces compteurs ; il ne faut pas les additionner entre pages.
+
+Le filtrage système reste local pour compter les exclusions et respecter les
+co-assignés. Sans période, l'historique entier est donc encore parcouru dans les
+limites du contrat d'export. Pour une lecture fréquente, fixer une période utile.
