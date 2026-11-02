@@ -1,4 +1,4 @@
-# Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 installé, recette à faire
+# Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 installé et recetté
 
 Cette section prime sur les suivantes. Branche `lot/2026-11-02-dolibarr-actions`,
 worktrees sous `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/`, base
@@ -7,7 +7,22 @@ ici, `d6d9ba0` dans l'extension. **Rien n'est poussé ni fusionné.** Installé 
 02/11/2026 à 10:01 avec l'accord de Benjamin, sauvegarde
 `.backup-dolibarr-erp-inno3-v2-2026-11-02-v1.8.9` dans
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Les fichiers installés sont
-identiques au bundle vérifié. Les processus restent en 1.8.9 jusqu'au redémarrage du client.
+identiques au bundle vérifié. Client redémarré, processus chargés à 11:01.
+
+## Recette réelle du 02/11/2026, 11:56, lecture seule par le connecteur
+
+- `dolibarr_list_meetingnotes_actions(limit=300, status=0)` arrive en ligne : 58 actions sur
+  1 369, `limit_effective=80`, `page_size_capped=true`, `next_cursor=58`, `next_page` nul,
+  `deadline_raw` présent, `overdue_as_of=2026-11-02`, `overdue_timezone=Europe/Paris`. Sans
+  le correctif, cet appel était refusé par le client.
+- Reprise à `cursor=58` : actions suivantes, date d'échéance continue. Dernière page de
+  `overdue_only=true` à `cursor=380` : 1 action, 381 au total, `next_cursor` nul, pas de note.
+- Retards contrôlés à la main sur trois échéances : 228, 137 et 2 jours, justes au 02/11/2026.
+- `dolibarr_list_actions_open` : sans filtre et `assigned_to=5`, sans 503, dates croissantes,
+  continues à `cursor=100`.
+- `list_meetingnotes`, `get_meetingnote` avec `decisions_list`, `list_meetingnote_participants`,
+  `list_meetingnote_documents` répondent. Les outils d'écriture MeetingNotes sont exposés avec
+  leur schéma, aucun n'a été appelé.
 
 ## Faits vérifiés
 
@@ -47,7 +62,9 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
 
 ## Non vérifié, limites
 
-- Le code 0.9.1 n'a jamais tourné contre l'instance : aucune clé hors du connecteur.
+- Les fichiers de tests réels n'ont pas été joués contre l'instance, faute de clé hors du
+  connecteur : leur mode réel n'a tourné que sur un banc local. La recette ci-dessus couvre
+  le même code par le connecteur.
 - Version de production non lue : `cloudron exec` a été refusé par les permissions de la
   session, sans tentative par une autre voie. 23.0.3 selon le relevé, 24.0.1 selon la mémoire.
 - Le plafond vient de Claude Code. Celui de Cowork et de Claude Desktop n'est pas mesuré.
@@ -58,14 +75,12 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
 
 ## Suite ordonnée
 
-1. **Benjamin** : redémarrer Claude Desktop. Retour si besoin :
-   `bascule-dolibarr.sh retour`, puis redémarrage.
-2. Recette : `dolibarr_list_meetingnotes_actions(limit=300, status=0)` doit rendre
-   `limit_effective=80`, `deadline_raw`, `overdue_as_of`, `pagination_note`, et arriver en ligne.
-3. Tests réels, clé à fournir hors session : `DOLIBARR_LIVE_READONLY=1` sur
+1. Fusion dans `main` des lots du 01/11 et du 02/11, à décider. L'installé devance `main` :
+   une reconstruction depuis `main` ferait régresser le connecteur.
+2. Tests réels, clé à fournir hors session : `DOLIBARR_LIVE_READONLY=1` sur
    `tests/test_dolibarr_live_readonly.py` ici et `tests/test_lecture_outils_meetingnotes.py`
    dans l'extension.
-4. Fusion dans `main` des lots du 01/11 et du 02/11, à décider. L'installé devance `main`.
+3. Retour si besoin : `bascule-dolibarr.sh retour`, puis redémarrage de Claude Desktop.
 
 ---
 
