@@ -1,3 +1,81 @@
+# Reprise du 02/11/2026 : Dolibarr 1.8.12, create_project numérote avec ref="auto"
+
+Cette section prime sur les suivantes pour ce lot ; la suivante décrit `main` et la 1.8.11.
+Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`,
+branche `lot/2026-11-02-dolibarr-projet-prov`, recalée par avance rapide sur `main` à `7ecbe38`.
+**Commité sur cette branche seule : rien de fusionné, construit, installé ni poussé.** Suivi :
+KB 262 #8060. Portage de `ref="auto"` décidé par Benjamin le 02/11/2026.
+
+Constat à 15:40 : fichiers installés en 1.8.11, identiques à `main`, processus encore lancés
+à 13:32 donc en 1.8.10. **Ces deux versions envoient toujours `ref="PROV"`.**
+
+## Faits vérifiés
+
+- Projet 316 relu en production : `status=1`, `ref=PROV`. La validation est donc bien appelée.
+- Copie locale du cœur 24.0.1 (`_lots_wt/audit-depots-2026-10-23/banc-suite-2610/restauration-privee`) :
+  `Project::setValid()` fait seulement `UPDATE fk_statut = 1`, sans toucher à `ref`. Elle
+  **ne renomme rien**, pas même `(PROVxxx)`, contrairement au commentaire de `ee2a12f`.
+- `api_projects::post()` numérote via `PROJECT_ADDON`, dès l'INSERT, si `ref` vaut `auto`.
+- `uk_projet_ref (ref, entity)` est unique : « PROV-1 » désigne ref `PROV`, entité 1.
+- `dolibarr_get_project(ref="PROV")` rend le projet 316, qui occupe donc cette référence.
+- `ee2a12f` (mcp-inno3, 23/06/2026) avait corrigé la cause avec `ref="auto"` ; le test réel
+  du 12/07 sur KB 6890 a donné `PJ2607-0206`. Le dépôt public n'en gardait aucune trace.
+  Régression probable à la bascule de la source vers ce dépôt en août : **hypothèse**.
+
+## Livré dans ce lot
+
+- Étape 1 de `dolibarr_create_project` : `ref="auto"` au lieu de `"PROV"`. Les trois étapes
+  restent, pour le trigger `PROJECT_VALIDATE`.
+- `_read_back_project` relit le projet dans tous les cas, brouillon et validation en échec
+  compris. `ref` et `status` rendus sont ceux relus ; `ref` vaut `null` s'il n'est pas confirmé.
+  Le statut attendu ne sert que si le statut relu est illisible.
+- `validate_warning` (`status=1`) et `refetch_warning` (`status=0`), additifs : référence relue
+  à `PROV` ou `auto`, relecture impossible ou sans référence, statut inattendu. Plus de
+  `except: pass`. `validation_warning` reste pour la validation en échec ; texte corrigé.
+- `dolibarr_get_project` : `opp_status` et `opp_amount`, bruts, toujours présents.
+
+Trois assertions existantes changent, à la demande : `tests/test_dolibarr.py` attendait `PROV`
+à l'étape 1, en brouillon et après validation refusée. Elles attendent `auto` et la référence
+relue, et les deux derniers cas simulent la relecture. Aucun test supprimé ou ignoré.
+
+| Contrôle | Résultat |
+| --- | --- |
+| Base `main` | 1 786 réussis, 4 ignorés |
+| Premier correctif, avant modification du serveur | 15 échecs, 8 réussites |
+| Portage de `ref="auto"`, avant modification du serveur | 24 échecs, 18 réussites |
+| Mêmes tests après correctif | 42 réussites |
+| Suite complète sous garde réseau | **1 823 réussis, 4 ignorés**, aucune tentative réseau |
+| Manifestes | 26 réussis, seule la version change |
+| Ruff, `git diff --check` | propres |
+
+Comparaison AST avec `main` : `_read_back_project` ajouté, `dolibarr_create_project` et
+`dolibarr_get_project` modifiés, aucune signature changée. SHA-256 du serveur :
+`545e9eb75ebac73b6997d2303ca036ef0d92e56bf8bcdf509b0b130a9cfd8454`.
+
+## Limites et non vérifié
+
+- Réponses synthétiques seulement. Le code de cette version n'a pas touché l'instance :
+  première création réelle à faire après installation et redémarrage, avec la forme réelle de
+  `opp_status` et `opp_amount`.
+- `ref="auto"` n'est vérifié que sur 23.0.3 (`ee2a12f`, KB 6890) et par lecture sur 24.0.1. Le
+  README annonce Dolibarr 16+ : une instance qui garderait la chaîne `auto` est signalée.
+- Changement visible : un brouillon consomme un numéro dès sa création.
+- Refus d'une nouvelle création tant que 316 porte `PROV`, sous 1.8.10 et 1.8.11 : déduit de
+  l'index unique, non rejoué sur la production.
+- `create_project` et `update_project` documentent `opp_status` en texte (prospect...), mais
+  `Project::update()` met `fk_opp_status` à NULL si la valeur n'est pas numérique : perte
+  silente probable, lue dans la source, hors périmètre.
+
+## Suite ordonnée
+
+1. **Benjamin** : renommer la référence du projet 316 dans Dolibarr. Elle est fausse dans tous
+   les cas ; elle ne bloquera plus les créations une fois la 1.8.12 chargée.
+2. Fusion de ce lot dans `main`, sur demande explicite.
+3. Empaquetage et installation de la 1.8.12 sur accord, depuis le lot intégré et avec
+   l'extension 0.9.2, puis redémarrage et recette. Au-dessus de la 1.8.11, pas à sa place.
+
+---
+
 # Reprise du 02/11/2026 : main et installé en Dolibarr 1.8.11, recette à faire, rien n'est poussé
 
 Cette section prime sur les suivantes. `main` réunit le lot du 01/11, le lot du 02/11 et les

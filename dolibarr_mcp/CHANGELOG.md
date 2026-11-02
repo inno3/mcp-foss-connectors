@@ -1,5 +1,24 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.12
+
+- `dolibarr_create_project` : `success`, `status=1` et `ref="PROV"` sortaient sans
+  avertissement (projet 316, 02/11/2026). La validation était bien appelée, mais
+  `Project::setValid()` ne renumérote pas, et l'index unique `uk_projet_ref` refusait
+  la création suivante tant qu'un projet portait `PROV`. Le connecteur envoie
+  désormais `ref="auto"` à la création, comme le correctif jamais repris dans ce dépôt
+  (`ee2a12f` de `mcp-inno3`, 23/06/2026). Le chemin en trois étapes reste, pour le
+  trigger `PROJECT_VALIDATE`.
+- Changement visible : un brouillon reçoit son numéro dès la création au lieu de
+  `PROV`, et `ref` vaut `null`, plus jamais `PROV` par défaut, si la relecture ne la
+  confirme pas. Le projet est relu aussi après un brouillon ou une validation en échec.
+- Ajout additif de `validate_warning` (`status=1`) et `refetch_warning` (`status=0`) :
+  référence relue à `PROV` ou `auto`, relecture impossible ou sans référence, statut
+  relu inattendu. La relecture en échec était avalée sans rien dire.
+- `validation_warning` signale toujours la validation en échec ; son texte ne prétend
+  plus que le projet est en brouillon en `PROV` et donne la cause complète.
+- `dolibarr_get_project` : ajout additif de `opp_status` et `opp_amount`, bruts.
+
 ## Non publié : 1.8.11
 
 - Actions ouvertes : exclusion par défaut des événements `systemauto` et des

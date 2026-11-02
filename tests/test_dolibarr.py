@@ -166,16 +166,15 @@ class TestDolibarrProjects:
 
 @pytest.mark.asyncio
 class TestDolibarrCreateProject:
-    """Tests de dolibarr_create_project — contournement bug PROV-1.
+    """Tests de dolibarr_create_project : numérotation serveur, ref="auto".
 
-    Le bug PROV-1 : un POST /projects avec payload complet et status=1
-    déclenche le renommage immédiat de ref PROV → PJ-YYMM-XXXX, mais la
-    transaction casse quand le payload est lourd (opp_status + montants +
-    notes), laissant la ref à PROV → la création suivante viole la
-    contrainte unique sur llx_projet.ref.
+    Le bug PROV-1 : une ref "PROV" posée telle quelle n'est jamais renumérotée,
+    Project::setValid() ne touche pas à la ref. Le projet la garde et la création
+    suivante viole l'index unique uk_projet_ref (ref, entity), d'où « PROV-1 ».
 
-    Le contournement implémenté est en 3 étapes : POST minimal + PUT
-    enrichissement + POST /validate. Ces tests valident chaque chemin.
+    La création reste en 3 étapes : POST minimal avec ref="auto" + PUT
+    enrichissement + POST /validate, puis relecture. Ces tests valident chaque
+    chemin ; les avertissements sont détaillés dans test_dolibarr_project_validate.
     """
 
     @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
@@ -220,7 +219,7 @@ class TestDolibarrCreateProject:
         step1_args = mock_post.call_args_list[0]
         assert step1_args.args[0] == "projects"
         step1_payload = step1_args.args[1]
-        assert step1_payload["ref"] == "PROV"
+        assert step1_payload["ref"] == "auto"
         assert step1_payload["title"] == "GovTech Connect — DPG Sustainability"
         assert step1_payload["fk_statut"] == "0"  # toujours 0 à la création
         assert step1_payload["socid"] == "42"
@@ -248,21 +247,25 @@ class TestDolibarrCreateProject:
         step3_args = mock_post.call_args_list[1]
         assert step3_args.args[0] == "projects/249/validate"
 
+    @patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock)
     @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
     async def test_minimal_payload_no_status(
         self,
         mock_post: AsyncMock,
+        mock_get: AsyncMock,
     ) -> None:
-        """Title seul, status=0 → 1 seul appel (pas de PUT, pas de validate)."""
+        """Title seul, status=0 → 1 seul POST (pas de PUT, pas de validate), puis relecture."""
         mock_post.return_value = 100
+        mock_get.return_value = {"id": "100", "ref": "PJ2611-0100", "status": "0"}
 
         result = await dolibarr_create_project(title="Brouillon", status=0)
         data = json.loads(result)
         assert data["success"] is True
         assert data["project_id"] == 100
         assert data["status"] == 0
-        assert data["ref"] == "PROV"
+        assert data["ref"] == "PJ2611-0100"
         assert mock_post.call_count == 1  # un seul POST, pas de validate
+        mock_get.assert_awaited_once_with("projects/100")
 
     @patch("dolibarr_mcp.server.api_post", new_callable=AsyncMock)
     async def test_step1_failure_stops(
@@ -299,6 +302,7 @@ class TestDolibarrCreateProject:
             httpx.HTTPStatusError("", request=request, response=response),
         ]
         mock_put.return_value = {"success": "updated"}
+        mock_get.return_value = {"id": "249", "ref": "PJ2605-0192", "status": "0"}
 
         result = await dolibarr_create_project(
             title="Test", description="x", status=1,
@@ -307,7 +311,7 @@ class TestDolibarrCreateProject:
         assert data["success"] is True
         assert data["project_id"] == 249
         assert data["status"] == 0  # validation pas passée
-        assert data["ref"] == "PROV"
+        assert data["ref"] == "PJ2605-0192"
         assert "validation_warning" in data
         assert "brouillon" in data["validation_warning"]
 

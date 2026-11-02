@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.11"
+__version__ = "1.8.12"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1088,6 +1088,10 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
     annoncée : `<champ>_truncated` passe à true et `<champ>_length` donne la
     longueur réelle. Ces champs sont toujours présents. Les deux étaient
     coupés à 500 caractères sans le dire.
+
+    Opportunité : `opp_status` (identifiant du dictionnaire llx_c_lead_status,
+    pas son code) et `opp_amount` sont rendus tels que Dolibarr les renvoie,
+    null si le projet n'en porte pas. Ces deux clés sont toujours présentes.
     """
     try:
         if ref and not project_id:
@@ -1113,6 +1117,8 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
             "date_start": _ts_to_date(p.get("date_start")),
             "date_end": _ts_to_date(p.get("date_end")),
             "budget": p.get("budget_amount"),
+            "opp_status": p.get("opp_status"),
+            "opp_amount": p.get("opp_amount"),
             "description": desc_text,
             "description_length": desc_length,
             "description_truncated": desc_truncated,
@@ -4677,6 +4683,55 @@ async def dolibarr_dashboard() -> str:
 # ---------------------------------------------------------------------------
 
 
+# Création d'un projet : même sentinelle que pour une tâche. api_projects::post()
+# numérote via PROJECT_ADDON dès l'INSERT si `ref` vaut « auto » (lu dans le cœur
+# 24.0.1, constaté sur une instance 23.0.3). Project::setValid() ne renumérote
+# jamais : une ref posée telle quelle le reste, et l'index unique uk_projet_ref
+# (ref, entity) refuse un second projet qui la porte. C'est le « Duplicate entry
+# 'PROV-1' » du bug PROV-1, ref PROV, entité 1, quand le connecteur posait "PROV".
+PROJECT_REF_AUTO = "auto"
+
+
+async def _read_back_project(project_id: Any) -> "tuple[str | None, int | None, list[str]]":
+    """Relit un projet créé : (ref, statut, problèmes constatés).
+
+    L'API ne rend que l'id, et la route de validation ne dit rien de la référence :
+    seule la relecture fait foi. Une valeur illisible reste à None, sans être
+    devinée. Aucune écriture déjà partie n'est rejouée, quel que soit le résultat.
+    """
+    try:
+        project = await api_get(f"projects/{project_id}")
+    except Exception as exc:
+        logger.warning("dolibarr_create_project read back failed: %s", exc)
+        return None, None, [
+            "relecture impossible : référence et statut non confirmés, à contrôler avec "
+            f"dolibarr_get_project. Détail : {_format_error(exc)}"
+        ]
+
+    info = project if isinstance(project, dict) else {}
+    ref = info.get("ref") or None
+    raw_status = info.get("fk_statut")
+    if raw_status is None:
+        raw_status = info.get("status")
+    try:
+        read_status = int(raw_status)
+    except (TypeError, ValueError):
+        read_status = None
+
+    problems: list[str] = []
+    if ref is None:
+        problems.append(
+            "la relecture ne rend aucune référence, à contrôler avec dolibarr_get_project"
+        )
+    elif ref in ("PROV", PROJECT_REF_AUTO):
+        problems.append(
+            f"la référence vaut encore {ref} : la numérotation de Dolibarr ne s'est pas "
+            "appliquée. Corriger la référence dans Dolibarr (carte du projet, Modifier) : "
+            "l'index unique uk_projet_ref refuse deux projets de même référence"
+        )
+    return ref, read_status, problems
+
+
 @mcp.tool()
 async def dolibarr_create_project(
     title: str,
@@ -4708,32 +4763,40 @@ async def dolibarr_create_project(
     - note_public : note publique (optionnel)
     - note_private : note privée (optionnel)
 
-    Retourne l'ID du projet créé (+ ref auto-numérotée si status=1).
+    Retourne l'ID du projet créé, avec la référence attribuée par Dolibarr et
+    le statut, tous deux relus. `ref` vaut null si la relecture ne la confirme pas.
 
     Implémentation interne en 3 étapes (transparent à l'appelant) :
-      1. POST /projects minimal (title + socid) en status=0 / ref="PROV"
-         → contournement du bug PROV-1 (duplicate ref si payload lourd
-            casse la transaction au moment du renommage auto).
+      1. POST /projects minimal (title + socid) en status=0, ref="auto" :
+         Dolibarr numérote (PJyymm-xxxx) dès la création, brouillon compris.
       2. PUT /projects/{id} avec tous les champs d'enrichissement.
-      3. Si status=1 demandé : POST /projects/{id}/validate
-         → Dolibarr renomme PROV → PJ-YYMM-XXXX et passe en status 1.
+      3. Si status=1 demandé : POST /projects/{id}/validate, qui passe le statut
+         à 1 et déclenche PROJECT_VALIDATE, sans toucher à la référence.
+    Le projet est ensuite relu, quelle que soit l'issue de ces étapes.
 
     Si l'étape 1 échoue, l'erreur est remontée et les étapes 2-3 ne sont
     pas tentées. Si une étape ultérieure échoue, le projet reste créé
-    et un champ `*_warning` est ajouté à la réponse.
+    et un champ `*_warning` est ajouté à la réponse :
+    - enrich_warning : enrichissement refusé ;
+    - validation_warning : validation en échec, `status` et `ref` disent l'état réel ;
+    - validate_warning (status=1) ou refetch_warning (status=0) : référence relue
+      à PROV ou auto, relecture impossible ou sans référence, ou statut inattendu.
+
+    success=true dit seulement que le projet existe : lire aussi ces champs.
+
+    Limites : le numéro d'un brouillon est consommé même s'il n'est jamais validé.
+    La numérotation par ref="auto" n'est vérifiée que sur Dolibarr 23 et 24 ; une
+    instance plus ancienne qui garderait la chaîne « auto » est signalée.
     """
     try:
         if not title:
             return "Le titre (title) est obligatoire."
 
         # --- Étape 1 : création minimale (status=0, payload minimal) ---
-        # Le bug PROV-1 vient du fait que Dolibarr réserve la ref temporaire "PROV"
-        # à la création, puis la renomme en PJ-YYMM-XXXX au passage status 0→1.
-        # Quand le payload est lourd (opp_status + montants + notes longues), la
-        # transaction casse au moment du renommage → contrainte unique violée.
-        # On crée donc en brouillon minimal pour ne pas déclencher le renommage.
+        # La ref définitive est posée dès l'INSERT (cf. PROJECT_REF_AUTO). On garde
+        # la création en brouillon puis validate pour déclencher PROJECT_VALIDATE.
         minimal: dict[str, Any] = {
-            "ref": "PROV",
+            "ref": PROJECT_REF_AUTO,
             "title": title,
             "fk_statut": "0",
         }
@@ -4776,9 +4839,8 @@ async def dolibarr_create_project(
 
         # --- Étape 3 : validation si status=1 demandé ---
         # POST /projects/{id}/validate appelle Project::setValid() côté Dolibarr,
-        # ce qui renomme PROV → PJ-YYMM-XXXX et transitionne status 0→1.
-        final_status = 0
-        final_ref = "PROV"
+        # qui transitionne status 0→1 sans toucher à la ref.
+        validated = False
         validation_warning: str | None = None
 
         if status == 1:
@@ -4786,21 +4848,22 @@ async def dolibarr_create_project(
             try:
                 # Dolibarr v23 exige notrigger en entier (idem validate_proposal).
                 await api_post(f"projects/{project_id}/validate", {"notrigger": 0})
-                final_status = 1
-                # Récupérer la nouvelle ref auto-numérotée
-                try:
-                    project_info = await api_get(f"projects/{project_id}")
-                    if isinstance(project_info, dict):
-                        final_ref = project_info.get("ref") or "PROV"
-                except Exception:
-                    pass
+                validated = True
             except Exception as val_exc:
                 validation_warning = (
-                    f"Projet créé en brouillon (id={project_id}, status=0, ref=PROV). "
-                    f"Validation à effectuer manuellement dans l'UI Dolibarr "
-                    f"(carte projet → Valider). Détail : {val_exc}"
+                    f"Validation en échec (id={project_id}) : `status` et `ref` disent l'état "
+                    f"réel. Si le projet est resté en brouillon, le valider dans l'UI Dolibarr "
+                    f"(carte projet → Valider). Détail : {_format_error(val_exc)}"
                 )
                 logger.warning("dolibarr_create_project validate failed: %s", val_exc)
+
+        # Une réponse perdue peut cacher une validation appliquée : le statut relu
+        # prime, et n'est remplacé par celui attendu que s'il est illisible.
+        final_ref, read_status, problems = await _read_back_project(project_id)
+        expected_status = 1 if validated else 0
+        final_status = expected_status if read_status is None else read_status
+        if final_status != expected_status:
+            problems.append(f"le statut relu vaut {final_status} au lieu de {expected_status}")
 
         response: dict[str, Any] = {
             "success": True,
@@ -4808,12 +4871,18 @@ async def dolibarr_create_project(
             "title": title,
             "status": final_status,
             "ref": final_ref,
-            "message": f"Projet '{title}' créé (id={project_id}, ref={final_ref}, status={final_status}).",
+            "message": (
+                f"Projet '{title}' créé (id={project_id}, "
+                f"ref={final_ref or 'non confirmée'}, status={final_status})."
+            ),
         }
         if enrich_warning:
             response["enrich_warning"] = enrich_warning
         if validation_warning:
             response["validation_warning"] = validation_warning
+        if problems:
+            warning_key = "validate_warning" if status == 1 else "refetch_warning"
+            response[warning_key] = f"Projet créé (id={project_id}) mais {' ; '.join(problems)}."
 
         return _dumps(response)
 

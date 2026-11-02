@@ -5,7 +5,15 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.11, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.12, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+
+`dolibarr_create_project` demande sa référence à Dolibarr dès la création
+(`ref="auto"`, numéroteur `PROJECT_ADDON`), brouillon compris, puis rend la référence
+et le statut relus. `ref` vaut `null` si la relecture ne la confirme pas. Une référence
+relue à `PROV` ou `auto`, une relecture impossible ou un statut inattendu donnent
+`validate_warning` si `status=1` était demandé, `refetch_warning` sinon.
+`dolibarr_get_project` expose `opp_status` (identifiant de `llx_c_lead_status`) et
+`opp_amount`, bruts.
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre
