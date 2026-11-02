@@ -73,13 +73,18 @@ async def test_actions_open_for_a_known_user_answers(strict_http):
         assert not action["assigned_users"] or int(users[0]["id"]) in action["assigned_users"]
 
 
-async def test_actions_open_stay_sorted_by_planned_date_across_pages():
+async def test_actions_open_stay_sorted_by_planned_date_across_pages(strict_http):
     from dolibarr_mcp import server
 
-    first = json.loads(await server.dolibarr_list_actions_open(limit=50))
+    # Avec le filtre par défaut, la liste peut être vide : le tri ne prouverait rien.
+    first = json.loads(await server.dolibarr_list_actions_open(limit=50, include_system=True))
     rows = first["actions"]
+    assert rows, "aucun événement à trier"
     if first["next_cursor"]:
-        rows = rows + _rows(await server.dolibarr_list_actions_open(limit=50, cursor=first["next_cursor"]), "actions")
+        rows = rows + _rows(
+            await server.dolibarr_list_actions_open(limit=50, include_system=True, cursor=first["next_cursor"]),
+            "actions",
+        )
 
     dates = [row["date"] for row in rows if row["date"]]
     assert dates == sorted(dates)

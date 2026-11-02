@@ -1,11 +1,7 @@
 # Historique Dolibarr
 
-## Non publié : 1.8.10
+## Non publié : 1.8.11
 
-- Aucun changement de comportement du cœur : ce numéro désigne le bundle qui embarque
-  une extension corrigée, pour qu'une seule version soit à vérifier une fois installé.
-- Régression réelle en lecture seule : `dolibarr_list_actions_open` reste trié par date
-  prévue croissante d'une page à l'autre, sans doublon.
 - Actions ouvertes : exclusion par défaut des événements `systemauto` et des
   progressions sans objet à -1, option `include_system` pour les rétablir.
 - Période facultative `date_from` / `date_to`, validée avant toute requête et
@@ -14,6 +10,15 @@
   `excluded_system_exact` distingue un décompte complet d'un minimum observé.
 - Les co-assignés, le repli sur auteur, le tri et les métadonnées d'export
   existants sont conservés. Aucun autre outil d'agenda modifié.
+- Numéro distinct : deux lignées portaient 1.8.10 le 02/11/2026, seule celle de la
+  section suivante a été installée.
+
+## Non publié : 1.8.10
+
+- Aucun changement de comportement du cœur : ce numéro désigne le bundle qui embarque
+  une extension corrigée, pour qu'une seule version soit à vérifier une fois installé.
+- Régression réelle en lecture seule : `dolibarr_list_actions_open` reste trié par date
+  prévue croissante d'une page à l'autre, sans doublon.
 
 ## Non publié : 1.8.9
 
