@@ -9,6 +9,36 @@ ici, `d6d9ba0` dans l'extension. **Rien n'est poussé ni fusionné.** Installé 
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Les fichiers installés sont
 identiques au bundle vérifié. Client redémarré, processus chargés à 11:01.
 
+## Avant toute fusion : la vague du 01/11
+
+Vérifié le 02/11/2026 à 12:30. `_lots_wt/vague-2026-11-01/` porte des branches dans ses
+propres dépôts git (`L01-connecteurs/travaux/coeur.git`, `metier.git`, `prive.git`,
+`L02-imap/travaux/references/.git`, `C03-actions-ouvertes/travaux/coeur.git`). Un
+`for-each-ref` dans les dépôts canoniques ne les voit pas. Elles portent le code installé
+de Kanboard 0.19.1, CalDAV 0.6.1, IMAP 0.10.2 et Fastmail 0.5.2.
+
+**Deux « Dolibarr 1.8.10 » différents existent.** Celui-ci est installé (extension 0.9.1).
+Celui de C03 (`929ba85`, archive `C03-actions-ouvertes/artefacts/dolibarr-1.8.10-py314.mcpb`)
+filtre les événements système mais embarque l'extension 0.9.0 : l'installer retirerait
+deadline brute et plafond de page. Ne pas l'installer.
+
+Fusion simulée dans des copies jetables, aucun dépôt canonique touché :
+
+| Dépôt | Méthode | Conflits | Suite | Écart avec l'installé |
+|---|---|---|---|---|
+| `mcp-foss-connectors` | fusion de ce lot et de `vague/2026-11-01-c03` | `docs/REPRISE.md`, `dolibarr_mcp/CHANGELOG.md` | 1 786 réussis, 4 ignorés | Kanboard, HedgeDoc, Nextcloud, WordPress identiques ; Dolibarr : C03 et textes en plus |
+| `inno3-mcp-extensions` | fusion de ce lot et de `vague/2026-11-01-l01` | `docs/REPRISE.md` | 522 réussis | une ligne de docstring |
+| `mcp-inno3` | avance rapide sur L01, puis `cf9b401`, `30a8fa0`, `f5f7be3` repris un à un | `docs/REPRISE.md`, `pyproject.toml`, `uv.lock` | 1 451 réussis | IMAP, Fastmail, CalDAV, CardDAV, Forgejo, Hermine, Mastodon identiques |
+
+À respecter : ne pas fusionner L02 directement, il ramènerait les copies de connecteurs
+retirées le 22/10 (`c310cd7`) et des commits antérieurs au retrait des trailers ; la
+différence de 451 tests avec L02 seul vient de ces copies. Prendre pour `pyproject.toml` et
+`uv.lock` la version de L01 avec un numéro au-dessus (0.1.34). Numéroter 1.8.11 et 0.9.2.
+Laisser `packaging/remise-l01/` hors du dépôt public : ce manifeste nomme 23 outils de
+l'extension privée. Passer le test de tri réel en `include_system=True`, sinon il tourne à
+vide. Importer d'abord les branches de la vague dans les dépôts canoniques, et ne supprimer
+aucune branche.
+
 ## Recette réelle du 02/11/2026, 11:56, lecture seule par le connecteur
 
 - `dolibarr_list_meetingnotes_actions(limit=300, status=0)` arrive en ligne : 58 actions sur
