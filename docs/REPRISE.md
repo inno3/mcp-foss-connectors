@@ -1,3 +1,30 @@
+# Reprise du 02/11/2026 : main porte Dolibarr 1.8.11, l'installé reste en 1.8.10, rien n'est poussé
+
+Cette section prime sur les suivantes. `main` réunit le lot du 01/11, le lot du 02/11 et les
+cinq commits de `vague/2026-11-01-c03` (Kanboard 0.19.1, textes C01, filtre des événements
+système). **Ces cinq commits sont repris un à un, pas fusionnés** : `packaging/remise-l01/`
+nomme les outils de l'extension privée et ne doit pas entrer dans l'historique de ce dépôt
+public. Il reste lisible dans la branche locale `vague/2026-11-01-l01`. Ne pas pousser les
+branches `vague/`, ni utiliser `git push --all` ou `--mirror`.
+
+Contrôlé : l'arbre de `main` égale celui d'une fusion complète, à `packaging/` près. Kanboard,
+HedgeDoc, Nextcloud et WordPress ont un `server.py` identique à l'installé. Dolibarr 1.8.11
+ajoute le filtre C03 et les textes à la 1.8.10 installée, qui reste chargée : sur les données
+actuelles, le filtre rendra 0 action par défaut, 8 654 événements automatiques étant écartés.
+
+Repère avant fusion : tag local `repere/avant-fusion-2026-11-02`. Aucune branche supprimée.
+Le worktree d'intégration est sous
+`/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/integration/`.
+
+## Suite
+
+1. Empaqueter Dolibarr 1.8.11 avec l'extension 0.9.2 et installer sur accord de Benjamin.
+   L'archive `C03-actions-ouvertes/artefacts/dolibarr-1.8.10-py314.mcpb` ne doit pas servir.
+2. Décider le push des trois `main`, après relecture de ce que le dépôt public recevrait.
+3. Tests réels avec clé, hors session.
+
+---
+
 # Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 installé et recetté
 
 Cette section prime sur les suivantes. Branche `lot/2026-11-02-dolibarr-actions`,
@@ -26,7 +53,7 @@ Fusion simulée dans des copies jetables, aucun dépôt canonique touché :
 
 | Dépôt | Méthode | Conflits | Suite | Écart avec l'installé |
 |---|---|---|---|---|
-| `mcp-foss-connectors` | fusion de ce lot et de `vague/2026-11-01-c03` | `docs/REPRISE.md`, `dolibarr_mcp/CHANGELOG.md` | 1 786 réussis, 4 ignorés | Kanboard, HedgeDoc, Nextcloud, WordPress identiques ; Dolibarr : C03 et textes en plus |
+| `mcp-foss-connectors` | commits de `vague/2026-11-01-c03` repris un à un | `docs/REPRISE.md`, `dolibarr_mcp/CHANGELOG.md` | 1 786 réussis, 4 ignorés | Kanboard, HedgeDoc, Nextcloud, WordPress identiques ; Dolibarr : C03 et textes en plus |
 | `inno3-mcp-extensions` | fusion de ce lot et de `vague/2026-11-01-l01` | `docs/REPRISE.md` | 522 réussis | une ligne de docstring |
 | `mcp-inno3` | avance rapide sur L01, puis `cf9b401`, `30a8fa0`, `f5f7be3` repris un à un | `docs/REPRISE.md`, `pyproject.toml`, `uv.lock` | 1 451 réussis | IMAP, Fastmail, CalDAV, CardDAV, Forgejo, Hermine, Mastodon identiques |
 
