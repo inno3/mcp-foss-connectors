@@ -18,7 +18,13 @@ Le worktree d'intégration est sous
 
 ## Suite
 
-1. Empaqueter Dolibarr 1.8.11 avec l'extension 0.9.2 et installer sur accord de Benjamin.
+1. Installer sur accord de Benjamin : `bascule-dolibarr-1.8.11.sh installer`, puis redémarrer
+   Claude Desktop. Retour : `bascule-dolibarr-1.8.11.sh retour`, puis redémarrage. Bundle et
+   script, répété sur une copie, dans
+   `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/dist/` : sha256 `02701eb5...a84a9e`,
+   construit depuis `e7d15d1` et `0941172`, 113 outils, seul `dolibarr_list_actions_open` change
+   de schéma (`include_system`, `date_from`, `date_to`). Recette : `limit=3` doit annoncer
+   `excluded_system`, et `manifest.json` 1.8.11. Non joué contre l'instance.
    L'archive `C03-actions-ouvertes/artefacts/dolibarr-1.8.10-py314.mcpb` ne doit pas servir.
 2. Décider le push des trois `main`, après relecture de ce que le dépôt public recevrait.
 3. Tests réels avec clé, hors session.
