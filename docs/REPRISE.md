@@ -1,9 +1,13 @@
-# Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 à installer
+# Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 installé, recette à faire
 
 Cette section prime sur les suivantes. Branche `lot/2026-11-02-dolibarr-actions`,
 worktrees sous `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/`, base
 `lot/2026-11-01-correctifs-connecteurs`, qui est l'état installé. Commits : `2592318`
-ici, `d6d9ba0` dans l'extension. **Rien n'est poussé, fusionné ni installé.**
+ici, `d6d9ba0` dans l'extension. **Rien n'est poussé ni fusionné.** Installé sur place le
+02/11/2026 à 10:01 avec l'accord de Benjamin, sauvegarde
+`.backup-dolibarr-erp-inno3-v2-2026-11-02-v1.8.9` dans
+`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Les fichiers installés sont
+identiques au bundle vérifié. Les processus restent en 1.8.9 jusqu'au redémarrage du client.
 
 ## Faits vérifiés
 
@@ -54,8 +58,8 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
 
 ## Suite ordonnée
 
-1. **Benjamin** : accord d'installation, puis `bascule-dolibarr.sh installer` et
-   redémarrage de Claude Desktop. Retour : `bascule-dolibarr.sh retour` et redémarrage.
+1. **Benjamin** : redémarrer Claude Desktop. Retour si besoin :
+   `bascule-dolibarr.sh retour`, puis redémarrage.
 2. Recette : `dolibarr_list_meetingnotes_actions(limit=300, status=0)` doit rendre
    `limit_effective=80`, `deadline_raw`, `overdue_as_of`, `pagination_note`, et arriver en ligne.
 3. Tests réels, clé à fournir hors session : `DOLIBARR_LIVE_READONLY=1` sur
