@@ -76,7 +76,7 @@ Comparaison AST avec `main` : `_read_back_project` ajouté, `dolibarr_create_pro
 
 ---
 
-# Reprise du 02/11/2026 : main et installé en Dolibarr 1.8.11, recetté, rien n'est poussé
+# Reprise du 02/11/2026 : Dolibarr 1.8.11 installé et recetté, ce dépôt public non poussé
 
 Cette section prime sur les suivantes. `main` réunit le lot du 01/11, le lot du 02/11 et les
 cinq commits de `vague/2026-11-01-c03` (Kanboard 0.19.1, textes C01, filtre des événements
@@ -119,7 +119,9 @@ Processus chargés à 20:12, après l'installation de 15:36.
    de schéma (`include_system`, `date_from`, `date_to`). Recette : `limit=3` doit annoncer
    `excluded_system`, et `manifest.json` 1.8.11. Non joué contre l'instance.
    L'archive `C03-actions-ouvertes/artefacts/dolibarr-1.8.10-py314.mcpb` ne doit pas servir.
-2. Décider le push des trois `main`, après relecture de ce que le dépôt public recevrait.
+2. Décider le push de ce dépôt public, après relecture de ce qu'il recevrait. `main` de
+   `inno3-mcp-extensions` et de `mcp-inno3` sont poussés le 02/11/2026. Leurs crochets `pre-push`
+   n'ont pas vérifié ce qui partait, suites rejouées à la main : à réparer, voir leurs reprises.
 3. Tests réels avec clé, hors session.
 
 ---
