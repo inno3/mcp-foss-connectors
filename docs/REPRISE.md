@@ -1,4 +1,4 @@
-# Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné et installé, recette réelle après redémarrage
+# Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné, installé et recetté, ce dépôt public non poussé
 
 Cette section prime sur les suivantes ; la suivante décrit la 1.8.11, dont la recette reste
 valable. `main` contient ce lot (`18f9456`, réunion `aceb99b`). Worktree
@@ -6,8 +6,8 @@ valable. `main` contient ce lot (`18f9456`, réunion `aceb99b`). Worktree
 `lot/2026-11-02-dolibarr-projet-prov`. Suivi : KB 262 #8060. Portage de `ref="auto"`, fusion et
 installation demandés par Benjamin le 02/11/2026.
 
-**Installé à 20:59, pas encore chargé** : les processus datent de 20:12, donc en 1.8.11, qui
-envoie toujours `ref="PROV"`. **Ce dépôt public reste non poussé.**
+Installé à 20:59, chargé à 21:05 après redémarrage du client. **Ce dépôt public reste non
+poussé. Le projet de test 317 reste à supprimer dans Dolibarr.**
 
 ## Faits vérifiés
 
@@ -78,12 +78,25 @@ Banc local : connecteur lancé comme par le client, sur stdio, contre un faux Do
 | Brouillon | Même erreur 500 | `PJ2611-0044`, `status=0` |
 | `ref` au POST | `PROV` | `auto` |
 
+## Recette réelle de la 1.8.12, 02/11/2026 vers 21:07, par le connecteur
+
+Sur demande de Benjamin, un projet de test en production, sans tiers. Le projet 316 portait
+encore `PROV` pendant ce test.
+
+- `dolibarr_create_project` avec payload complet : `project_id=317`, `ref=PJ2611-0223`,
+  `status=1`, aucun avertissement. Le doublon sur `PROV` ne bloque donc plus la création.
+- Relecture par id et par référence, mêmes valeurs : `status="1"`, `opp_status="1"`,
+  `opp_amount="1.00000000"`, `budget="1.00000000"`, description et note publique présentes.
+- Projet 316 sans opportunité : `opp_status=null`, `opp_amount=null`. Il n'a pas été modifié.
+- `opp_status` et `opp_amount` sortent en chaînes : l'identifiant et un montant à 8 décimales.
+- Effets éventuels des triggers `PROJECT_CREATE` et `PROJECT_VALIDATE` non observés.
+
 ## Limites et non vérifié
 
-- Ni les tests ni le banc n'ont touché l'instance : le banc prouve le connecteur, pas Dolibarr.
-  Restent à constater en réel la première création et la forme de `opp_status` et `opp_amount`.
-- `ref="auto"` n'est vérifié que sur 23.0.3 (`ee2a12f`, KB 6890) et par lecture sur 24.0.1. Le
-  README annonce Dolibarr 16+ : une instance qui garderait la chaîne `auto` est signalée.
+- La recette réelle couvre une création validée. Brouillon, validation refusée et relecture en
+  échec ne sont vus que par les tests, et le brouillon aussi par le banc.
+- `ref="auto"` est constaté sur l'instance inno³, dont la version n'est pas relue ici, et lu dans
+  le cœur 24.0.1. Le README annonce Dolibarr 16+ : une instance qui garderait `auto` est signalée.
 - Changement visible : un brouillon consomme un numéro dès sa création.
 - Refus d'une nouvelle création tant que 316 porte `PROV`, sous 1.8.10 et 1.8.11 : déduit de
   l'index unique, non rejoué sur la production.
@@ -93,14 +106,11 @@ Banc local : connecteur lancé comme par le client, sur stdio, contre un faux Do
 
 ## Suite ordonnée
 
-1. **Benjamin** : redémarrer Claude Desktop pour charger la 1.8.12.
-2. Recette en lecture seule : `dolibarr_get_project(316)` doit rendre `opp_status` et
-   `opp_amount`, puis contrôler leur forme sur un projet qui porte une opportunité.
-3. **Benjamin** : décider la recette d'écriture, projet de test en production ou prochaine
-   vraie création. Attendu : `ref=PJyymm-xxxx`, `status=1`, aucun `validate_warning`.
-4. **Benjamin** : renommer la référence du projet 316 dans Dolibarr. Elle est fausse dans tous
-   les cas ; elle ne bloquera plus les créations une fois la 1.8.12 chargée.
-5. Décider le push de ce dépôt public, déjà ouvert plus bas, avec ce lot en plus.
+1. **Benjamin** : supprimer le projet de test 317 (`PJ2611-0223`) dans Dolibarr.
+2. **Benjamin** : renommer la référence du projet 316 dans Dolibarr. Elle est fausse, mais ne
+   bloque plus les créations depuis le chargement de la 1.8.12.
+3. Décider le push de ce dépôt public, déjà ouvert plus bas, avec ce lot en plus.
+4. À décider : `opp_status` en texte, voir les limites ci-dessus.
 
 ---
 
