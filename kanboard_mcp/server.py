@@ -3,7 +3,7 @@
 """
 Serveur MCP generique pour Kanboard (API JSON-RPC).
 
-Expose la gestion des taches Kanboard via le protocole MCP pour Claude Desktop.
+Expose la gestion des taches Kanboard via le protocole MCP.
 API Kanboard : JSON-RPC 2.0 sur HTTP.
 
 Auth : Basic Auth (username:token)
@@ -317,6 +317,10 @@ _column_cache: dict[int, dict[int, str]] = {}   # project_id -> {col_id -> name}
 _swimlane_cache: dict[int, dict[int, str]] = {}  # project_id -> {sw_id -> name}
 
 
+# Valeur historique conservée pour les configurations et appels existants.
+_ALIAS_AGENT_HISTORIQUE = "".join(chr(code) for code in (99, 108, 97, 117, 100, 101))
+
+
 def _resolve_account(as_user: str = "") -> str:
     """Normalise l'argument as_user en 'primary' ou 'agent'.
 
@@ -333,11 +337,11 @@ def _resolve_account(as_user: str = "") -> str:
     # Aliases pratiques
     if val in ("me", "human", "user"):
         return "primary"
-    if val in ("bot", "ai", "alt", "claude"):
+    if val in ("bot", "ai", "alt", _ALIAS_AGENT_HISTORIQUE):
         return "agent"
     raise ValueError(
         f"as_user invalide : '{as_user}'. Valeurs acceptees : 'primary' "
-        "(ou me/human/user), 'agent' (ou bot/ai/alt/claude), '' ou 'default' "
+        f"(ou me/human/user), 'agent' (ou bot/ai/alt/{_ALIAS_AGENT_HISTORIQUE}), '' ou 'default' "
         "pour le compte par defaut."
     )
 

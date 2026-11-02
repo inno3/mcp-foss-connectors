@@ -3,7 +3,7 @@
   "name": "kanboard-mcp",
   "display_name": "Kanboard",
   "version": "0.19.1",
-  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + agent Claude). 53 tools.",
+  "description": "Connecteur Kanboard : tâches, board, structure projet, sous-tâches, commentaires (lecture/édition/suppression), liens entre tâches (jalons), multi-comptes (primary humain + compte secondaire). 53 tools.",
   "author": {
     "name": "inno³",
     "url": "https://inno3.fr"
@@ -65,7 +65,7 @@
     "kanboard_default_as_user": {
       "type": "string",
       "title": "Compte par défaut",
-      "description": "'primary' (humain) ou 'agent' (Claude). Détermine quel compte est utilisé quand le paramètre as_user d'un tool est vide.",
+      "description": "'primary' (humain) ou 'agent' (compte secondaire). Détermine quel compte est utilisé quand le paramètre as_user d'un tool est vide.",
       "default": "primary",
       "required": false
     }
@@ -277,7 +277,7 @@
     },
     {
       "name": "kanboard_create_task_link",
-      "description": "Crée un lien entre deux tâches (jalon, blocage…) — lien inverse automatique"
+      "description": "Crée un lien entre deux tâches (jalon, blocage…) : lien inverse automatique"
     },
     {
       "name": "kanboard_remove_task_link",

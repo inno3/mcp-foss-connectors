@@ -5,7 +5,7 @@ Serveur MCP générique pour Dolibarr ERP.
 
 Expose les données de l'ERP Dolibarr (projets, factures, tiers, tickets,
 comptes-rendus de réunion, banque et règlements) via le protocole MCP, pour
-Claude Desktop et tout autre client MCP.
+tout client compatible MCP.
 
 Configuration : DOLIBARR_URL (URL de base) + DOLIBARR_API_KEY (header DOLAPIKEY).
 Optionnel : DOLIBARR_WEB_LOGIN / DOLIBARR_WEB_PASSWORD, requis uniquement par

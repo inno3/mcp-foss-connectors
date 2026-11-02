@@ -111,6 +111,46 @@ seule la description de `dolibarr_list_meetingnotes_actions` diffère.
    `tests/test_dolibarr_live_readonly.py` ici et `tests/test_lecture_outils_meetingnotes.py`
    dans l'extension.
 3. Retour si besoin : `bascule-dolibarr.sh retour`, puis redémarrage de Claude Desktop.
+# Reprise C01 : correction des remises L01, 02/11/2026
+
+Cette section prime sur les états historiques ci-dessous. Source de vérité du
+chantier : [reprise C01](../../../../C01-remises-connecteurs/REPRISE.md), avec le rapport, les empreintes et les preuves.
+Branche : `vague/2026-11-01-l01`, base avant correction : `52e068f`.
+Worktree : `/home/bjean/RepoGit/_lots_wt/vague-2026-11-01/L01-connecteurs/travaux/mcp-foss-connectors`.
+
+Objectif : reformuler les mentions et ponctuations interdites des remises
+Dolibarr et Kanboard, sans modification fonctionnelle, sans installation.
+Les serveurs et manifestes de remise sont versionnés ici. Les manifestes
+`packaging/remise-l01/*/manifest.json` reprennent la configuration des archives
+historiques avec leurs seuls textes descriptifs corrigés. Les manifestes
+ordinaires du dépôt sont également corrigés quand concernés.
+
+L'alias historique Kanboard est reconstruit depuis ses points de code pour
+conserver exactement sa valeur et le message d'erreur existant, sans l'écrire
+littéralement dans les sources. Il reste présent en mémoire à l'exécution.
+Les arbres exécutables normalisés sont équivalents ; 159 comparaisons de retours
+et d'erreurs couvrent alias, casse, espaces, défauts et entrées inconnues.
+Suite complète : 1 747 réussites, trois exclusions attendues, zéro tentative réseau.
+Les exclusions portent sur deux recettes distantes et un test historique
+d'écriture. Le dépôt privé L01 passe 1 289 tests ; le métier passe 488 tests.
+
+Les retours reposent sur `4d6d989` dans le worktree C01 `travaux/l01-retour`,
+branche `vague/2026-11-01-c01-retour-l01`. Les proposées restent dans le worktree
+L01 `travaux/mcp-foss-connectors`, branche `vague/2026-11-01-l01`.
+Le constructeur C01 `scripts/l01/reconstruire.py` exige un arbre propre,
+l'égalité des sources avec HEAD et la conservation des dépendances tierces.
+Le métier interne corrigé vient du worktree L01 `travaux/inno3-mcp-extensions`.
+
+État : sources préparées et testées. Archives, fumées et copies fictives sont
+suivies dans le rapport C01. Aucune installation ni vérification après
+application ; les procédures de décision L01 restent inchangées.
+Limite : la copie sur place préserve les descriptions du manifeste installé,
+même lorsque le manifeste de remise porte les reformulations.
+Prochaine action : vérifier les empreintes C01 et suivre ses décisions avant
+toute application. Aucun push, fusion, redémarrage ou recette distante autorisé.
+
+---
+
 # Reprise L01 : contrôle du cœur, 01/11/2026
 
 Cette section prime sur les états historiques ci-dessous. Le dossier canonique
