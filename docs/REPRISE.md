@@ -159,7 +159,9 @@ Processus chargés à 20:12, après l'installation de 15:36.
    L'archive `C03-actions-ouvertes/artefacts/dolibarr-1.8.10-py314.mcpb` ne doit pas servir.
 2. Décider le push de ce dépôt public, après relecture de ce qu'il recevrait. `main` de
    `inno3-mcp-extensions` et de `mcp-inno3` sont poussés le 02/11/2026. Leurs crochets `pre-push`
-   n'ont pas vérifié ce qui partait, suites rejouées à la main : à réparer, voir leurs reprises.
+   n'avaient pas vérifié ce qui partait, suites rejouées à la main. Crochets des trois dépôts
+   réparés le 02/11/2026 : ils testent le commit poussé dans un clone temporaire et refusent un
+   push non vérifiable. Fichiers locaux, non suivis : à reposer si un clone est recréé.
 3. Tests réels avec clé, hors session.
 
 ---
