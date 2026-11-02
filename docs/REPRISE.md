@@ -76,7 +76,7 @@ Comparaison AST avec `main` : `_read_back_project` ajouté, `dolibarr_create_pro
 
 ---
 
-# Reprise du 02/11/2026 : main et installé en Dolibarr 1.8.11, recette à faire, rien n'est poussé
+# Reprise du 02/11/2026 : main et installé en Dolibarr 1.8.11, recetté, rien n'est poussé
 
 Cette section prime sur les suivantes. `main` réunit le lot du 01/11, le lot du 02/11 et les
 cinq commits de `vague/2026-11-01-c03` (Kanboard 0.19.1, textes C01, filtre des événements
@@ -96,10 +96,23 @@ Repère avant fusion : tag local `repere/avant-fusion-2026-11-02`. Aucune branch
 Le worktree d'intégration est sous
 `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/integration/`.
 
+## Recette réelle de la 1.8.11, 02/11/2026 à 20:13, lecture seule par le connecteur
+
+Processus chargés à 20:12, après l'installation de 15:36.
+
+- `dolibarr_list_actions_open(limit=3)` : 0 action, `excluded_system=8667`, balayage complet.
+  Avec `assigned_to=5` : 0 action, 5 947 exclus. Ce 0 vaut pour cette route : il ne prouve pas
+  l'absence d'engagement dans les autres modules.
+- `include_system=True` rend ces événements, `total=5947` pour `assigned_to=5`, tri continu à
+  `cursor=100`. Août 2022 avec `date_from` et `date_to` : 7 événements. Date invalide refusée.
+- Un premier comptage donnait 5 946 exclus et 5 947 au total : refait, les deux valent 5 947.
+  Un événement a été créé entre les deux appels, la route n'offre pas d'instantané.
+- `list_meetingnotes_actions` garde `deadline_raw`, `overdue_as_of` et sa note de pagination.
+  `list_meetingnotes`, participants et documents répondent. Aucun outil d'écriture appelé.
+
 ## Suite
 
-1. **Benjamin** : redémarrer Claude Desktop. Retour si besoin : `bascule-dolibarr-1.8.11.sh
-   retour`, puis redémarrage. Bundle et
+1. Retour si besoin : `bascule-dolibarr-1.8.11.sh retour`, puis redémarrage. Bundle et
    script, répété sur une copie, dans
    `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/dist/` : sha256 `02701eb5...a84a9e`,
    construit depuis `e7d15d1` et `0941172`, 113 outils, seul `dolibarr_list_actions_open` change
