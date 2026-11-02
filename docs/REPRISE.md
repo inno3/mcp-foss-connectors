@@ -1,4 +1,4 @@
-# Reprise du 02/11/2026 : main porte Dolibarr 1.8.11, l'installé reste en 1.8.10, rien n'est poussé
+# Reprise du 02/11/2026 : main et installé en Dolibarr 1.8.11, recette à faire, rien n'est poussé
 
 Cette section prime sur les suivantes. `main` réunit le lot du 01/11, le lot du 02/11 et les
 cinq commits de `vague/2026-11-01-c03` (Kanboard 0.19.1, textes C01, filtre des événements
@@ -9,7 +9,9 @@ branches `vague/`, ni utiliser `git push --all` ou `--mirror`.
 
 Contrôlé : l'arbre de `main` égale celui d'une fusion complète, à `packaging/` près. Kanboard,
 HedgeDoc, Nextcloud et WordPress ont un `server.py` identique à l'installé. Dolibarr 1.8.11
-ajoute le filtre C03 et les textes à la 1.8.10 installée, qui reste chargée : sur les données
+ajoute le filtre C03 et les textes à la 1.8.10 précédente. Fichiers installés le 02/11/2026,
+sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-02-v1.8.10`. Chargé au prochain redémarrage
+du client. Sur les données
 actuelles, le filtre rendra 0 action par défaut, 8 654 événements automatiques étant écartés.
 
 Repère avant fusion : tag local `repere/avant-fusion-2026-11-02`. Aucune branche supprimée.
@@ -18,8 +20,8 @@ Le worktree d'intégration est sous
 
 ## Suite
 
-1. Installer sur accord de Benjamin : `bascule-dolibarr-1.8.11.sh installer`, puis redémarrer
-   Claude Desktop. Retour : `bascule-dolibarr-1.8.11.sh retour`, puis redémarrage. Bundle et
+1. **Benjamin** : redémarrer Claude Desktop. Retour si besoin : `bascule-dolibarr-1.8.11.sh
+   retour`, puis redémarrage. Bundle et
    script, répété sur une copie, dans
    `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/dist/` : sha256 `02701eb5...a84a9e`,
    construit depuis `e7d15d1` et `0941172`, 113 outils, seul `dolibarr_list_actions_open` change
