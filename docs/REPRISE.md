@@ -1,3 +1,70 @@
+# Reprise vérifiée le 02/11/2026 : relevé Dolibarr, bundle 1.8.10 à installer
+
+Cette section prime sur les suivantes. Branche `lot/2026-11-02-dolibarr-actions`,
+worktrees sous `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/`, base
+`lot/2026-11-01-correctifs-connecteurs`, qui est l'état installé. Commits : `2592318`
+ici, `d6d9ba0` dans l'extension. **Rien n'est poussé, fusionné ni installé.**
+
+## Faits vérifiés
+
+- Le relevé des 30/10, 01/11 et 02/11 visait des processus antérieurs au redémarrage du
+  client du 02/11 à 08:17 : le dernier 503 du journal date de 07:50. Les fichiers 1.8.9
+  et 0.9.0 étaient sur disque depuis le 01/11 à 17:26. Depuis le redémarrage, plus de 503
+  et 113 outils exposés.
+- « Dolibarr ERP inno³ » est le libellé de `local.mcpb.inno.dolibarr-erp-inno3-v2`. Un
+  seul répertoire, deux processus lancés sur le même `src/server.py`.
+- `mcp-inno3/dxt/dolibarr/manifest.json` (0.9.0) est un manifeste historique et
+  `mcp-inno3/dolibarr_mcp` n'a pas produit le bundle : empreintes différentes. Le 0.9.0
+  de l'extension est une coïncidence de numéro.
+- Tri : l'alias `t` est juste, c'est la colonne qui ne l'était pas. La route fait
+  `FROM llx_actioncomm AS t` et trie par défaut sur `t.id`, lu dans la copie locale du
+  cœur 24.0.1. Le tri `t.datep,t.id` de `34fde26` répond et reste croissant à `cursor=100`.
+- Plafond mesuré dans Claude Code : 66 actions réelles acceptées, 80 refusées (50 171
+  caractères annoncés), 120 (76 287) et 300 (196 465) aussi.
+- `days_overdue` n'est plus à 0 : l'extension le recalcule depuis le lot du 27/09. Vu en
+  production : 228 jours pour une échéance au 19/03/2026.
+- Lectures réelles par le connecteur de session, donc en 1.8.9 / 0.9.0 :
+  `list_actions_open` (avec et sans `assigned_to`), `list_meetingnotes`, `get_meetingnote`
+  avec `decisions_list`, `list_meetingnote_participants`, `list_meetingnote_documents`,
+  `list_meetingnotes_actions`.
+- Le code 0.9.1 : suite de l'extension 516 réussis, cœur 1 733 réussis et 4 ignorés, ruff
+  propre. Mode réel des tests joué sur un banc local fictif, aucune écriture reçue. Rejeu
+  sans réseau de 300 actions réelles : pages de 53 à 58 actions, 35 420 caractères au plus,
+  300 actions uniques couvertes.
+
+## Bundle
+
+`/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-actions/dist/`, hors dépôt :
+`dolibarr-erp-inno3-v2-1.8.10.mcpb` (sha256 `2023d225...7ea76d`), le 1.8.9 de retour et
+`bascule-dolibarr.sh`, répété sur une copie. Repack d'une copie de l'installé : seuls
+changent la version du manifeste, `__version__`, l'extension et son unique `dist-info`.
+Poignée de main sous `/usr/bin/python3` : 1.8.10, 113 outils, schémas d'entrée identiques,
+seule la description de `dolibarr_list_meetingnotes_actions` diffère.
+
+## Non vérifié, limites
+
+- Le code 0.9.1 n'a jamais tourné contre l'instance : aucune clé hors du connecteur.
+- Version de production non lue : `cloudron exec` a été refusé par les permissions de la
+  session, sans tentative par une autre voie. 23.0.3 selon le relevé, 24.0.1 selon la mémoire.
+- Le plafond vient de Claude Code. Celui de Cowork et de Claude Desktop n'est pas mesuré.
+- `limit` passe de 500 à 80 : tout appelant qui lit une seule page doit suivre `next_cursor`.
+- `dolibarr_list_actions_open` reste bruité : `percent<>100` inclut les événements
+  automatiques à -1, soit 8 654 lignes dont les plus anciennes datent de 2022, et 5 934
+  pour `assigned_to=5`. Le plafond de balayage est à 10 000 lignes. Non modifié.
+
+## Suite ordonnée
+
+1. **Benjamin** : accord d'installation, puis `bascule-dolibarr.sh installer` et
+   redémarrage de Claude Desktop. Retour : `bascule-dolibarr.sh retour` et redémarrage.
+2. Recette : `dolibarr_list_meetingnotes_actions(limit=300, status=0)` doit rendre
+   `limit_effective=80`, `deadline_raw`, `overdue_as_of`, `pagination_note`, et arriver en ligne.
+3. Tests réels, clé à fournir hors session : `DOLIBARR_LIVE_READONLY=1` sur
+   `tests/test_dolibarr_live_readonly.py` ici et `tests/test_lecture_outils_meetingnotes.py`
+   dans l'extension.
+4. Fusion dans `main` des lots du 01/11 et du 02/11, à décider. L'installé devance `main`.
+
+---
+
 # Reprise vérifiée le 01/11/2026 : correctifs connecteurs relevés le 30/10
 
 Cette section prime sur les suivantes. Elle couvre trois dépôts, branche
