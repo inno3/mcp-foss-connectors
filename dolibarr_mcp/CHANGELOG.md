@@ -1,5 +1,12 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.10
+
+- Aucun changement de comportement du cœur : ce numéro désigne le bundle qui embarque
+  une extension corrigée, pour qu'une seule version soit à vérifier une fois installé.
+- Régression réelle en lecture seule : `dolibarr_list_actions_open` reste trié par date
+  prévue croissante d'une page à l'autre, sans doublon.
+
 ## Non publié : 1.8.9
 
 - `dolibarr_list_actions_open` ne répondait plus que par un HTTP 503 (« Unknown

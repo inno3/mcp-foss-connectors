@@ -41,3 +41,16 @@ async def test_actions_open_for_a_known_user_answers():
     # Une action sans assigné revient à son auteur : seule la présence d'assignés se contrôle.
     for action in actions:
         assert not action["assigned_users"] or int(users[0]["id"]) in action["assigned_users"]
+
+
+async def test_actions_open_stay_sorted_by_planned_date_across_pages():
+    from dolibarr_mcp import server
+
+    first = json.loads(await server.dolibarr_list_actions_open(limit=50))
+    rows = first["actions"]
+    if first["next_cursor"]:
+        rows = rows + _rows(await server.dolibarr_list_actions_open(limit=50, cursor=first["next_cursor"]), "actions")
+
+    dates = [row["date"] for row in rows if row["date"]]
+    assert dates == sorted(dates)
+    assert len({row["id"] for row in rows}) == len(rows)
