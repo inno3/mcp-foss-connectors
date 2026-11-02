@@ -1,13 +1,13 @@
-# Reprise du 02/11/2026 : Dolibarr 1.8.12, create_project numérote avec ref="auto"
+# Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné et installé, recette réelle après redémarrage
 
-Cette section prime sur les suivantes pour ce lot ; la suivante décrit `main` et la 1.8.11.
-Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`,
-branche `lot/2026-11-02-dolibarr-projet-prov`, recalée par avance rapide sur `main` à `7ecbe38`.
-**Commité sur cette branche seule : rien de fusionné, construit, installé ni poussé.** Suivi :
-KB 262 #8060. Portage de `ref="auto"` décidé par Benjamin le 02/11/2026.
+Cette section prime sur les suivantes ; la suivante décrit la 1.8.11, dont la recette reste
+valable. `main` contient ce lot (`18f9456`, réunion `aceb99b`). Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`, branche
+`lot/2026-11-02-dolibarr-projet-prov`. Suivi : KB 262 #8060. Portage de `ref="auto"`, fusion et
+installation demandés par Benjamin le 02/11/2026.
 
-Constat à 15:40 : fichiers installés en 1.8.11, identiques à `main`, processus encore lancés
-à 13:32 donc en 1.8.10. **Ces deux versions envoient toujours `ref="PROV"`.**
+**Installé à 20:59, pas encore chargé** : les processus datent de 20:12, donc en 1.8.11, qui
+envoie toujours `ref="PROV"`. **Ce dépôt public reste non poussé.**
 
 ## Faits vérifiés
 
@@ -52,11 +52,36 @@ Comparaison AST avec `main` : `_read_back_project` ajouté, `dolibarr_create_pro
 `dolibarr_get_project` modifiés, aucune signature changée. SHA-256 du serveur :
 `545e9eb75ebac73b6997d2303ca036ef0d92e56bf8bcdf509b0b130a9cfd8454`.
 
+## Livraison
+
+`/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/dist/`, hors dépôt :
+`dolibarr-erp-inno3-v2-1.8.12.mcpb` (sha256 `7886d1cd7410c6e9...22899d688`),
+`construire-1.8.12.py`, `bascule-dolibarr-1.8.12.sh`, `banc_projets.py`, `comparer_schemas.py`
+et les relevés `banc-1.8.11-avant.json`, `banc-1.8.12-installe.json`.
+
+- Repack du bundle 1.8.11, contrôlé identique à l'installé : 972 entrées, seuls `manifest.json`
+  (version) et `src/server.py` diffèrent. Extension 0.9.2 et son unique `dist-info` inchangés.
+- `src/server.py` installé identique à `main`. Réglages inchangés, par empreinte. Sauvegarde :
+  `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/.backup-dolibarr-erp-inno3-v2-2026-11-02-v1.8.11`.
+- Retour : `bascule-dolibarr-1.8.12.sh retour`, puis redémarrage. Répété sur une copie : arbre
+  identique au témoin hors `__pycache__`, seconde installation refusée.
+- Sous `/usr/bin/python3` avec `src/lib` : 113 outils uniques, aucun ajouté ou retiré, aucun
+  schéma d'entrée changé, descriptions de `dolibarr_create_project` et `dolibarr_get_project` seules.
+
+Banc local : connecteur lancé comme par le client, sur stdio, contre un faux Dolibarr sur
+127.0.0.1 qui reprend le comportement lu dans la source du cœur.
+
+| Enchaînement | 1.8.11 | 1.8.12 installé |
+| --- | --- | --- |
+| Création complète | `ref=PROV`, `status=1`, aucun avertissement | `PJ2611-0042`, `status=1` |
+| Création suivante | Erreur 500, `Duplicate entry 'PROV-1'` | `PJ2611-0043`, `status=1` |
+| Brouillon | Même erreur 500 | `PJ2611-0044`, `status=0` |
+| `ref` au POST | `PROV` | `auto` |
+
 ## Limites et non vérifié
 
-- Réponses synthétiques seulement. Le code de cette version n'a pas touché l'instance :
-  première création réelle à faire après installation et redémarrage, avec la forme réelle de
-  `opp_status` et `opp_amount`.
+- Ni les tests ni le banc n'ont touché l'instance : le banc prouve le connecteur, pas Dolibarr.
+  Restent à constater en réel la première création et la forme de `opp_status` et `opp_amount`.
 - `ref="auto"` n'est vérifié que sur 23.0.3 (`ee2a12f`, KB 6890) et par lecture sur 24.0.1. Le
   README annonce Dolibarr 16+ : une instance qui garderait la chaîne `auto` est signalée.
 - Changement visible : un brouillon consomme un numéro dès sa création.
@@ -68,11 +93,14 @@ Comparaison AST avec `main` : `_read_back_project` ajouté, `dolibarr_create_pro
 
 ## Suite ordonnée
 
-1. **Benjamin** : renommer la référence du projet 316 dans Dolibarr. Elle est fausse dans tous
+1. **Benjamin** : redémarrer Claude Desktop pour charger la 1.8.12.
+2. Recette en lecture seule : `dolibarr_get_project(316)` doit rendre `opp_status` et
+   `opp_amount`, puis contrôler leur forme sur un projet qui porte une opportunité.
+3. **Benjamin** : décider la recette d'écriture, projet de test en production ou prochaine
+   vraie création. Attendu : `ref=PJyymm-xxxx`, `status=1`, aucun `validate_warning`.
+4. **Benjamin** : renommer la référence du projet 316 dans Dolibarr. Elle est fausse dans tous
    les cas ; elle ne bloquera plus les créations une fois la 1.8.12 chargée.
-2. Fusion de ce lot dans `main`, sur demande explicite.
-3. Empaquetage et installation de la 1.8.12 sur accord, depuis le lot intégré et avec
-   l'extension 0.9.2, puis redémarrage et recette. Au-dessus de la 1.8.11, pas à sa place.
+5. Décider le push de ce dépôt public, déjà ouvert plus bas, avec ce lot en plus.
 
 ---
 
