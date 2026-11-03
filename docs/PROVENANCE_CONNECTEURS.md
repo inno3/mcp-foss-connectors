@@ -21,9 +21,9 @@ complétées des deux écarts trouvés le 22/10.
 
 | Repère | Dépôt canonique | Rôle |
 | --- | --- | --- |
-| F | `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors` | Les huit connecteurs publics ci-dessous |
-| E | `/home/jean/ssd_data/jean/RepoGit/inno3-mcp-extensions` | Outils métier Dolibarr, chargés par entry-point |
-| M | `/home/jean/ssd_data/jean/RepoGit/mcp-inno3` | CalDAV, CardDAV, IMAP Bluemind, IMAP Fastmail, Forgejo, Hermine, Mastodon (WordPress Commons retiré le 23/10/2026) |
+| F | `/home/bjean/RepoGit/inno3/mcp-foss-connectors` | Les huit connecteurs publics ci-dessous |
+| E | `/home/bjean/RepoGit/inno3-mcp-extensions` | Outils métier Dolibarr, chargés par entry-point |
+| M | `/home/bjean/RepoGit/mcp-inno3` | CalDAV, CardDAV, IMAP Bluemind, IMAP Fastmail, Forgejo, Hermine, Mastodon (WordPress Commons retiré le 23/10/2026) |
 
 Bases MC vérifiées : F `11d691f`, E `aa9ede6`, M `6e20a6d`. Les trois
 worktrees `MC-*` de `_lots_wt` utilisent `lot/2026-10-17-outillage`.
@@ -109,4 +109,4 @@ Vérifier la branche et le commit retenus avant une livraison ; une migration
 de configuration ou de dépendances exige sa propre recette.
 
 Preuves et commandes du lot :
-[MC.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).
+[MC.rapport.md](/home/bjean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).

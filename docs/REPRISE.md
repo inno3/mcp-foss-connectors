@@ -1,3 +1,10 @@
+# Chemins vérifiés le 03/11/2026
+
+Poste réinstallé du 28 au 30/10/2026 sous `/home/bjean`, disque de 1 To monté sur `~/Sauvegarde`.
+Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui restent en
+`/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
+retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
+
 # Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné, installé et recetté, ce dépôt public non poussé
 
 Cette section prime sur les suivantes ; la suivante décrit la 1.8.11, dont la recette reste
@@ -546,15 +553,15 @@ Le manifeste ne change que de version. SHA-256 du serveur final :
 
 ## Références, limites et prochaines actions
 
-- [Rapport du lot](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-22/kanboard-relecture.md) :
+- [Rapport du lot](/home/bjean/RepoGit/_lots_wt/_rapports-2026-10-22/kanboard-relecture.md) :
   preuves rouge puis vert, commandes, exemples avant/après et risques résiduels.
 - Sources : `kanboard_mcp/{server.py,manifest.json,README.md,CHANGELOG.md}` ;
   contrats : `tests/test_kanboard_verified_write.py`, transport, manifestes et
   signatures. `AGENTS.md` et `CLAUDE.md` restent identiques et pointent ici.
-- Référence historique lue seulement : `/home/jean/RepoGit/mcp-inno3`, commit
+- Référence historique lue seulement : `/home/bjean/RepoGit/mcp-inno3`, commit
   **`7f8ecf3`** du 17/08/2026 et ses cinq tests d'état. Aucun helper historique
   recopié ; les helpers du dépôt canonique sont réutilisés.
-- Le checkout principal `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors`
+- Le checkout principal `/home/bjean/RepoGit/inno3/mcp-foss-connectors`
   reste sur `main`. Le worktree builddoc, branche
   `fix/dolibarr-list-documents-meetingnotes` à `4445d44`, est toujours enregistré ;
   son contenu n'a pas été consulté ni modifié. Les anciens chemins K/K2 sont
@@ -589,12 +596,12 @@ en tête donne l'état du lot courant.
 - **Constat fourni du poste, 19/10 à 10h36** : extensions installées et
   rechargées, Dolibarr **1.8.5**, Kanboard **0.17.2**, HedgeDoc **1.2.0**,
   Nextcloud **1.4.1**, WordPress **1.6.0**. Le relevé complet est dans la
-  [reprise de mcp-inno3](/home/jean/ssd_data/jean/RepoGit/mcp-inno3/docs/REPRISE.md).
+  [reprise de mcp-inno3](/home/bjean/RepoGit/mcp-inno3/docs/REPRISE.md).
 - **Vérifié sur disque pendant H** : Dolibarr est désormais en **1.8.6** ;
   les cinq fichiers source installés sont identiques à ceux de `main`.
   Ce constat complète le relevé de 10h36, sans prouver un nouveau rechargement.
   L'extension métier embarquée reste en **0.8.6**, voir la
-  [reprise des extensions](/home/jean/ssd_data/jean/RepoGit/inno3-mcp-extensions/docs/REPRISE.md).
+  [reprise des extensions](/home/bjean/RepoGit/inno3-mcp-extensions/docs/REPRISE.md).
 - **Kanboard, mis à jour le 21/10/2026** : la 0.17.2 est intégrée à `main`
   (lot K `86eecc5`, lot K2 jusqu'à `c3d2c1a`), poussée, et installée le 17/10
   à 17h42 avec un `server.py` identique à `main`. Recette réelle du 21/10 sur
@@ -618,10 +625,10 @@ en tête donne l'état du lot courant.
   **Piège de test** : `server.py` porte `__version__`, que
   `test_protocol_initialize_and_list_tools_in_memory` compare au manifeste ;
   ce test est sauté hors du venv du hook. Vérifier avec
-  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python`.
+  `/home/bjean/RepoGit/_lots_wt/_venv-mcp/bin/python`.
 - **Chantier ouvert** : builddoc reste hors `main`, branche
   `fix/dolibarr-list-documents-meetingnotes`, commit `4445d44`, worktree
-  `/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
+  `/home/bjean/RepoGit/mcp-wt-builddoc/mcp-foss-connectors`.
   B12/B26 et la coordination avec le builddoc métier restent à attribuer
   et arbitrer par Benjamin. Les anciens worktrees conditions et MC sont absents.
 
@@ -647,7 +654,7 @@ rechargé. Aucune recette ni vérification distante pendant H.
 
 Lot H : branche `docs/reprise-2026-10-19`, base `edb5a36`, worktree
 `wt_docs/mcp-foss-connectors` repéré par `git worktree list`. Le checkout
-canonique `/home/jean/ssd_data/jean/RepoGit/inno3/mcp-foss-connectors` est sur
+canonique `/home/bjean/RepoGit/inno3/mcp-foss-connectors` est sur
 `main`. Références : [README](../README.md),
 [provenance](PROVENANCE_CONNECTEURS.md), sources et tests cités ci-dessous.
 `AGENTS.md` et `CLAUDE.md` restent courts, identiques et sans version figée.
@@ -780,7 +787,7 @@ Les branches et états ci-dessous décrivent cette livraison antérieure.
 
 ## Vérifications effectuées
 
-Venv existant : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
+Venv existant : `/home/bjean/RepoGit/_lots_wt/_venv-mcp`.
 Les tests de création utilisent un transport simulé compté. Les anciennes
 fixtures de validité des devis simulent désormais aussi la lecture du tiers.
 
@@ -805,8 +812,8 @@ manifeste sont conservées. Aucun tiret typographique interdit ajouté.
 Commandes exécutées depuis la racine :
 
 ```sh
-PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
-/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
+PYTHONPATH=. /home/bjean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
+/home/bjean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
 git diff --check
 ```
 
@@ -866,7 +873,7 @@ préexistante. Ruff sur les deux fichiers Python touchés : **0 diagnostic**.
 Le constructeur n'a été exécuté que sur des fixtures avec pip simulé ; aucun
 bundle de livraison ni dépendance n'a été installé.
 
-[Rapport MC](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).
+[Rapport MC](/home/bjean/RepoGit/_lots_wt/_execution-2026-10-17/MC.rapport.md).
 Les worktrees associés sont `../MC-mcp-inno3` (repack, manifestes, distribution)
 et `../MC-inno3-mcp-extensions` (reprise documentaire), même branche MC.
 
@@ -946,7 +953,7 @@ Le merge et la numérotation sur `main` ont été bloqués pendant le lot IM par
 la permission en lecture seule du répertoire `.git` ; ces résultats ne sont
 pas une validation du `main` intégré. Réexécuter la suite après application
 et consigner le commit final. Détails dans
-[IM.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_execution-2026-10-17/IM.rapport.md).
+[IM.rapport.md](/home/bjean/RepoGit/_lots_wt/_execution-2026-10-17/IM.rapport.md).
 Recette réelle et diffusion : **à arbitrer par Benjamin**.
 
 ## 17/10/2026 : lot S, conditions de règlement du tiers en 1.8.4
@@ -965,7 +972,7 @@ avant toute requête et relecture après écriture. Décision appliquée en vers
   Sa reprise décrit la preuve par commande. Commit fonctionnel : `acb8cc8`.
 - Les versions installées 1.8.3 et 0.8.5 proviennent de la mission ; aucune
   installation inspectée ni modifiée. Travail seul, hors ligne, sans push ni tag.
-- Rapport commun : [S.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/S.rapport.md).
+- Rapport commun : [S.rapport.md](/home/bjean/RepoGit/_lots_wt/_rapports-2026-10-17/S.rapport.md).
 
 Cette section décrit les worktrees du lot S. Les sections plus anciennes sont
 historiques ; leurs chemins et assertions de poste n'ont pas été revalidés.
@@ -1000,7 +1007,7 @@ y compris dans les textes historiques, conformément à la règle rédactionnell
 
 ### Vérifications exécutées
 
-Venv existant : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
+Venv existant : `/home/bjean/RepoGit/_lots_wt/_venv-mcp`.
 Commande de base depuis la racine :
 `PYTHONPATH=. <venv>/bin/python -m pytest tests -q -p no:cacheprovider`.
 
@@ -1058,7 +1065,7 @@ garder les fichiers d'entrée limités au renvoi vers ce document.
 - État fonctionnel livré en **`c3d2c1a`**, après **`5b95f82`** (identité) et
   **`1b5b706`** (contrats des commentaires). Le commit documentaire qui porte
   cette section termine le lot K2. Source et manifeste restent en **0.17.2**.
-- Venv partagé : `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp`.
+- Venv partagé : `/home/bjean/RepoGit/_lots_wt/_venv-mcp`.
 - Sans réseau, installation, changement de branche, tag ni push ; travail seul.
 - Les trois branches à archiver indiquées dans le lot K existent toujours.
 - Source de vérité : ce document ; historique du lot K conservé ci-dessous.
@@ -1066,7 +1073,7 @@ garder les fichiers d'entrée limités au renvoi vers ce document.
   `validation/kanboard-0172-known-limits.json` décrivent **`86eecc5`**, pas les
   corrections K2. Leurs empreintes et limites ne décrivent plus le HEAD courant.
 - Rapport K2 :
-  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/K2.rapport.md`.
+  `/home/bjean/RepoGit/_lots_wt/_rapports-2026-10-17/K2.rapport.md`.
   Le rapport K reste le relevé historique de l'alignement précédent.
 
 ### Avancée K2 et vérifications
@@ -1156,7 +1163,7 @@ cas primary sans `getMe` ; 3 reste ouvert. Voir la reprise courante.
 
 Ne pas reprendre les consignes de poste périmées des branches historiques ; les
 autres worktrees restent des chantiers distincts. Le répertoire interdit
-`/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc` n'a été ni consulté ni modifié.
+`/home/bjean/RepoGit/mcp-wt-builddoc` n'a été ni consulté ni modifié.
 
 ## 17/10/2026 : lot K : réunir Kanboard en 0.17.2
 
@@ -1201,7 +1208,7 @@ d'instance. Aucun autre connecteur n'est à reprendre depuis les branches ancien
 ### Vérifications exécutées
 
 Depuis la racine, avec le venv partagé
-`/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp` :
+`/home/bjean/RepoGit/_lots_wt/_venv-mcp` :
 
 - État initial : `PYTHONPATH=. <venv>/bin/python -m pytest tests -q -p no:cacheprovider`
   → **1 220 réussis, 1 ignoré**, en 5,08 s. Aucun test rouge préexistant.
@@ -1278,7 +1285,7 @@ hors docstrings (dont `_identity_refusal`, équivalent fonctionnellement).
 - `tests/fixtures/kanboard_0171_signatures.json` : signatures extraites de l'installé.
 - `scripts/test_kanboard_crosscheck_offline.py` : lanceur avec garde réseau.
 - Rapport final :
-  `/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/K.rapport.md`.
+  `/home/bjean/RepoGit/_lots_wt/_rapports-2026-10-17/K.rapport.md`.
 
 Prochaines actions, dans l'ordre : relire les deux commits et les limites
 ci-dessous ; intégrer cette branche dans le dépôt canonique ; décider d'une
@@ -1315,7 +1322,7 @@ pas supprimées ici :
 - `fix/kanboard-0.17.0-board-status-entites-dates` : correctifs de lecture `adc1df0`.
 
 Les autres worktrees du dépôt sont des chantiers distincts. En particulier,
-`/home/jean/ssd_data/jean/RepoGit/mcp-wt-builddoc` ne doit pas être touché.
+`/home/bjean/RepoGit/mcp-wt-builddoc` ne doit pas être touché.
 
 
 ## 17/10/2026 : lot L terminé, carnets et échéances
@@ -1360,8 +1367,8 @@ lecture complémentaires restent signalées sans rendre la facture illisible.
 Depuis la racine du worktree, avec le venv partagé existant :
 
 ```sh
-PYTHONPATH=. /home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
-/home/jean/ssd_data/jean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
+PYTHONPATH=. /home/bjean/RepoGit/_lots_wt/_venv-mcp/bin/python -m pytest tests -q -p no:cacheprovider
+/home/bjean/RepoGit/_lots_wt/_venv-mcp/bin/python -m ruff check --no-cache .
 git diff --check
 ```
 
@@ -1415,7 +1422,7 @@ Sources consultées par Git uniquement : `fix/dolibarr-carnets-echeances`
 Leur rôle est celui de sources historiques à archiver après intégration ; leurs
 worktrees n'ont pas été modifiés. Aucun fichier de `mcp-wt-builddoc` n'a été lu.
 
-Le rapport transversal est [L.rapport.md](/home/jean/ssd_data/jean/RepoGit/_lots_wt/_rapports-2026-10-17/L.rapport.md).
+Le rapport transversal est [L.rapport.md](/home/bjean/RepoGit/_lots_wt/_rapports-2026-10-17/L.rapport.md).
 Il contient le classement de chaque commit source, les commandes de recette,
 les branches à archiver et la construction depuis `git archive`, non exécutée.
 
