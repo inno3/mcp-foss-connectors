@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.12"
+__version__ = "1.8.13"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1027,7 +1027,8 @@ async def dolibarr_list_projects(
     avec les mêmes filtres pour continuer. total=null si le parcours est incomplet.
 
     Paramètres :
-    - status : 0=brouillon, 1=ouvert, 2=fermé (défaut : 1 = ouvert)
+    - status : 0=brouillon, 1=ouvert, 2=fermé, "" = tous (défaut : 1 = ouvert).
+      Une seule valeur : toute autre est refusée.
     - thirdparty_id : filtrer par tiers (0 = tous)
     - search : mot-clé dans le titre ou la référence
     - limit : nombre max de résultats (défaut 20, max 100)
@@ -1035,6 +1036,12 @@ async def dolibarr_list_projects(
     Retourne : ref, titre, tiers, statut, dates, budget.
     """
     try:
+        if status and str(status) not in ("0", "1", "2"):
+            return _dumps({
+                "success": False,
+                "error": f"status inconnu : {status!r}. Valeurs admises : 0=brouillon, 1=ouvert, "
+                         '2=fermé, status="" pour tous les statuts.',
+            })
         clamp = _clamp_limit(limit)
         params: dict[str, Any] = {
             "sortfield": "t.ref",
@@ -1090,8 +1097,9 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
     coupés à 500 caractères sans le dire.
 
     Opportunité : `opp_status` (identifiant du dictionnaire llx_c_lead_status,
-    pas son code) et `opp_amount` sont rendus tels que Dolibarr les renvoie,
-    null si le projet n'en porte pas. Ces deux clés sont toujours présentes.
+    pas son code), `opp_amount`, `opp_percent` et `usage_opportunity` (à 0, la
+    carte du projet masque l'opportunité) sont rendus tels que Dolibarr les
+    renvoie, null si le projet n'en porte pas. Ces clés sont toujours présentes.
     """
     try:
         if ref and not project_id:
@@ -1119,6 +1127,8 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
             "budget": p.get("budget_amount"),
             "opp_status": p.get("opp_status"),
             "opp_amount": p.get("opp_amount"),
+            "opp_percent": p.get("opp_percent"),
+            "usage_opportunity": p.get("usage_opportunity"),
             "description": desc_text,
             "description_length": desc_length,
             "description_truncated": desc_truncated,
@@ -4691,6 +4701,76 @@ async def dolibarr_dashboard() -> str:
 # 'PROV-1' » du bug PROV-1, ref PROV, entité 1, quand le connecteur posait "PROV".
 PROJECT_REF_AUTO = "auto"
 
+# Statuts admis par Project::update(), qui écrit la valeur reçue telle quelle.
+PROJECT_STATUSES = (0, 1, 2)
+
+# Dictionnaire llx_c_lead_status du cœur (install/mysql/data/llx_c_lead_status.sql) :
+# code -> (rowid, percent). Aucune route d'API ne l'expose. Project::update() met NULL,
+# sans erreur, tout opp_status non numérique : un code envoyé tel quel effaçait le statut.
+PROJECT_OPP_STATUSES: dict[str, tuple[int, int]] = {
+    "PROSP": (1, 0),
+    "QUAL": (2, 20),
+    "PROPO": (3, 40),
+    "NEGO": (4, 60),
+    "PENDING": (5, 50),
+    "WON": (6, 100),
+    "LOST": (7, 0),
+}
+PROJECT_OPP_ALIASES = {
+    "PROSPECT": "PROSP",
+    "QUALIFICATION": "QUAL",
+    "PROPOSAL": "PROPO",
+    "NEGOTIATION": "NEGO",
+}
+
+
+def _project_opp_fields(opp_status: str) -> dict[str, str]:
+    """Traduit opp_status en champs de PUT /projects/{id}. ValueError si la valeur est inconnue.
+
+    L'API ne déduit rien du statut, à la différence de la carte du projet :
+    usage_opportunity reste à 0, ce qui y masque l'opportunité, et opp_percent, base
+    des montants pondérés, reste vide. Un opp_amount seul n'active pas le suivi : la
+    carte refuserait ensuite d'enregistrer un montant suivi sans statut.
+    """
+    value = str(opp_status).strip().upper()
+    code = PROJECT_OPP_ALIASES.get(value, value)
+    if code in PROJECT_OPP_STATUSES:
+        rowid, percent = PROJECT_OPP_STATUSES[code]
+    elif value.isdecimal() and int(value) > 0:
+        rowid = int(value)
+        percent = next((p for r, p in PROJECT_OPP_STATUSES.values() if r == rowid), None)
+    else:
+        raise ValueError(
+            f"opp_status inconnu : {opp_status!r}. Valeurs admises : prospect, qualification, "
+            f"proposal, negotiation, won, lost, les codes {', '.join(PROJECT_OPP_STATUSES)} ou un "
+            "identifiant entier positif du dictionnaire. Rien n'a été écrit."
+        )
+    fields = {"opp_status": str(rowid), "usage_opportunity": "1"}
+    if percent is not None:
+        fields["opp_percent"] = str(percent)
+    return fields
+
+
+def _project_write_gaps(sent: dict[str, Any], project: Any) -> list[str]:
+    """Compare status et opp_status envoyés à l'état rendu par PUT /projects/{id}.
+
+    Dolibarr répond 200 même quand il ignore ou efface une valeur : seule cette
+    réponse, qui relit le projet après écriture, dit ce qui a été retenu.
+    """
+    watched = [field for field in ("status", "opp_status") if field in sent]
+    if not watched:
+        return []
+    if not isinstance(project, dict):
+        return [f"{', '.join(watched)} non confirmé : la réponse ne porte pas l'état du projet"]
+    gaps = []
+    for field in watched:
+        read = project.get(field)
+        if read is None and field == "status":
+            read = project.get("fk_statut")
+        if str(read) != sent[field]:
+            gaps.append(f"{field} vaut {read} au lieu de {sent[field]}")
+    return gaps
+
 
 async def _read_back_project(project_id: Any) -> "tuple[str | None, int | None, list[str]]":
     """Relit un projet créé : (ref, statut, problèmes constatés).
@@ -4757,7 +4837,12 @@ async def dolibarr_create_project(
     - date_start : date de début (format YYYY-MM-DD, optionnel)
     - date_end : date de fin (format YYYY-MM-DD, optionnel)
     - status : 0=brouillon, 1=ouvert (défaut 1)
-    - opp_status : statut opportunité (prospect, qualification, proposal, negotiation, won, lost)
+    - opp_status : statut d'opportunité, insensible à la casse : prospect (PROSP, 1),
+      qualification (QUAL, 2), proposal (PROPO, 3), negotiation (NEGO, 4), PENDING (5),
+      won (WON, 6), lost (LOST, 7). Un autre identifiant entier du dictionnaire passe
+      tel quel, sans pourcentage. Toute autre valeur est refusée avant toute écriture.
+      Le pourcentage du dictionnaire (opp_percent) et usage_opportunity=1 sont envoyés
+      avec lui. Les triggers de l'instance réagissent comme depuis la carte du projet.
     - opp_amount : montant opportunité (optionnel)
     - budget_amount : budget prévu (optionnel)
     - note_public : note publique (optionnel)
@@ -4777,7 +4862,7 @@ async def dolibarr_create_project(
     Si l'étape 1 échoue, l'erreur est remontée et les étapes 2-3 ne sont
     pas tentées. Si une étape ultérieure échoue, le projet reste créé
     et un champ `*_warning` est ajouté à la réponse :
-    - enrich_warning : enrichissement refusé ;
+    - enrich_warning : enrichissement refusé, ou opp_status non retenu par Dolibarr ;
     - validation_warning : validation en échec, `status` et `ref` disent l'état réel ;
     - validate_warning (status=1) ou refetch_warning (status=0) : référence relue
       à PROV ou auto, relecture impossible ou sans référence, ou statut inattendu.
@@ -4791,6 +4876,13 @@ async def dolibarr_create_project(
     try:
         if not title:
             return "Le titre (title) est obligatoire."
+
+        opp_fields: dict[str, str] = {}
+        if opp_status:
+            try:
+                opp_fields = _project_opp_fields(opp_status)
+            except ValueError as exc:
+                return _dumps({"success": False, "error": str(exc)})
 
         # --- Étape 1 : création minimale (status=0, payload minimal) ---
         # La ref définitive est posée dès l'INSERT (cf. PROJECT_REF_AUTO). On garde
@@ -4814,8 +4906,7 @@ async def dolibarr_create_project(
             enrich["date_start"] = date_start
         if date_end:
             enrich["date_end"] = date_end
-        if opp_status:
-            enrich["opp_status"] = opp_status
+        enrich.update(opp_fields)
         if opp_amount:
             enrich["opp_amount"] = str(opp_amount)
         if budget_amount:
@@ -4829,13 +4920,20 @@ async def dolibarr_create_project(
         if enrich:
             logger.debug("dolibarr_create_project step 2 PUT projects/%s %s", project_id, enrich)
             try:
-                await api_put(f"projects/{project_id}", enrich)
+                updated = await api_put(f"projects/{project_id}", enrich)
             except Exception as enrich_exc:
                 enrich_warning = (
                     f"Projet créé (id={project_id}) mais enrichissement partiel échoué : "
-                    f"{enrich_exc}. À compléter via dolibarr_update_project."
+                    f"{_format_error(enrich_exc)}. À compléter via dolibarr_update_project."
                 )
                 logger.warning("dolibarr_create_project enrich failed: %s", enrich_exc)
+            else:
+                gaps = _project_write_gaps(enrich, updated)
+                if gaps:
+                    enrich_warning = (
+                        f"Projet créé (id={project_id}) mais {' ; '.join(gaps)}. "
+                        "À contrôler avec dolibarr_get_project."
+                    )
 
         # --- Étape 3 : validation si status=1 demandé ---
         # POST /projects/{id}/validate appelle Project::setValid() côté Dolibarr,
@@ -4912,9 +5010,16 @@ async def dolibarr_update_project(
 
     Paramètres :
     - project_id : ID du projet (obligatoire)
+    - status : 0=brouillon, 1=ouvert, 2=fermé. Écrit par PUT, qui déclenche PROJECT_MODIFY.
+      L'API n'a pas de route de clôture : ni PROJECT_CLOSE, ni date ni auteur de clôture.
+    - opp_status : mêmes valeurs et mêmes effets que dolibarr_create_project
     - Tous les autres champs sont optionnels (seuls les non-vides sont mis à jour)
 
-    Retourne les détails du projet mis à jour.
+    Une valeur inconnue de status ou d'opp_status est refusée avant toute écriture.
+
+    Retourne les champs envoyés (updated_fields). `update_warning` signale un status
+    ou un opp_status que la réponse de Dolibarr ne confirme pas : success=true dit
+    seulement que l'écriture a été acceptée. Pour le reste, lire dolibarr_get_project.
     """
     try:
         if not project_id:
@@ -4933,9 +5038,19 @@ async def dolibarr_update_project(
         if date_end:
             data["date_end"] = date_end
         if status >= 0:
-            data["fk_statut"] = str(status)
+            if status not in PROJECT_STATUSES:
+                return _dumps({
+                    "success": False,
+                    "error": f"status inconnu : {status}. Valeurs admises : 0=brouillon, 1=ouvert, "
+                             "2=fermé. Rien n'a été écrit.",
+                })
+            # Project::update() écrit la propriété status : fk_statut y serait ignoré.
+            data["status"] = str(status)
         if opp_status:
-            data["opp_status"] = opp_status
+            try:
+                data.update(_project_opp_fields(opp_status))
+            except ValueError as exc:
+                return _dumps({"success": False, "error": str(exc)})
         if opp_amount:
             data["opp_amount"] = str(opp_amount)
         if budget_amount:
@@ -4948,14 +5063,22 @@ async def dolibarr_update_project(
         if not data:
             return "Aucun champ à mettre à jour fourni."
 
-        await api_put(f"projects/{project_id}", data)
+        updated = await api_put(f"projects/{project_id}", data)
 
-        return _dumps({
+        response: dict[str, Any] = {
             "success": True,
             "project_id": project_id,
             "message": f"Projet {project_id} mis à jour avec succès.",
             "updated_fields": list(data.keys()),
-        })
+        }
+        gaps = _project_write_gaps(data, updated)
+        if gaps:
+            response["message"] = f"Projet {project_id} : écriture acceptée, résultat à contrôler."
+            response["update_warning"] = (
+                f"Dolibarr a accepté l'écriture mais {' ; '.join(gaps)}. "
+                "À contrôler avec dolibarr_get_project."
+            )
+        return _dumps(response)
 
     except Exception as exc:
         return _format_error(exc)
@@ -4972,8 +5095,8 @@ async def dolibarr_delete_project(project_id: int) -> str:
 
     Comportement :
     - En cas de succès → retourne `{success: true, project_id, message}`.
-    - En cas de HTTP 500 (typique d'un projet PROV resté à mi-chemin du
-      renommage, d'un trigger custom qui crashe, ou d'une FK orpheline) →
+    - En cas de HTTP 500 (typique d'un trigger custom qui crashe ou d'une
+      FK orpheline) →
       retourne un diagnostic complet avec :
         - état courant du projet (ref, statut, socid)
         - nombre de tâches restantes
@@ -5028,7 +5151,6 @@ async def dolibarr_delete_project(project_id: int) -> str:
                         "HTTP 500 sur DELETE /projects/{id}. Causes typiques :\n"
                         "  1. FK enfant non gérée par Project::delete() : Dolibarr abandonne.\n"
                         "  2. Trigger PROJECT_DELETE custom qui lève une exception PHP.\n"
-                        "  3. Projet PROV laissé à mi-chemin (renommage cassé).\n"
                         "Étapes recommandées :\n"
                         "  a. Vérifier le log d'erreur du serveur web / PHP (Apache ou nginx) :\n"
                         "     chercher 'project|fatal|error' dans le error.log de l'instance Dolibarr\n"

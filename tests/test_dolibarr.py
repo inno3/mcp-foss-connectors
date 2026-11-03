@@ -189,7 +189,7 @@ class TestDolibarrCreateProject:
         """Payload complet → 3 appels : POST minimal, PUT enrich, POST validate."""
         # POST projects (step 1) renvoie l'id, POST validate (step 3) renvoie ok
         mock_post.side_effect = [249, {"success": "validated"}]
-        mock_put.return_value = {"success": "updated"}
+        mock_put.return_value = {"id": "249", "opp_status": "1"}
         mock_get.return_value = {"id": "249", "ref": "PJ2605-0192", "title": "Test"}
 
         result = await dolibarr_create_project(
@@ -199,7 +199,7 @@ class TestDolibarrCreateProject:
             date_start="2026-05-12",
             date_end="2026-12-31",
             status=1,
-            opp_status="PROSPEC",
+            opp_status="prospect",
             opp_amount=10000,
             budget_amount=10000,
             note_public="public",
@@ -234,7 +234,9 @@ class TestDolibarrCreateProject:
         assert step2_args.args[0] == "projects/249"
         step2_payload = step2_args.args[1]
         assert step2_payload["description"] == "Acccompagnement sustainability"
-        assert step2_payload["opp_status"] == "PROSPEC"
+        assert step2_payload["opp_status"] == "1"
+        assert step2_payload["opp_percent"] == "0"
+        assert step2_payload["usage_opportunity"] == "1"
         assert step2_payload["opp_amount"] == "10000"
         assert step2_payload["budget_amount"] == "10000"
         assert step2_payload["note_public"] == "public"

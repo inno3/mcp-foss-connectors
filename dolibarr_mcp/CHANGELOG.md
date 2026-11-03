@@ -1,5 +1,33 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.13
+
+Défauts constatés en réel le 03/11/2026 sur un projet de test, en 1.8.12 :
+
+- `opp_status` : les valeurs documentées (`prospect`, `won`...) partaient telles quelles,
+  et `Project::update()` met NULL sans erreur tout statut non numérique. Une mise à jour
+  effaçait donc le statut en place en annonçant un succès. Codes et alias sont désormais
+  traduits vers l'identifiant du dictionnaire, toute autre valeur est refusée avant
+  écriture, y compris `0` et `PROSPEC`, sans créer de projet.
+- `opp_status` envoie aussi `opp_percent`, sans quoi le montant pondéré reste à zéro, et
+  `usage_opportunity=1`, sans quoi la carte du projet masque l'opportunité (lu dans le
+  cœur 24.0.1). Le pourcentage reprend celui du dictionnaire, comme le tableau de bord
+  maison. Un `opp_amount` seul n'active pas le suivi.
+- Changement visible : un code qui ne faisait rien, sinon effacer, agit maintenant. Passer
+  un projet à `won` déclenche ce que l'instance attache à ce statut, comme depuis la carte.
+- `dolibarr_update_project` : `status` n'avait aucun effet, succès annoncé. Le connecteur
+  envoyait `fk_statut`, alors que `Project::update()` écrit la propriété `status`. Il
+  agit désormais, valeurs 0, 1 et 2 seulement. `PROJECT_MODIFY` part, mais ni
+  `PROJECT_CLOSE` ni date de clôture : l'API n'a pas de route pour cela.
+- Ajout additif de `update_warning`, et `enrich_warning` à la création : `status` ou
+  `opp_status` que la réponse de Dolibarr ne confirme pas.
+- `enrich_warning` donne la cause complète, plus un message vide sur un délai dépassé.
+- `dolibarr_list_projects` : `status="0,1,2"` rendait `total=0` annoncé comme exact, alors
+  que les projets existaient. Une valeur hors `0`, `1`, `2` et `""` est refusée.
+- `dolibarr_get_project` : ajout additif de `opp_percent` et `usage_opportunity`, bruts.
+- `dolibarr_delete_project` : retrait du diagnostic « renommage cassé », cause qui n'existe
+  pas, `Project::setValid()` ne renommant rien.
+
 ## Non publié : 1.8.12
 
 - `dolibarr_create_project` : `success`, `status=1` et `ref="PROV"` sortaient sans

@@ -5,15 +5,24 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.12, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.13, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
 
 `dolibarr_create_project` demande sa référence à Dolibarr dès la création
 (`ref="auto"`, numéroteur `PROJECT_ADDON`), brouillon compris, puis rend la référence
 et le statut relus. `ref` vaut `null` si la relecture ne la confirme pas. Une référence
 relue à `PROV` ou `auto`, une relecture impossible ou un statut inattendu donnent
 `validate_warning` si `status=1` était demandé, `refetch_warning` sinon.
-`dolibarr_get_project` expose `opp_status` (identifiant de `llx_c_lead_status`) et
-`opp_amount`, bruts.
+`dolibarr_get_project` expose `opp_status` (identifiant de `llx_c_lead_status`),
+`opp_amount`, `opp_percent` et `usage_opportunity`, bruts.
+
+`dolibarr_create_project` et `dolibarr_update_project` traduisent `opp_status`, code ou
+identifiant, vers l'identifiant du dictionnaire par défaut du cœur, et envoient aussi
+`opp_percent` et `usage_opportunity=1`. Une valeur inconnue est refusée avant toute
+écriture. Sur une instance dont le dictionnaire a été renuméroté, passer l'identifiant
+ne suffit pas à garantir le pourcentage : celui des lignes 1 à 7 reste celui du cœur.
+`dolibarr_update_project` écrit `status` par PUT : `PROJECT_MODIFY` part, mais ni
+`PROJECT_CLOSE` ni date de clôture, faute de route d'API. `update_warning` signale un
+`status` ou un `opp_status` que la réponse de Dolibarr ne confirme pas.
 
 `dolibarr_update_thirdparty` accepte `cond_reglement_id`, identifiant entier
 strictement positif du dictionnaire des conditions de règlement. Le paramètre
