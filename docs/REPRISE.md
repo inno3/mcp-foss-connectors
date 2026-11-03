@@ -5,6 +5,90 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
+
+Cette section prime sur les suivantes, hormis les chemins ci-dessus. `main` contient le correctif
+(`ff60747`). Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`,
+branche `lot/2026-11-02-dolibarr-projet-prov`. Suivi : KB 262 #8060. Vérifications, correction, commit,
+fusion et installation demandés par Benjamin le 03/11/2026.
+
+Installée à 09:49. **Elle n'est chargée qu'au redémarrage du client : à cette heure, les processus
+datent encore de la 1.8.12 et aucun Dolibarr réel n'a vu la 1.8.13. Ce dépôt public reste non poussé.**
+Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-03-v1.8.12` dans
+`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
+`bascule-dolibarr-1.8.13.sh retour` dans `_lots_wt/2026-11-02-dolibarr-projet-prov/dist/`, puis redémarrage.
+
+## Constaté en réel le 03/11/2026, en 1.8.12, sur le projet de test 317
+
+- `opp_status="prospect"`, valeur documentée : succès annoncé, statut passé de `1` à `null`.
+  Remis à `1` ensuite, `date_end` du 317 laissée au 31/12/2026 par le test des dates.
+- `status=0` : succès annoncé, `updated_fields` cite `fk_statut`, statut relu toujours `1`.
+- `status="0,1,2"` sur la liste : `total=0` annoncé exact, alors qu'un projet répondait à la
+  recherche ; `status="1"` et `status=""` le trouvent.
+- Brouillon : projet 318, `PJ2611-0224`, `status=0`, sans avertissement, sans dossier ni tableau.
+- `date_end` en texte `AAAA-MM-JJ` : écrite et relue correctement.
+- Le projet 317 a créé un dossier Nextcloud vide sous `/Interne` (NextBarr, `PROJECT_VALIDATE`),
+  aucun tableau Kanboard. NextBarr ne traite pas `PROJECT_DELETE` : le dossier survivra au
+  projet. Le dossier du projet 316 porte `PROV` dans son nom.
+
+## Lu, non rejoué en réel
+
+- Sans `usage_opportunity`, la carte du projet masque l'opportunité ; le POST minimal le laisse
+  à 0. `opp_percent` n'est pas déduit du statut et sert au montant pondéré du tableau de bord.
+- Sauvegarde de production de mars 2026, cette table et six réglages seulement : dictionnaire
+  identique à celui du cœur. Possiblement modifié depuis, aucune route d'API ne l'expose.
+- `KANBOARDLINK_AUTO_CREATE=1` et sans statut déclencheur configuré : un statut à 100 % crée un
+  tableau Kanboard. **`won` en 1.8.13 le fera, ne pas l'essayer sur un projet de test.**
+- `PROJECT_MODIFY` déplace le dossier NextBarr si son chemin attendu change : le renommage de la
+  référence du 316 devrait renommer son dossier, et `status=2` l'envoyer aux archives.
+
+## Livré
+
+Détail dans `dolibarr_mcp/CHANGELOG.md`, section 1.8.13. `opp_status` traduit (codes, alias,
+identifiants), `opp_percent` et `usage_opportunity=1` envoyés avec lui, valeur inconnue refusée
+avant écriture. `status` de `dolibarr_update_project` écrit par le bon champ, valeurs 0, 1, 2.
+`update_warning` et `enrich_warning` si la réponse du PUT ne confirme pas. Filtre de statut de la
+liste contrôlé. `opp_percent` et `usage_opportunity` en lecture. Diagnostic « renommage cassé »
+retiré de `dolibarr_delete_project`. `enrich_warning` passe par `_format_error`.
+
+Test historique adapté : `test_full_payload_3_steps` figeait `PROSPEC`, valeur inconnue du
+dictionnaire que Dolibarr efface. Aucun test supprimé.
+
+## Contrôles du 03/11/2026
+
+- Tests rouges d'abord : 67 échecs sur `tests/test_dolibarr_project_opportunity.py` avant le code.
+- 1 902 réussis, 4 ignorés, aucune tentative réseau, ruff propre, `git diff --check` propre.
+- 113 outils, aucun schéma d'entrée changé, cinq descriptions changées, deux assistants ajoutés.
+- Banc stdio `dist/banc_opportunite.py` sur 1.8.12 et 1.8.13 : sorties dans `dist/banc-opp-*.json`.
+  Validation refusée et relecture en échec donnent bien leurs avertissements sur les deux.
+- `dist/bascule-dolibarr-1.8.13.sh installer` puis `retour`, sur copie : identique au témoin, et
+  second `installer` refusé. `installer` lancé ensuite sur l'extension réelle, `retour` non.
+- Bundle `dist/dolibarr-erp-inno3-v2-1.8.13.mcpb`, construit depuis `main` `ff60747` : sha256
+  `a159919cd473d6c5d4e78867d2f84f3230f683a0686f24201aecc77969960a3a` ; serveur sha256
+  `2133771bb24d0fc6c0483cdbf111ffe7acf7af50ca3e70b519c55bec63f180fc`, identique à l'installé.
+  Seuls `manifest.json` et `src/server.py` diffèrent. Banc rejoué sur ce bundle, réglages intacts.
+
+## Limites
+
+- La 1.8.13 n'a vu aucun Dolibarr réel : réponse réelle du PUT et lecture de `usage_opportunity`
+  restent à constater.
+- Clôture par `status=2` : ni `PROJECT_CLOSE`, ni date, ni auteur de clôture, faute de route d'API.
+- Des projets écrits par les versions antérieures peuvent porter un statut sans `opp_percent` ni
+  `usage_opportunity`. Non mesuré, la lecture n'existe qu'à partir de la 1.8.13.
+- `dolibarr_list_proposals` porte le même filtre de statut sans contrôle. Non touché, non testé.
+- Événements d'agenda des tests : probables d'après les réglages de mars, non lisibles par le
+  connecteur.
+
+## Suite ordonnée
+
+1. Benjamin : redémarrer le client pour charger la 1.8.13.
+2. Recette sur le 317 : `opp_status="qualification"`, relire `opp_status=2`, `opp_percent=20`,
+   `usage_opportunity=1`, sans `update_warning` ; `status=0` puis `status=1` ; liste avec
+   `status="0,1,2"` refusée.
+3. Benjamin : supprimer les projets 317 et 318 et le dossier Nextcloud du 317, renommer la
+   référence du 316 et vérifier que son dossier suit.
+4. Benjamin : décider le push de ce dépôt public.
+
 # Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné, installé et recetté, ce dépôt public non poussé
 
 Cette section prime sur les suivantes ; la suivante décrit la 1.8.11, dont la recette reste
