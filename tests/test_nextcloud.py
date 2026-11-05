@@ -10,7 +10,7 @@ import json
 import mimetypes
 import os
 import urllib.parse
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -133,6 +133,26 @@ class _FakeClient:
             headers=headers or {},
             request=httpx.Request(method, url),
         )
+
+    @asynccontextmanager
+    async def stream(self, method: str, url: str, **kwargs):
+        """Rejoue la même réponse en flux : `aiter_raw` refuse un corps déjà lu."""
+        self._calls.append({"method": method, "url": url, **kwargs})
+        status, body, headers = self._handler(method, url, kwargs)
+        yield httpx.Response(
+            status_code=status,
+            stream=_BodyStream(body),
+            headers={"content-length": str(len(body)), **(headers or {})},
+            request=httpx.Request(method, url),
+        )
+
+
+class _BodyStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    async def __aiter__(self):
+        yield self._body
 
 
 @contextmanager
@@ -492,41 +512,54 @@ class TestResolveSavePath:
             srv._resolve_save_path(blank)
 
 
-class TestWriteLocalFile:
+class TestPartFile:
+    def _write(self, target: str, payload: bytes, overwrite: bool) -> None:
+        part = srv._PartFile(target)
+        try:
+            part.write(payload)
+            part.commit(overwrite)
+        finally:
+            part.discard()
+
     def test_writes_and_creates_parent(self, tmp_path) -> None:
         target = str(tmp_path / "a" / "b" / "file.bin")
-        srv._write_local_file(target, b"hello", overwrite=False)
+        self._write(target, b"hello", overwrite=False)
         with open(target, "rb") as fh:
             assert fh.read() == b"hello"
+        assert os.listdir(tmp_path / "a" / "b") == ["file.bin"]
 
     def test_does_not_overwrite_by_default(self, tmp_path) -> None:
         target = str(tmp_path / "file.bin")
-        srv._write_local_file(target, b"first", overwrite=False)
+        self._write(target, b"first", overwrite=False)
         with pytest.raises(ValueError, match="existe déjà"):
-            srv._write_local_file(target, b"second", overwrite=False)
+            self._write(target, b"second", overwrite=False)
         with open(target, "rb") as fh:
             assert fh.read() == b"first"
+        assert os.listdir(tmp_path) == ["file.bin"]
 
     def test_overwrite_when_explicit(self, tmp_path) -> None:
         target = str(tmp_path / "file.bin")
-        srv._write_local_file(target, b"first", overwrite=False)
-        srv._write_local_file(target, b"second", overwrite=True)
+        self._write(target, b"first", overwrite=False)
+        self._write(target, b"second", overwrite=True)
         with open(target, "rb") as fh:
             assert fh.read() == b"second"
 
-    def test_size_cap_enforced(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(srv, "_MAX_SAVE_BYTES", 10)
-        with pytest.raises(ValueError, match="plafond"):
-            srv._write_local_file(str(tmp_path / "big.bin"), b"x" * 11, overwrite=False)
-
-    def test_no_partial_file_left_on_refusal(self, tmp_path, monkeypatch) -> None:
+    def test_no_partial_file_left_on_discard(self, tmp_path) -> None:
         """Un .part oublié passerait pour un téléchargement réussi."""
-        monkeypatch.setattr(srv, "_MAX_SAVE_BYTES", 10)
-        target = str(tmp_path / "big.bin")
-        with pytest.raises(ValueError):
-            srv._write_local_file(target, b"x" * 11, overwrite=False)
-        assert not os.path.exists(target)
-        assert not os.path.exists(target + ".part")
+        part = srv._PartFile(str(tmp_path / "big.bin"))
+        part.write(b"x" * 11)
+        part.discard()
+        assert os.listdir(tmp_path) == []
+
+    def test_keeps_the_umask_permissions(self, tmp_path) -> None:
+        """Un temporaire en 0600 rendrait le fichier final illisible aux autres comptes."""
+        previous = os.umask(0o022)
+        try:
+            target = str(tmp_path / "file.bin")
+            self._write(target, b"x", overwrite=False)
+        finally:
+            os.umask(previous)
+        assert os.stat(target).st_mode & 0o777 == 0o644
 
 
 class TestDownloadFile:
@@ -612,11 +645,12 @@ class TestDownloadFile:
         assert out["download_root"] == str(tmp_path)
         assert not os.path.exists(str(tmp_path.parent.parent / ".bashrc"))
 
-    def test_save_path_absolute_refused(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(srv, "_NC_DOWNLOAD_DIR", str(tmp_path))
-        with mock_http(bytes_handler(b"malveillant")):
+    def test_save_path_absolute_outside_roots_refused(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(srv, "_NC_DOWNLOAD_DIR", str(tmp_path / "dl"))
+        with mock_http(bytes_handler(b"malveillant")) as calls:
             out = download(path="/x.txt", save_path=str(tmp_path / "hors" / "cible.txt"))
         assert "error" in out and "relatif" in out["error"]
+        assert calls == []
 
     def test_save_path_does_not_overwrite_by_default(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(srv, "_NC_DOWNLOAD_DIR", str(tmp_path))
@@ -642,8 +676,7 @@ class TestDownloadFile:
         with mock_http(bytes_handler(b"x" * 11)):
             out = download(path="/x.bin", save_path="gros.bin")
         assert "error" in out
-        assert not os.path.exists(tmp_path / "gros.bin")
-        assert not os.path.exists(str(tmp_path / "gros.bin") + ".part")
+        assert os.listdir(tmp_path) == []
 
 
 class TestSearch:

@@ -5,7 +5,7 @@ MCP server for [Nextcloud](https://nextcloud.com/) via WebDAV (files) and the OC
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
-**Version courante : 1.4.1.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.5.0.** Voir le [CHANGELOG](CHANGELOG.md).
 
 ## Environment variables
 
@@ -14,7 +14,8 @@ environment variables — no host, login or secret is baked into the code.
 | `NEXTCLOUD_URL` | yes | Base URL of the Nextcloud instance, e.g. `https://cloud.example.com`. |
 | `NEXTCLOUD_USER` | yes | Nextcloud user login. |
 | `NEXTCLOUD_APP_PASSWORD` | yes | An *app password* for that user (Settings → Security → Devices & sessions). |
-| `NEXTCLOUD_DOWNLOAD_DIR` | no | Only directory `nextcloud_download_file` may write to (`save_path` is always relative to it). Default `~/Downloads`. |
+| `NEXTCLOUD_DOWNLOAD_DIR` | no | Base of relative `save_path` values, and first directory `nextcloud_download_file` may write to. Default `~/Downloads`. |
+| `NEXTCLOUD_SAVE_DIRS` | no | Other directories `nextcloud_download_file` may write to, separated like `PATH` (`:` on Linux and macOS, `;` on Windows). Do not list a whole home directory. Default: none. |
 | `NEXTCLOUD_MAX_SAVE_BYTES` | no | Per-file cap for local writes. Default `26214400` (25 MB). |
 | `NEXTCLOUD_UPLOAD_DIR` | no | Only directory `nextcloud_upload_file` may read from (`local_path` is always relative to it). Default: same as `NEXTCLOUD_DOWNLOAD_DIR`. |
 | `NEXTCLOUD_MAX_UPLOAD_BYTES` | no | Per-file cap for uploads, whatever the source. Default `26214400` (25 MB). |
@@ -23,7 +24,7 @@ environment variables — no host, login or secret is baked into the code.
 
 - `nextcloud_list_files` — Liste les fichiers et dossiers d'un chemin Nextcloud (PROPFIND)
 - `nextcloud_get_file_info` — Retourne les métadonnées d'un fichier ou dossier (PROPFIND depth=0)
-- `nextcloud_download_file` — Télécharge un fichier : contenu texte dans le contexte (≤100 KB), ou `save_path` vers le dossier de téléchargement local (binaires et gros fichiers) ; lecture par plage `offset`/`length`
+- `nextcloud_download_file` — Télécharge un fichier : contenu texte dans le contexte (≤100 KB), ou `save_path` vers un dossier autorisé (binaires et gros fichiers) ; lecture par plage `offset`/`length`, en flux avec reprise après coupure, taille finale contrôlée
 - `nextcloud_upload_file` — Crée ou remplace un fichier : `content` (texte UTF-8), `content_base64` (binaire : PDF, ODT, XLSX, DOCX…) ou `local_path` (fichier local sous `NEXTCLOUD_UPLOAD_DIR`) ; plafond 25 Mo, `overwrite` explicite, `sha256` déclaré contrôlé avant dépôt, dépôt relu par PROPFIND
 - `nextcloud_create_folder` — Crée un dossier dans Nextcloud (MKCOL)
 - `nextcloud_delete` — Supprime un fichier ou un dossier dans Nextcloud (DELETE)
@@ -88,6 +89,32 @@ to check against, so `inconnu` means exactly that — re-read the resource with
 ## License
 
 [Apache-2.0](../LICENSE) — © 2026 inno³ and contributors.
+
+## Téléchargement complet ou erreur explicite depuis 1.5.0
+
+Le corps est lu en flux et écrit dans un temporaire voisin de la cible, renommé
+une fois le contenu vérifié. Après une coupure (`RemoteProtocolError`, `ReadError`,
+corps plus court qu'annoncé), la lecture reprend par une plage à l'octet atteint,
+sans attendre tant que les requêtes apportent des octets. Si plus rien n'avance,
+un GET sans `Range` est tenté, en sautant ce qui est déjà reçu.
+
+Un fichier lu en entier, sans `offset` ni `length`, est comparé au `Content-Length`,
+au total du `Content-Range` et au `getcontentlength` WebDAV. La réponse les rend
+dans `size_checks`, avec `size_verified`, `resumes` et `range_fallback` s'il y a
+lieu. Une différence rend `incomplete: true`, `bytes_received`, `expected_size` et
+`last_error` : rien n'est écrit et un fichier existant reste intact.
+
+`save_path` relatif part de `NEXTCLOUD_DOWNLOAD_DIR`. Absolu ou en `~`, il doit tomber
+sous ce dossier ou sous un dossier de `NEXTCLOUD_SAVE_DIRS`. Les refus rendent
+`allowed_roots`. `..` et les liens sortants restent refusés, avant toute requête.
+Un dossier, existant ou désigné par un `/` final, reprend le nom du fichier distant.
+`local_path` n'est pas concerné : pouvoir écrire dans un dossier ne donne pas le
+droit d'en envoyer le contenu.
+
+Limites : la comparaison porte sur la taille et l'ETag, pas sur le contenu. Un
+PROPFIND indisponible est signalé par `warning` sans invalider un corps conforme à
+ses en-têtes. La reprise ne survit pas à l'appel d'outil. Un fichier illisible côté
+serveur ne devient pas lisible : l'outil rend alors l'erreur et l'octet d'arrêt.
 
 ## Diagnostic des chemins locaux depuis 1.4.1
 

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "nextcloud-mcp",
   "display_name": "Nextcloud",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Connecteur Nextcloud : fichiers (WebDAV), partages (OCS), recherche, statut utilisateur.",
   "author": {
     "name": "inno³",
@@ -22,6 +22,7 @@
         "NEXTCLOUD_USER": "${user_config.nextcloud_user}",
         "NEXTCLOUD_APP_PASSWORD": "${user_config.nextcloud_app_password}",
         "NEXTCLOUD_DOWNLOAD_DIR": "${user_config.nextcloud_download_dir}",
+        "NEXTCLOUD_SAVE_DIRS": "${user_config.nextcloud_save_dirs}",
         "NEXTCLOUD_MAX_SAVE_BYTES": "${user_config.nextcloud_max_save_bytes}",
         "NEXTCLOUD_UPLOAD_DIR": "${user_config.nextcloud_upload_dir}",
         "NEXTCLOUD_MAX_UPLOAD_BYTES": "${user_config.nextcloud_max_upload_bytes}"
@@ -53,14 +54,21 @@
     "nextcloud_download_dir": {
       "type": "string",
       "title": "Dossier de téléchargement local",
-      "description": "Racine imposée pour toute écriture sur disque de nextcloud_download_file. Tout chemin demandé est traité comme RELATIF à cette racine : c'est ce qui empêche d'écraser un fichier arbitraire accessible au serveur. Défaut : ~/Downloads.",
+      "description": "Racine des chemins relatifs de nextcloud_download_file, et premier dossier où il peut écrire. Défaut : ~/Downloads.",
+      "required": false,
+      "sensitive": false
+    },
+    "nextcloud_save_dirs": {
+      "type": "string",
+      "title": "Autres dossiers d'écriture autorisés",
+      "description": "Dossiers supplémentaires où nextcloud_download_file peut écrire (save_path absolu ou en ~), séparés par « : » sous Linux et macOS, « ; » sous Windows. Tout autre emplacement est refusé, pour empêcher d'écraser un fichier arbitraire accessible au serveur : ne pas y mettre le dossier personnel entier. Vide = le seul dossier de téléchargement.",
       "required": false,
       "sensitive": false
     },
     "nextcloud_max_save_bytes": {
       "type": "string",
       "title": "Taille maximale d'un fichier écrit sur disque (octets)",
-      "description": "Plafond par fichier enregistré localement. Le corps de la réponse étant bufferisé, ce plafond borne aussi la mémoire utilisée. Défaut : 26214400 (25 Mo).",
+      "description": "Plafond par fichier enregistré localement. Défaut : 26214400 (25 Mo).",
       "required": false,
       "sensitive": false
     },
@@ -91,7 +99,7 @@
     },
     {
       "name": "nextcloud_download_file",
-      "description": "Télécharge le contenu d'un fichier texte (≤100 KB)"
+      "description": "Télécharge un fichier : texte dans le contexte (≤100 KB) ou save_path vers un dossier autorisé ; lecture en flux, reprise après coupure, taille finale contrôlée, erreur explicite si le fichier est incomplet"
     },
     {
       "name": "nextcloud_upload_file",

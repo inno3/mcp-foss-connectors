@@ -5,9 +5,87 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 05/11/2026 : Nextcloud 1.5.0, téléchargement entier ou erreur explicite, non commitée
+
+Cette section prime sur les suivantes pour Nextcloud. Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
+`lot/2026-11-05-nextcloud-download`, base `main` `2b67497`. **Rien n'est commité, fusionné,
+construit, installé ni poussé.** La carte Kanboard du projet 262 porte le chemin exact du fichier
+concerné, absent d'ici parce que ce dépôt est public.
+
+## Objectif
+
+`nextcloud_download_file` : lecture en flux, reprise par `Range` après une `RemoteProtocolError`,
+taille finale comparée au `Content-Length` et au `getcontentlength`, erreur explicite si le fichier
+est incomplet, `save_path` ouvert aux dossiers autorisés. Critère : un PDF de 512 Ko arrive entier.
+
+## Constaté en réel le 05/11/2026, en 1.4.1 installée, en lecture seule
+
+- Le PDF de 512 219 octets d'un dossier interne échoue à chaque essai : `206`, puis
+  `RemoteProtocolError (received 32768 bytes, expected 512219)`. Même message dans le journal du
+  connecteur les 02, 04 et 05/11.
+- Plages sur cette copie : `0-32767` rendue ; `32767-32768` rend 1 octet sur 2 ; départ à 32768,
+  40960, 131072 et 508123 : 0 octet, à chaque requête.
+- Deux autres copies du même PDF, ailleurs sur le serveur, même taille : téléchargées entières.
+  Un autre PDF de 856 255 octets aussi, plage à 32768 comprise.
+
+**Conséquence : sur cette copie, la reprise par `Range` ne peut pas aboutir.** Hypothèse, non
+vérifiée : défaut de stockage de cette copie côté serveur. Un GET sans `Range` n'a pas pu être
+essayé : la 1.4.1 envoie toujours `Range`, et l'essai direct demanderait le mot de passe
+d'application, volontairement non lu.
+
+## Décisions prises en cours de lot, à revoir si Benjamin les conteste
+
+- **Repli sans `Range`, ajouté à la demande initiale** : c'est la seule voie qui reste pour la copie
+  ci-dessus. Tenté après trois requêtes sans progrès, seulement si le serveur a déjà répondu, et si
+  les octets à sauter restent sous `NEXTCLOUD_MAX_SAVE_BYTES`.
+- `save_path` existait déjà : il est élargi, le schéma d'entrée ne change pas.
+- Dossiers autorisés : nouveau réglage explicite `NEXTCLOUD_SAVE_DIRS`, vide par défaut. Le dossier
+  d'envoi n'y entre pas d'office : pouvoir lire un dossier ne donne pas le droit d'y écrire.
+- Plafond de 25 Mo conservé. Il ne borne plus la mémoire, seulement le disque.
+- Une requête qui apporte des octets n'attend pas et ne compte pas comme un échec. Borne : 64 reprises.
+- `_write_local_file` remplacée par `_PartFile`. Ses tests sont portés. Le test qui figeait le refus
+  de tout chemin absolu vise désormais un chemin hors racines, puisque la demande change ce point.
+
+## Contrôles du 05/11/2026
+
+- Tests rouges d'abord : 27 échecs, 9 réussis sur `tests/test_nextcloud_download_stream.py` avant le
+  code. Ce fichier passe par un vrai socket local : c'est h11 qui lève l'exception.
+- Final : 1 944 réussis, 4 ignorés, ruff propre, `git diff --check` propre.
+- Banc stdio `../dist/banc_telechargement.py`, sous le python système avec le `src/lib` installé,
+  contre un faux Nextcloud local, sans réglage lu. Sorties : `../dist/banc-*.json`.
+
+| Scénario | 1.4.1 installée | 1.5.0 |
+|---|---|---|
+| Coupure unique à 32768 | entier, 2 GET | entier, 2 GET, `resumes=1` |
+| Coupure tous les 32 Ko | erreur réseau, 3 GET | entier, 16 GET, 0,25 s |
+| Plage cassée, GET simple correct | erreur réseau, 3 GET | entier, 5 GET, 3,1 s, `range_fallback` |
+| Défaut réel, coupure à 32768 partout | erreur réseau, 3 GET | `incomplete`, 7 GET, 6,1 s, aucun fichier |
+| Absolu sous `NEXTCLOUD_SAVE_DIRS` | refusé | écrit, identique |
+| Absolu hors racines | refusé | refusé sans requête, `allowed_roots` |
+
+## Non vérifié et limites
+
+- **La 1.5.0 n'a jamais parlé au vrai Nextcloud.** Elle ne s'y chargera qu'après installation et
+  redémarrage du client. Selon la réponse du serveur sans `Range`, la copie défaillante donnera soit
+  le PDF entier, soit l'erreur explicite : les deux issues sont couvertes, seul le réel tranchera.
+- La comparaison porte sur la taille et l'ETag, pas sur le contenu.
+- 64 reprises à 32 Ko couvrent environ 2 Mo. Le délai d'un appel d'outil côté client n'a pas été mesuré.
+- `mcp-inno3/nextcloud_mcp` (1.3.0) reste une ancienne lignée, non modifiée.
+
+## Prochaines actions
+
+1. Benjamin : accord pour commit, fusion dans `main` et installation. Dépôt public : ne pas pousser
+   sans demande.
+2. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
+3. Bundle : repartir de l'installé, en ajoutant au manifeste la clef `nextcloud_save_dirs`.
+4. Après redémarrage : recette sur la copie défaillante et sur une copie saine, empreintes comparées
+   à la copie synchronisée.
+5. Si l'erreur persiste : faire examiner cette copie côté serveur, ou la remplacer par une copie saine.
+
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
 
-Cette section prime sur les suivantes, hormis les chemins ci-dessus. `main` contient le correctif
+Cette section prime sur les suivantes pour Dolibarr, hormis les chemins ci-dessus. `main` contient le correctif
 (`ff60747`). Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`,
 branche `lot/2026-11-02-dolibarr-projet-prov`. Suivi : KB 262 #8060. Vérifications, correction, commit,
 fusion et installation demandés par Benjamin le 03/11/2026.

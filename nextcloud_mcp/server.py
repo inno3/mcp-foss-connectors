@@ -18,10 +18,13 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -52,18 +55,40 @@ _MAX_FILE_SIZE = 100 * 1024  # 100 KB pour le téléchargement de fichiers texte
 _DEFAULT_LIST_LIMIT = 100
 _MAX_LIST_LIMIT = 1000
 
-# Racine autorisée pour toute écriture locale (nextcloud_download_file
-# save_path). Le chemin demandé est TOUJOURS traité comme relatif à cette
-# racine : sans ce garde-fou, le serveur écrase n'importe quel fichier
-# accessible à son utilisateur (~/.ssh/authorized_keys, un .env…) sur simple
-# instruction d'un modèle.
+# Racine des chemins relatifs de nextcloud_download_file save_path, et première
+# racine autorisée pour une écriture locale. Sans ce garde-fou, le serveur écrase
+# n'importe quel fichier accessible à son utilisateur (~/.ssh/authorized_keys, un
+# .env…) sur simple instruction d'un modèle.
 _NC_DOWNLOAD_DIR = os.environ.get("NEXTCLOUD_DOWNLOAD_DIR") or os.path.join(
     os.path.expanduser("~"), "Downloads"
 )
+
+
+def _parse_dir_list(raw: str) -> list[str]:
+    """Découpe une liste de dossiers à la manière de PATH, absolus ou en `~` seulement.
+
+    Un dossier relatif se jugerait depuis le répertoire courant du processus, que
+    personne ne choisit. C'est aussi ce que deviendrait un `${user_config.x}` qu'un
+    client laisserait tel quel.
+    """
+    items = [item.strip() for item in (raw or "").split(os.pathsep) if item.strip()]
+    kept = [item for item in items if os.path.isabs(item) or item.startswith("~")]
+    for ignored in set(items) - set(kept):
+        logger.warning("NEXTCLOUD_SAVE_DIRS : dossier relatif ignoré : %s", ignored)
+    return kept
+
+
+# Autres dossiers où save_path peut écrire, à la manière de PATH. L'autorisation
+# reste explicite et distincte de NEXTCLOUD_UPLOAD_DIR : pouvoir lire un dossier
+# pour l'envoyer ne donne pas le droit d'y écrire.
+_NC_SAVE_DIRS = _parse_dir_list(os.environ.get("NEXTCLOUD_SAVE_DIRS", ""))
 # Plafond par fichier écrit sur disque, distinct de _MAX_FILE_SIZE qui ne borne
-# que ce qui remonte dans le contexte. Le corps de la réponse étant bufferisé,
-# ce plafond borne aussi la RAM : d'où une valeur volontairement modeste.
+# que ce qui remonte dans le contexte.
 _MAX_SAVE_BYTES = int(os.environ.get("NEXTCLOUD_MAX_SAVE_BYTES") or 25 * 1024 * 1024)
+# Une requête qui apporte des octets n'est pas un échec. Cette borne n'arrête donc
+# qu'un serveur qui en rendrait quelques-uns à chaque fois, au-delà de ce qu'un
+# appel d'outil peut attendre.
+_MAX_DOWNLOAD_RESUMES = 64
 
 # Racine autorisée pour toute LECTURE locale (nextcloud_upload_file local_path).
 # Même garde-fou que pour l'écriture, dans l'autre sens : sans lui, un chemin
@@ -614,9 +639,9 @@ def _resolve_local_path(raw_path: str, root_dir: str, param: str, env_var: str) 
 
     Le chemin fourni est toujours traité comme relatif à `root_dir` : un chemin
     absolu ou remontant (`..`, symlink sortant) est refusé. Sans ce garde-fou,
-    un simple chemin dicté par un modèle écrase (save_path) ou exfiltre
-    (local_path) n'importe quel fichier accessible au processus, à partir d'un
-    nom qui n'est pas forcément de confiance.
+    un simple chemin dicté par un modèle exfiltre (local_path) n'importe quel
+    fichier accessible au processus, à partir d'un nom qui n'est pas forcément
+    de confiance.
     """
     raw = (raw_path or "").strip()
     if not raw:
@@ -638,11 +663,59 @@ def _resolve_local_path(raw_path: str, root_dir: str, param: str, env_var: str) 
     return target
 
 
-def _resolve_save_path(save_path: str) -> str:
-    """Résout un chemin d'écriture locale (téléchargement)."""
-    return _resolve_local_path(
-        save_path, _NC_DOWNLOAD_DIR, "save_path", "NEXTCLOUD_DOWNLOAD_DIR"
+def _save_roots() -> list[str]:
+    """Racines où save_path peut écrire, résolues, celle des chemins relatifs d'abord."""
+    roots: list[str] = []
+    for raw in (_NC_DOWNLOAD_DIR, *_NC_SAVE_DIRS):
+        root = os.path.realpath(os.path.expanduser(raw))
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _is_within(target: str, root: str) -> bool:
+    """Compare par segments : /srv/dl-voisin n'est pas sous /srv/dl."""
+    return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _resolve_save_path(save_path: str, remote_path: str = "") -> str:
+    """Résout un chemin d'écriture locale sous une racine autorisée, ou lève ValueError.
+
+    Relatif, il part de la racine de téléchargement. Absolu ou en `~`, il doit
+    tomber sous l'une des racines. `realpath` des deux côtés couvre un symlink
+    déjà en place : c'est le chemin réel qui est jugé, et non celui écrit. Un
+    dossier, existant ou désigné par un `/` final, reprend le nom du fichier
+    distant.
+    """
+    raw = (save_path or "").strip()
+    if not raw:
+        raise ValueError("save_path vide")
+    if any(part == ".." for part in re.split(r"[\\/]+", raw)):
+        raise ValueError("save_path ne peut pas contenir '..'")
+
+    roots = _save_roots()
+    relative = not raw.startswith("~") and not os.path.isabs(raw)
+    expanded = os.path.expanduser(raw)
+    target = os.path.realpath(os.path.join(roots[0], raw) if relative else expanded)
+    outside_message = (
+        "save_path sort de la racine autorisée" if relative
+        else f"save_path doit être relatif à {roots[0]} ou absolu sous une racine autorisée "
+             f"({', '.join(roots)}) ; autres dossiers à déclarer dans NEXTCLOUD_SAVE_DIRS"
     )
+    # `~inconnu/x` reste relatif après expansion : il serait jugé depuis le répertoire courant.
+    if (not relative and not os.path.isabs(expanded)) or not any(
+        _is_within(target, root) for root in roots
+    ):
+        raise ValueError(outside_message)
+
+    if raw.endswith(("/", os.sep)) or target in roots or os.path.isdir(target):
+        name = posixpath.basename(remote_path.rstrip("/"))
+        if name in ("", ".", ".."):
+            raise ValueError("save_path désigne un dossier et le chemin distant ne donne aucun nom")
+        target = os.path.realpath(os.path.join(target, name))
+        if not any(_is_within(target, root) for root in roots):
+            raise ValueError(outside_message)
+    return target
 
 
 def _resolve_upload_path(local_path: str) -> str:
@@ -652,24 +725,46 @@ def _resolve_upload_path(local_path: str) -> str:
     )
 
 
-def _write_local_file(target: str, payload: bytes, overwrite: bool) -> None:
-    """Écrit le fichier de façon atomique, sans écraser par défaut."""
-    if len(payload) > _MAX_SAVE_BYTES:
-        raise ValueError(
-            f"contenu de {len(payload)} octets — au-delà du plafond "
-            f"{_MAX_SAVE_BYTES} (NEXTCLOUD_MAX_SAVE_BYTES)"
-        )
+def _check_save_target(target: str, overwrite: bool) -> None:
+    """Refuse une cible inutilisable, avant le téléchargement puis avant le renommage."""
+    if os.path.isdir(target):
+        raise ValueError(f"{target} est un dossier")
     if os.path.exists(target) and not overwrite:
         raise ValueError(f"{target} existe déjà (passer overwrite=True pour remplacer)")
-    parent = os.path.dirname(target)
-    if parent:
+
+
+class _PartFile:
+    """Temporaire voisin de la cible, renommé une fois le contenu vérifié.
+
+    Une interruption ne laisse jamais un fichier tronqué qui passerait pour un
+    téléchargement réussi, et un fichier existant reste intact tant que son
+    remplaçant n'est pas complet. Le nom est court, pour tenir à côté d'un nom
+    de fichier déjà long, et O_EXCL refuse un lien déjà en place : la cible est
+    confinée aux racines, son voisin ne le serait pas sans cela.
+    """
+
+    def __init__(self, target: str) -> None:
+        self.target = target
+        parent = os.path.dirname(target)
         os.makedirs(parent, exist_ok=True)
-    # Fichier temporaire puis rename : une interruption ne laisse jamais un
-    # fichier tronqué qui passerait pour un téléchargement réussi.
-    tmp = target + ".part"
-    with open(tmp, "wb") as fh:
-        fh.write(payload)
-    os.replace(tmp, target)
+        self.tmp = os.path.join(parent, f".nextcloud-{os.urandom(6).hex()}.part")
+        descriptor = os.open(self.tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        self._fh = os.fdopen(descriptor, "wb")
+
+    def write(self, data: bytes) -> None:
+        self._fh.write(data)
+
+    def commit(self, overwrite: bool) -> None:
+        self._fh.close()
+        _check_save_target(self.target, overwrite)
+        os.replace(self.tmp, self.target)
+
+    def discard(self) -> None:
+        self._fh.close()
+        try:
+            os.unlink(self.tmp)
+        except FileNotFoundError:
+            pass
 
 
 def _read_local_file(target: str) -> bytes:
@@ -804,6 +899,276 @@ def _parse_content_range_total(value: str) -> int | None:
     """
     match = re.search(r"/(\d+)\s*$", value or "")
     return int(match.group(1)) if match else None
+
+
+def _parse_content_range_start(value: str) -> int | None:
+    """Extrait le premier octet d'un en-tête `Content-Range: bytes 100-199/12345`."""
+    match = re.match(r"\s*bytes\s+(\d+)-", value or "")
+    return int(match.group(1)) if match else None
+
+
+class NextcloudIncompleteDownload(RuntimeError):
+    """Fichier qu'on ne peut pas rendre entier, avec les tailles constatées."""
+
+    def __init__(self, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+@dataclass
+class _Transfer:
+    """Ce que le flux a constaté, pour le contrôle final et la réponse de l'outil."""
+
+    received: int = 0
+    content_length: int | None = None
+    content_range_total: int | None = None
+    total: int | None = None
+    etag: str = ""
+    content_type: str = ""
+    resumes: int = 0
+    range_fallback: bool = False
+    too_large: bool = False
+    opened: bool = False
+
+    def expected(self, offset: int, limit: int) -> int | None:
+        """Octets attendus pour cette lecture, s'ils sont connus."""
+        return None if self.total is None else min(limit, max(self.total - offset, 0))
+
+    def incomplete(self, path: str, offset: int, limit: int, cause: str,
+                   **details: Any) -> NextcloudIncompleteDownload:
+        expected = self.expected(offset, limit)
+        announced = "" if expected is None else f" sur {expected} attendus"
+        return NextcloudIncompleteDownload(
+            f"Fichier incomplet : {self.received} octets reçus{announced} pour {path}. {cause}",
+            bytes_received=self.received,
+            expected_size=expected,
+            resumes=self.resumes,
+            **details,
+        )
+
+
+def _declared_length(resp: httpx.Response) -> int | None:
+    """Content-Length de cette réponse, s'il est exploitable."""
+    value = resp.headers.get("content-length", "")
+    return int(value) if value.isdigit() else None
+
+
+def _open_segment(resp: httpx.Response, tr: _Transfer, path: str,
+                  offset: int, limit: int, max_size: int | None) -> int:
+    """Contrôle une réponse avant d'en écrire le corps, rend les octets à sauter."""
+    start = offset + tr.received
+    encoding = resp.headers.get("content-encoding", "identity").lower()
+    if encoding != "identity":
+        # Les plages et les tailles portent sur le fichier, pas sur sa forme compressée.
+        raise tr.incomplete(path, offset, limit,
+                            f"Le serveur a compressé la réponse ({encoding}) malgré "
+                            "Accept-Encoding: identity : tailles non comparables.")
+    content_length = _declared_length(resp)
+    range_header = resp.headers.get("content-range", "")
+    etag = resp.headers.get("etag", "").removeprefix("W/")
+
+    if resp.status_code == 206:
+        skip, total = 0, _parse_content_range_total(range_header)
+        range_start = _parse_content_range_start(range_header)
+        if range_start is not None and range_start != start:
+            raise tr.incomplete(path, offset, limit,
+                                f"Plage rendue à l'octet {range_start} pour une demande à "
+                                f"l'octet {start} : assemblage refusé.")
+        if tr.content_range_total is None:
+            tr.content_range_total = total
+    else:
+        # Range ignoré ou repli sans Range : le corps repart du début du fichier.
+        skip, total = start, content_length
+        if skip > _MAX_SAVE_BYTES:
+            raise tr.incomplete(path, offset, limit,
+                                f"Le serveur ignore Range : atteindre l'octet {skip} "
+                                "imposerait de relire tout ce qui précède.")
+
+    if (tr.etag and etag and etag != tr.etag) or (
+        tr.total is not None and total is not None and total != tr.total
+    ):
+        raise tr.incomplete(path, offset, limit,
+                            "Le fichier a été modifié pendant le téléchargement : rejouer l'appel.")
+    if not tr.opened:
+        # Seule la première réponse part de `offset` : c'est elle qui annonce la lecture.
+        tr.opened = True
+        tr.content_type = resp.headers.get("content-type", "")
+        tr.content_length = content_length
+    tr.etag = tr.etag or etag
+    tr.total = tr.total if total is None else total
+    tr.too_large = max_size is not None and total is not None and total - offset > max_size
+    return skip
+
+
+async def _stream_file(path: str, offset: int, limit: int, write: Callable[[bytes], Any],
+                       max_size: int | None = None) -> _Transfer:
+    """Écrit dans `write` au plus `limit` octets du fichier, à partir de `offset`.
+
+    Après une coupure, la lecture reprend par une plage à l'octet atteint, sans
+    attendre tant que les requêtes apportent des octets : c'est le seul cas où
+    insister a un sens. Si plus rien n'avance, un GET sans Range est tenté avant
+    d'abandonner, certains stockages ne cassant que la lecture par plage.
+
+    `aiter_raw` sans taille de bloc rend les octets dès leur réception. Avec une
+    taille, le découpeur de httpx garde en tampon ce qui n'atteint pas un bloc, et
+    l'exception de fin de flux emporte justement ces octets-là.
+    """
+    url = _webdav_url(path)
+    label = _request_label("GET", url)
+    tr = _Transfer()
+    use_range = True
+    saw_body = False
+    failures = 0
+    while True:
+        before = tr.received
+        start = offset + before
+        headers = {"Accept-Encoding": "identity"}
+        if use_range:
+            headers["Range"] = f"bytes={start}-{offset + limit - 1}"
+        transport_exc: httpx.TransportError | None = None
+        status_exc: httpx.HTTPStatusError | None = None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                logger.info("GET %s à l'octet %d (reprise %d)", url, start, tr.resumes)
+                async with client.stream("GET", url, headers=headers, auth=_auth()) as resp:
+                    if not resp.is_success:
+                        await resp.aread()
+                        resp.raise_for_status()
+                    skip = _open_segment(resp, tr, path, offset, limit, max_size)
+                    if tr.too_large:
+                        return tr
+                    saw_body = True
+                    segment = 0
+                    async for chunk in resp.aiter_raw():
+                        segment += len(chunk)
+                        dropped = min(skip, len(chunk))
+                        skip -= dropped
+                        chunk = chunk[dropped:limit - tr.received + dropped]
+                        if chunk:
+                            write(chunk)
+                            tr.received += len(chunk)
+                        if tr.received >= limit:
+                            return tr
+                    # Un corps délimité par la fermeture de la connexion finit sans
+                    # exception : seule la comparaison au total révèle la coupure.
+                    if tr.total is not None:
+                        if offset + tr.received >= tr.total:
+                            return tr
+                    else:
+                        declared = _declared_length(resp)
+                        if declared is None or segment >= declared:
+                            return tr
+            last_error = "corps de réponse plus court qu'annoncé"
+        except httpx.TransportError as exc:
+            transport_exc = exc
+            kind = type(exc).__name__
+            detail = str(exc).strip() or _TRANSPORT_DEFAULT_DETAIL.get(kind, "échec du transport")
+            last_error = f"{kind} : {detail}"
+        except httpx.HTTPStatusError as exc:
+            exc.nc_label = label
+            exc.nc_mutating = False
+            status = exc.response.status_code
+            last_error = f"HTTP {status}"
+            if status < 500:
+                if tr.received:
+                    raise tr.incomplete(path, offset, limit, f"Reprise refusée ({last_error}).",
+                                        last_error=last_error) from exc
+                raise
+            status_exc = exc
+
+        if tr.received > before:
+            failures = 0
+        else:
+            failures += 1
+            if failures > _MAX_RETRIES:
+                if use_range and saw_body and start <= _MAX_SAVE_BYTES:
+                    logger.warning("Plage sans progrès à l'octet %d de %s : GET sans Range",
+                                   start, url)
+                    use_range = False
+                    tr.range_fallback = True
+                    failures = 0
+                    tr.resumes += 1
+                    continue
+                if not saw_body:
+                    if status_exc is not None:
+                        raise status_exc
+                    raise NextcloudTransportError(
+                        type(transport_exc).__name__, label, failures, True, str(transport_exc),
+                    ) from transport_exc
+                modes = "avec et sans Range" if tr.range_fallback else "par plage"
+                raise tr.incomplete(
+                    path, offset, limit,
+                    f"La lecture s'arrête à l'octet {start} à chaque requête, {modes} : "
+                    "défaut probable du fichier côté serveur plutôt qu'incident réseau. "
+                    f"Dernière erreur : {last_error}.",
+                    last_error=last_error,
+                )
+        tr.resumes += 1
+        if tr.resumes > _MAX_DOWNLOAD_RESUMES:
+            raise tr.incomplete(path, offset, limit,
+                                f"Abandon après {_MAX_DOWNLOAD_RESUMES} reprises. "
+                                f"Dernière erreur : {last_error}.",
+                                last_error=last_error)
+        logger.warning("Reprise de %s à l'octet %d (%s)", url, offset + tr.received, last_error)
+        if failures:
+            await asyncio.sleep(_RETRY_DELAY * (2 ** (failures - 1)))
+
+
+async def _webdav_size(path: str) -> tuple[int | None, bool]:
+    """Rend le getcontentlength (None s'il est absent) et si la ressource est un dossier.
+
+    `_parse_propfind` rend 0 pour une taille absente : valeur correcte pour une
+    liste, mais qui ferait passer ici tout fichier pour tronqué.
+    """
+    xml_text = await _webdav(
+        "PROPFIND",
+        path,
+        extra_headers={"Depth": "0", "Content-Type": "application/xml"},
+        content=_PROPFIND_BODY,
+    )
+    root = ET.fromstring(xml_text)
+    size_el = root.find(f".//{_D}getcontentlength")
+    text = (size_el.text or "").strip() if size_el is not None else ""
+    return (int(text) if text.isdigit() else None, root.find(f".//{_D}collection") is not None)
+
+
+async def _verify_whole_file(path: str, tr: _Transfer) -> tuple[dict, str]:
+    """Compare un fichier reçu en entier à chaque taille annoncée.
+
+    Rend les tailles contrôlées et un éventuel avertissement. Un PROPFIND
+    indisponible n'invalide pas un corps déjà conforme à ses en-têtes : il est
+    signalé, pas transformé en échec.
+    """
+    checks: dict[str, int] = {}
+    if tr.content_length is not None:
+        checks["content_length"] = tr.content_length
+    if tr.content_range_total is not None:
+        checks["content_range_total"] = tr.content_range_total
+    warning = ""
+    try:
+        webdav_size, is_directory = await _webdav_size(path)
+    except (httpx.HTTPError, NextcloudTransportError, ET.ParseError, TypeError, ValueError) as exc:
+        webdav_size, is_directory = None, False
+        warning = f"PROPFIND inexploitable ({type(exc).__name__}) : getcontentlength non contrôlé."
+    if is_directory:
+        raise ValueError(f"{path} est un dossier, pas un fichier.")
+    if webdav_size is not None:
+        checks["webdav_getcontentlength"] = webdav_size
+    if not checks:
+        warning = _append_sentence(warning, " Aucune taille annoncée : complétude non vérifiable.")
+    mismatched = {name: value for name, value in checks.items() if value != tr.received}
+    if mismatched:
+        expected = max(mismatched.values())
+        announced = ", ".join(f"{name}={value}" for name, value in mismatched.items())
+        kind = "incomplet" if tr.received < expected else "de taille incohérente"
+        raise NextcloudIncompleteDownload(
+            f"Fichier {kind} : {tr.received} octets reçus pour {path}, annoncé {announced}.",
+            bytes_received=tr.received,
+            expected_size=expected,
+            resumes=tr.resumes,
+            size_checks=checks,
+        )
+    return checks, warning
 
 
 # ---------------------------------------------------------------------------
@@ -951,21 +1316,40 @@ async def nextcloud_download_file(
     Params :
       path      (str) — chemin absolu du fichier (ex: /Notes/todo.txt).
       save_path (str) — si fourni, écrit le fichier sur le disque au lieu de
-                        renvoyer son contenu. Chemin obligatoirement RELATIF à
-                        la racine de téléchargement (NEXTCLOUD_DOWNLOAD_DIR,
-                        défaut ~/Downloads) : absolu, `..` et symlink sortant
-                        sont refusés. Seule voie pour un binaire ou un gros
-                        fichier (plafond 25 Mo, NEXTCLOUD_MAX_SAVE_BYTES).
+                        renvoyer son contenu. Relatif : part de la racine de
+                        téléchargement (NEXTCLOUD_DOWNLOAD_DIR, défaut
+                        ~/Downloads). Absolu ou en `~` : accepté sous cette
+                        racine et sous les dossiers de NEXTCLOUD_SAVE_DIRS, refusé
+                        ailleurs avec `allowed_roots`. `..` et symlink sortant
+                        sont toujours refusés. Un dossier (existant ou `/` final)
+                        reprend le nom du fichier distant. Seule voie pour un
+                        binaire ou un gros fichier (plafond 25 Mo,
+                        NEXTCLOUD_MAX_SAVE_BYTES).
       overwrite (bool) — autorise le remplacement d'un fichier existant
                         (défaut : False, l'écriture échoue).
       offset    (int) — position de départ en octets (lecture par plage).
       length    (int) — nombre d'octets à lire ; 0 = jusqu'au plafond.
 
     Sans save_path, le contenu doit être du texte UTF-8 et tenir dans 100 KB.
-    La lecture est toujours bornée côté serveur via un en-tête Range, donc un
-    fichier de plusieurs Go n'est jamais rapatrié en entier. `total_size`
+    La lecture est toujours bornée, par un en-tête Range puis par l'arrêt du flux
+    au plafond, donc un fichier de plusieurs Go n'est jamais rapatrié en entier. `total_size`
     renseigne la taille réelle du fichier quand le serveur l'expose, ce qui
     permet d'enchaîner les plages.
+
+    Le corps est lu en flux. Après une coupure, la lecture reprend à l'octet
+    atteint (`resumes`) ; si plus rien n'avance, un GET sans Range est tenté
+    (`range_fallback`). Un fichier lu en entier, sans offset ni length, est comparé
+    au Content-Length, au Content-Range et au getcontentlength WebDAV
+    (`size_checks`, `size_verified`).
+
+    Un fichier incomplet rend une erreur avec `incomplete`, `bytes_received`,
+    `expected_size` et `last_error`. Rien n'est alors écrit, et un fichier
+    existant reste intact.
+
+    Limites : la comparaison porte sur la taille et l'ETag, pas sur le contenu ;
+    `size_verified=false` et `warning` signalent un fichier sans aucune taille
+    annoncée ; la reprise ne survit pas à l'appel d'outil, un nouvel appel repart
+    de zéro.
     """
     try:
         if offset < 0 or length < 0:
@@ -979,51 +1363,87 @@ async def nextcloud_download_file(
                 "error": f"length demandé ({length} octets) au-delà du plafond {cap} octets."
             })
 
-        # Un Range est envoyé même sans demande explicite : sans lui, le corps
-        # entier arrive en mémoire avant tout contrôle de taille, et le plafond
-        # ne protège alors que le contexte. On demande cap+1 octets pour
-        # distinguer « pile à la limite » de « tronqué ».
-        last = offset + (length - 1 if length else cap)
-        try:
-            resp = await _webdav(
-                "GET", path, extra_headers={"Range": f"bytes={offset}-{last}"}, raw_response=True
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 416:
-                raise
-            if offset > 0:
-                return _compact({
-                    "error": f"offset {offset} au-delà de la fin du fichier.",
-                    "path": path,
-                })
-            # 416 à l'offset 0 = fichier vide (une plage sur 0 octet est toujours
-            # insatisfiable), pas une erreur.
-            resp = None
-
-        payload = resp.content if resp is not None else b""
-        size = len(payload)
-        content_type = resp.headers.get("content-type", "") if resp is not None else ""
-        total_size = (
-            _parse_content_range_total(resp.headers.get("content-range", ""))
-            if resp is not None
-            else 0
-        )
-        # length explicite : la troncature est voulue. Sinon, cap+1 octets reçus
-        # signifie que le fichier déborde du plafond.
-        if not length and size > cap:
+        def save_refusal(exc: ValueError) -> str:
             return _compact({
-                "error": f"Fichier trop volumineux (> {cap} octets)."
-                         + ("" if save_path else " Utiliser save_path pour l'écrire sur disque,"
-                                                 " ou offset/length pour n'en lire qu'une plage."),
-                "size": total_size or size,
+                "error": str(exc),
+                "download_root": _NC_DOWNLOAD_DIR,
+                "allowed_roots": _save_roots(),
             })
 
+        # La cible est jugée avant le réseau : inutile de rapatrier un fichier
+        # pour apprendre qu'on ne peut pas l'écrire.
+        target = ""
+        part: _PartFile | None = None
         if save_path:
             try:
-                target = _resolve_save_path(save_path)
-                _write_local_file(target, payload, overwrite=overwrite)
+                target = _resolve_save_path(save_path, path)
+                _check_save_target(target, overwrite)
             except ValueError as exc:
-                return _compact({"error": str(exc), "download_root": _NC_DOWNLOAD_DIR})
+                return save_refusal(exc)
+            part = _PartFile(target)
+
+        whole_file = not offset and not length
+        buffer = bytearray()
+        try:
+            # Un Range est envoyé même sans demande explicite, pour que le serveur
+            # ne déroule pas un fichier de plusieurs Go. On demande cap+1 octets
+            # pour distinguer « pile à la limite » de « tronqué ».
+            try:
+                tr = await _stream_file(
+                    path, offset, length or cap + 1,
+                    part.write if part else buffer.extend,
+                    max_size=None if length else cap,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 416:
+                    raise
+                if offset > 0:
+                    return _compact({
+                        "error": f"offset {offset} au-delà de la fin du fichier.",
+                        "path": path,
+                    })
+                # 416 à l'offset 0 = fichier vide (une plage sur 0 octet est toujours
+                # insatisfiable), pas une erreur. Le PROPFIND le confirme plus bas.
+                tr = _Transfer()
+
+            size = tr.received
+            total_size = tr.total or 0
+            # length explicite : la troncature est voulue. Sinon, cap+1 octets reçus
+            # signifie que le fichier déborde du plafond.
+            if tr.too_large or (not length and size > cap):
+                return _compact({
+                    "error": f"Fichier trop volumineux (> {cap} octets)."
+                             + ("" if save_path else " Utiliser save_path pour l'écrire sur disque,"
+                                                     " ou offset/length pour n'en lire qu'une plage."),
+                    "size": total_size or size,
+                })
+
+            size_checks: dict[str, int] = {}
+            warning = ""
+            if whole_file:
+                size_checks, warning = await _verify_whole_file(path, tr)
+            report: dict[str, Any] = {}
+            if whole_file:
+                report["size_verified"] = bool(size_checks)
+                report["size_checks"] = size_checks
+            if tr.resumes:
+                report["resumes"] = tr.resumes
+            if tr.range_fallback:
+                report["range_fallback"] = True
+            if warning:
+                report["warning"] = warning
+
+            if part:
+                try:
+                    part.commit(overwrite)
+                except ValueError as exc:
+                    return save_refusal(exc)
+        finally:
+            if part:
+                part.discard()
+
+        content_type = tr.content_type
+        if save_path:
             return _compact({
                 "ok": True,
                 "path": path,
@@ -1032,8 +1452,10 @@ async def nextcloud_download_file(
                 "total_size": total_size or size,
                 "content_type": content_type,
                 "partial": bool(total_size and size < total_size),
+                **report,
             })
 
+        payload = bytes(buffer)
         lossy = False
         try:
             content = payload.decode("utf-8")
@@ -1061,7 +1483,16 @@ async def nextcloud_download_file(
             result["partial"] = bool(total_size and offset + size < total_size)
             if lossy:
                 result["decode_warning"] = "plage coupée sur un caractère multi-octets"
+        result.update(report)
         return _compact(result)
+    except NextcloudIncompleteDownload as exc:
+        written = " Aucun fichier écrit." if save_path else ""
+        return _compact({
+            "error": f"{exc}{written}",
+            "path": path,
+            "incomplete": True,
+            **exc.details,
+        })
     except Exception as exc:
         return _compact({"error": _format_error(exc)})
 
