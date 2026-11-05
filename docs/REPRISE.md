@@ -5,13 +5,20 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Reprise du 05/11/2026 : Nextcloud 1.5.0, téléchargement entier ou erreur explicite, non commitée
+# Reprise du 05/11/2026 : Nextcloud 1.5.0 installée, recette réelle à faire après rechargement
 
-Cette section prime sur les suivantes pour Nextcloud. Worktree
-`/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
-`lot/2026-11-05-nextcloud-download`, base `main` `2b67497`. **Rien n'est commité, fusionné,
-construit, installé ni poussé.** La carte Kanboard du projet 262 porte le chemin exact du fichier
-concerné, absent d'ici parce que ce dépôt est public.
+Cette section prime sur les suivantes pour Nextcloud. `main` contient le correctif (`9ff6ab2`).
+Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
+`lot/2026-11-05-nextcloud-download`. Suivi : KB 262 #8072, qui porte le chemin exact du fichier
+concerné, absent d'ici parce que ce dépôt est public. Commit, fusion et installation demandés par
+Benjamin le 05/11/2026.
+
+Installée à 18:39. **Les processus du connecteur datent de 07:42 : ils exécutent encore la 1.4.1,
+et aucun Nextcloud réel n'a vu la 1.5.0. Une extension de bureau ne se recharge pas depuis une
+session. Ce dépôt public reste non poussé.** Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
+dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
+`bascule-nextcloud-1.5.0.sh retour` dans `_lots_wt/2026-11-05-nextcloud-download/dist/`, puis
+redémarrage.
 
 ## Objectif
 
@@ -52,8 +59,18 @@ d'application, volontairement non lu.
 - Tests rouges d'abord : 27 échecs, 9 réussis sur `tests/test_nextcloud_download_stream.py` avant le
   code. Ce fichier passe par un vrai socket local : c'est h11 qui lève l'exception.
 - Final : 1 944 réussis, 4 ignorés, ruff propre, `git diff --check` propre.
-- Banc stdio `../dist/banc_telechargement.py`, sous le python système avec le `src/lib` installé,
-  contre un faux Nextcloud local, sans réglage lu. Sorties : `../dist/banc-*.json`.
+- Banc stdio `dist/banc_telechargement.py` du dossier du lot, sous le python système avec le
+  `src/lib` installé, contre un faux Nextcloud local, sans réglage lu. Sorties : `dist/banc-*.json`.
+  Rejoué sur le bundle extrait puis sur l'installé : mêmes résultats.
+- Bundle `dist/nextcloud-inno3-1.5.0.mcpb`, construit depuis `main` `9ff6ab2` : sha256
+  `605cc5f5979d5e1a3773e89cbed918b42618f19d98b290f5e2a5a8f88afd362c` ; serveur sha256
+  `0c6f43b39e6a9c2e122958cb600f6c875c379a37aa248528dc4261cb73c3ed08`, identique à l'installé.
+  960 entrées, seuls `manifest.json` et `src/server.py` diffèrent. Le manifeste installé garde son
+  nom et sa commande, et gagne la version et la clef optionnelle `nextcloud_save_dirs`.
+- 14 outils, aucun schéma d'entrée changé, seule la description de `nextcloud_download_file` change.
+- `bascule-nextcloud-1.5.0.sh installer` puis `retour`, sur copie : identique au témoin, et second
+  `installer` refusé. `installer` lancé ensuite sur l'extension réelle, `retour` non. Date et taille
+  du fichier de réglages inchangées, contenu non lu.
 
 | Scénario | 1.4.1 installée | 1.5.0 |
 |---|---|---|
@@ -66,8 +83,8 @@ d'application, volontairement non lu.
 
 ## Non vérifié et limites
 
-- **La 1.5.0 n'a jamais parlé au vrai Nextcloud.** Elle ne s'y chargera qu'après installation et
-  redémarrage du client. Selon la réponse du serveur sans `Range`, la copie défaillante donnera soit
+- **La 1.5.0 n'a jamais parlé au vrai Nextcloud.** Elle ne s'y chargera qu'au redémarrage du
+  client. Selon la réponse du serveur sans `Range`, la copie défaillante donnera soit
   le PDF entier, soit l'erreur explicite : les deux issues sont couvertes, seul le réel tranchera.
 - La comparaison porte sur la taille et l'ETag, pas sur le contenu.
 - 64 reprises à 32 Ko couvrent environ 2 Mo. Le délai d'un appel d'outil côté client n'a pas été mesuré.
@@ -75,13 +92,16 @@ d'application, volontairement non lu.
 
 ## Prochaines actions
 
-1. Benjamin : accord pour commit, fusion dans `main` et installation. Dépôt public : ne pas pousser
-   sans demande.
-2. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
-3. Bundle : repartir de l'installé, en ajoutant au manifeste la clef `nextcloud_save_dirs`.
-4. Après redémarrage : recette sur la copie défaillante et sur une copie saine, empreintes comparées
-   à la copie synchronisée.
-5. Si l'erreur persiste : faire examiner cette copie côté serveur, ou la remplacer par une copie saine.
+1. Benjamin : redémarrer le client, ou autoriser l'essai direct avec les réglages du connecteur.
+2. Recette, après contrôle par `ps -o lstart` que le processus est postérieur à 18:39 :
+   - copie saine en entier : `size_verified=true`, empreinte égale à la copie synchronisée ;
+   - copie défaillante : PDF entier et même empreinte, ou erreur `incomplete` sans fichier écrit ;
+   - `save_path` absolu sous `~/Downloads`, absolu hors racines refusé avec `allowed_roots`, dossier
+     avec `/` final ;
+   - petit fichier texte dans le contexte, et plage `offset`/`length`.
+3. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
+4. Si l'erreur persiste sur la copie défaillante : la faire examiner côté serveur, ou la remplacer
+   par une copie saine.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
 
