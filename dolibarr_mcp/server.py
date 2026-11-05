@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.13"
+__version__ = "1.8.15"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -254,6 +254,8 @@ _LIST_404_AS_EMPTY = {
     "proposals",
     "tickets",
     "agendaevents",
+    # Seul le balayage de GET tasks passe par ici : tasks/{id}/... lit par api_get.
+    "tasks",
 }
 
 
@@ -1086,8 +1088,8 @@ async def dolibarr_list_projects(
 async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
     """Détail d'un projet par ID numérique ou par référence.
 
-    Fournir soit project_id, soit ref. Retourne toutes les infos du projet
-    incluant tâches et contacts associés.
+    Fournir soit project_id, soit ref. Retourne les champs du projet, sans ses
+    tâches ni ses contacts : dolibarr_list_tasks liste les tâches.
 
     Description et note publique : `description` (texte brut) et `note_public`
     (HTML nettoyé) sont rendues entières jusqu'à DETAIL_NOTE_MAX_CHARS (20 000)
@@ -1143,6 +1145,106 @@ async def dolibarr_get_project(project_id: int = 0, ref: str = "") -> str:
         return _format_error(exc)
 
 
+# Découverte des tâches d'un projet, lue dans le cœur 24.0.1.
+# projects/{id}/tasks passe par Project::getLinesArray($user) : Task::getTasksArray
+# y écarte toutes les tâches d'un projet non public dont le compte de la clef
+# n'est pas contact, admin et « projet all lire » compris. GET tasks n'a pas ce
+# filtre, mais sans « societe client voir », ou pour un compte externe, il ne
+# garde que les projets des tiers dont le compte est commercial. Les deux filtres
+# portent sur le projet entier, jamais sur une tâche : une route qui rend une
+# tâche du projet les rend toutes.
+TASKS_ENDPOINT = "tasks"
+USER_INFO_ENDPOINT = "users/info"
+# Portée de GET tasks pour le compte de la clef, lue une fois par processus.
+# Vide tant que users/info n'a pas rendu les droits.
+_TASK_ROUTE_SCOPE: dict[str, bool] = {}
+
+
+async def _task_route_unfiltered() -> bool:
+    """Vrai si GET tasks ne peut écarter aucun projet pour le compte de la clef.
+
+    Il faut un compte interne qui a « societe client voir ». Faux si le droit
+    manque, si le compte est externe ou si users/info ne rend pas les droits.
+    """
+    if "unfiltered" in _TASK_ROUTE_SCOPE:
+        return _TASK_ROUTE_SCOPE["unfiltered"]
+    try:
+        me = await api_get(USER_INFO_ENDPOINT, {"includepermissions": 1})
+    except Exception as exc:
+        logger.info("Droits du compte de la clef illisibles : %s", type(exc).__name__)
+        return False
+    rights = me.get("rights") if isinstance(me, dict) else None
+    if not isinstance(rights, dict):
+        return False
+    thirdparties = rights.get("societe")
+    client = thirdparties.get("client") if isinstance(thirdparties, dict) else None
+    voir = client.get("voir") if isinstance(client, dict) else None
+    unfiltered = not _id_int(me.get("socid")) and _id_int(voir) == 1
+    _TASK_ROUTE_SCOPE["unfiltered"] = unfiltered
+    return unfiltered
+
+
+async def _discover_project_tasks(project_id: int) -> tuple[list[dict], dict, str | None]:
+    """Tâches d'un projet, celles que projects/{id}/tasks masque comprises.
+
+    Rend les lignes, `task_discovery` et un avertissement. `task_discovery`
+    donne le nombre de tâches rendues par chaque route, null si elle n'a pas été
+    lue ou a échoué, et `exact`, faux dès qu'un masquage reste possible.
+    GET tasks n'est lu que si la route projet ne rend rien. Son erreur est levée
+    si GET tasks ne trouve rien non plus, comme avant la 1.8.15.
+    """
+    project_error = None
+    try:
+        rows = await api_get(f"projects/{project_id}/tasks", {})
+        if not isinstance(rows, list):
+            raise ValueError("Liste des taches illisible.")
+    except Exception as exc:
+        project_error, rows = exc, []
+    discovery: dict[str, Any] = {
+        "project_route": None if project_error else len(rows), "task_route": None,
+    }
+    if rows:
+        discovery["exact"] = True
+        return rows, discovery, None
+
+    task_error, scan, found = None, None, []
+    try:
+        scan = await _scan_list(TASKS_ENDPOINT, {"sqlfilters": f"(t.fk_projet:=:{int(project_id)})"})
+        if any(_id_int(row.get("id")) is None or _id_int(row.get("fk_project")) is None for row in scan):
+            raise ValueError("GET tasks rend une tâche sans id ou sans fk_project.")
+        # Le filtre est revérifié : une tâche d'un autre projet ne compte jamais.
+        found = [row for row in scan if _id_int(row["fk_project"]) == int(project_id)]
+    except Exception as exc:
+        task_error = exc
+    if project_error and not found:
+        raise project_error
+    if project_error:
+        discovery["project_route_error"] = _format_error(project_error)
+    if task_error:
+        discovery["task_route_error"] = _format_error(task_error)
+        cause = f"GET tasks a échoué ({discovery['task_route_error']})"
+    else:
+        discovery["task_route"] = len(found)
+        if not scan.complete:
+            cause = f"le balayage de GET tasks est incomplet ({scan.scan_note})"
+        elif found or await _task_route_unfiltered():
+            cause = ""
+        else:
+            cause = ("GET tasks n'en rend aucune, sans que users/info confirme le droit "
+                     "« societe client voir » du compte, faute duquel cette route écarte "
+                     "les projets des tiers dont il n'est pas commercial")
+    discovery["exact"] = not cause
+    if not cause:
+        return found, discovery, None
+    project_side = "a échoué" if project_error else "n'en rend aucune"
+    warning = (
+        f"Tâches possiblement masquées, total non certifié : projects/{project_id}/tasks "
+        f"{project_side}, et Dolibarr y écarte celles d'un projet non public dont le compte "
+        f"de la clef n'est pas contact ; {cause}."
+    )
+    return found, discovery, warning
+
+
 @mcp.tool()
 async def dolibarr_list_tasks(
     project_id: int=0,
@@ -1167,13 +1269,33 @@ async def dolibarr_list_tasks(
     - planned_seconds / spent_seconds : valeur brute Dolibarr, sans perte
     Une tâche portant 32,5 h ressort donc à spent_hours=32.5 et
     spent_seconds=117000. Ne jamais lire spent_seconds comme des heures.
+
+    Découverte : projects/{id}/tasks d'abord. Dolibarr y écarte toutes les
+    tâches d'un projet non public dont le compte de la clef n'est pas contact,
+    même admin ou « projet all lire ». Si cette route ne rend rien, GET tasks
+    filtré sur le projet les retrouve. task_discovery donne le nombre de tâches
+    rendues par chaque route (null si non lue ou en échec) et exact. Jusqu'à la
+    1.8.14, ces tâches manquaient avec total=0 et total_exact=true.
+
+    Limite non levée : sans « societe client voir », ou pour un compte externe,
+    GET tasks ne garde que les projets des tiers dont le compte est commercial.
+    Un projet vide des deux côtés n'est donc certifié vide que si users/info
+    confirme ce droit, lu une fois par processus. Sinon, comme après un échec
+    ou un balayage incomplet de GET tasks : total=null, total_exact=false, et
+    tasks_warning donne la cause. Ce zéro ne prouve pas un projet vide.
+
+    assigned_to : la route projet n'a rendu ni responsable ni créateur en
+    production (constaté le 05/11/2026), la valeur est donc null et ce filtre
+    ne retient rien. Une tâche retrouvée par GET tasks garde null : son créateur
+    n'est pas la personne assignée. Les personnes affectées se lisent par
+    dolibarr_list_task_contacts.
     """
     try:
         if not project_id:
             return "Veuillez fournir un project_id."
 
-        params: dict[str, Any] = {}
-        tasks = await api_get(f"projects/{project_id}/tasks", params)
+        tasks, discovery, warning = await _discover_project_tasks(project_id)
+        recovered = discovery["task_route"] is not None
 
         results = []
         for t in tasks:
@@ -1188,13 +1310,22 @@ async def dolibarr_list_tasks(
                 "planned_seconds": _seconds_int(t.get("planned_workload")),
                 "spent_hours": _seconds_to_hours(t.get("duration_effective")),
                 "spent_seconds": _seconds_int(t.get("duration_effective")),
-                "assigned_to": t.get("fk_user_resp") or t.get("fk_user_creat"),
+                # La route projet ne rend pas le créateur : GET tasks le rend,
+                # mais il ne doit pas passer pour la personne assignée.
+                "assigned_to": t.get("fk_user_resp") or (None if recovered else t.get("fk_user_creat")),
             }
             if assigned_to and str(entry.get("assigned_to")) != str(assigned_to):
                 continue
             results.append(entry)
 
-        return _dumps(_export_payload({"count": len(results), "tasks": results}, "tasks", limit, cursor))
+        scan = ExportRows()
+        scan.complete = discovery["exact"]
+        scan.scan_note = "Tâches du projet non certifiées : voir tasks_warning."
+        payload = _export_payload({"count": len(results), "tasks": results}, "tasks", limit, cursor, scan=scan)
+        payload["task_discovery"] = discovery
+        if warning:
+            payload["tasks_warning"] = warning
+        return _dumps(payload)
 
     except Exception as exc:
         return _format_error(exc)
@@ -1922,6 +2053,19 @@ async def dolibarr_list_time_entries(
     Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
     Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
 
+    Tâches d'un projet : comme dolibarr_list_tasks, projects/{id}/tasks
+    d'abord, puis GET tasks filtré sur le projet si la première route ne rend
+    rien, Dolibarr y écartant toutes les tâches d'un projet non public dont le
+    compte de la clef n'est pas contact. task_discovery dit ce que chaque route
+    a rendu. Jusqu'à la 1.8.14, ces tâches manquaient avec tasks_total=0 et
+    aggregates_complete=true. Limite non levée : sans « societe client voir »,
+    ou pour un compte externe, GET tasks écarte les projets des tiers dont le
+    compte n'est pas commercial, et un projet vide des deux côtés n'est certifié
+    que si users/info confirme ce droit. Quand un masquage reste possible :
+    tasks_total=null, total=null, total_exact et aggregates_complete faux,
+    reason=tasks_unverified si rien d'autre n'a arrêté le parcours, et
+    tasks_warning donne la cause. Les heures rendues sont alors un minimum.
+
     Dates et heures sont en GMT, comme l'API les rend et comme
     dolibarr_log_time les ecrit : `date` est le jour GMT de `datehour`, et
     date_start / date_end filtrent sur ce jour-la. Une ecriture faite le 25 a
@@ -1973,14 +2117,13 @@ async def dolibarr_list_time_entries(
         entries, scanned_entries = [], []
         scanned = 0
         task_ids = []
+        discovery, tasks_warning = None, None
         reason, error, next_cursor = None, None, None
         try:
             if task_id:
                 task_ids = [int(task_id)]
             else:
-                tasks = await read(api_get(f"projects/{project_id}/tasks", {}))
-                if not isinstance(tasks, list):
-                    raise ValueError("Liste des taches illisible.")
+                tasks, discovery, tasks_warning = await read(_discover_project_tasks(project_id))
                 task_ids = sorted({int(t["id"]) for t in tasks if isinstance(t, dict) and t.get("id")})
         except TimeoutError:
             reason = "time_budget"
@@ -2025,6 +2168,11 @@ async def dolibarr_list_time_entries(
         aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
         if not task_ids and reason is None:
             aggregates_complete = True
+        tasks_known = discovery is None or discovery["exact"]
+        if not tasks_known:
+            # Des tâches peuvent manquer à la liste lue : rien n'est certifié.
+            aggregates_complete = False
+            reason = reason or "tasks_unverified"
         by_user, by_task = {}, {}
         for entry in scanned_entries:
             seconds = entry["seconds"] or 0
@@ -2035,7 +2183,8 @@ async def dolibarr_list_time_entries(
         total_seconds = sum(e["seconds"] or 0 for e in scanned_entries)
         result = {
             "task_id": task_id or None, "project_id": project_id or None,
-            "tasks_scanned": scanned, "tasks_total": None if not task_ids and reason is not None else len(task_ids),
+            "tasks_scanned": scanned,
+            "tasks_total": None if not tasks_known or (not task_ids and reason is not None) else len(task_ids),
             "count": len(entries), "returned": len(entries), "matched": len(scanned_entries),
             "total": len(scanned_entries) if aggregates_complete else None,
             "total_exact": aggregates_complete, "total_lower_bound": len(scanned_entries),
@@ -2049,11 +2198,16 @@ async def dolibarr_list_time_entries(
             "by_task": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_task.items()},
             "entries": entries,
         }
+        if discovery is not None:
+            result["task_discovery"] = discovery
+        if tasks_warning:
+            result["tasks_warning"] = tasks_warning
         if error:
             result["scan_error"] = error
         if not aggregates_complete:
             result["scan_note"] = (
-                "Agrégats limités aux tâches lues dans cet appel. "
+                ("Tâches du projet non certifiées : voir tasks_warning. " if tasks_warning else "")
+                + "Agrégats limités aux tâches lues dans cet appel. "
                 "Reconstituer le total depuis les écritures exportées, sans sommer les agrégats de pages."
             )
         return _dumps(result)
@@ -5099,7 +5253,9 @@ async def dolibarr_delete_project(project_id: int) -> str:
       FK orpheline) →
       retourne un diagnostic complet avec :
         - état courant du projet (ref, statut, socid)
-        - nombre de tâches restantes
+        - nombre de tâches restantes, lu comme dolibarr_list_tasks, masquées
+          comprises ; null si illisible ou non certifié, tasks_warning dit alors
+          pourquoi
         - extrait du corps d'erreur Dolibarr (utile : message "Cannot
           delete project, child element exists")
         - pistes SQL pour nettoyer manuellement les FK orphelines
@@ -5122,9 +5278,10 @@ async def dolibarr_delete_project(project_id: int) -> str:
             pass
 
         tasks_count: int | None = None
+        tasks_warning: str | None = None
         try:
-            tasks = await api_get(f"projects/{project_id}/tasks")
-            tasks_count = len(tasks) if isinstance(tasks, list) else None
+            tasks, discovery, tasks_warning = await _discover_project_tasks(project_id)
+            tasks_count = len(tasks) if discovery["exact"] else None
         except Exception:
             pass
 
@@ -5146,6 +5303,7 @@ async def dolibarr_delete_project(project_id: int) -> str:
                     "http_status": 500,
                     "project_state": snapshot,
                     "tasks_remaining": tasks_count,
+                    **({"tasks_warning": tasks_warning} if tasks_warning else {}),
                     "dolibarr_body": body,
                     "diagnostic": (
                         "HTTP 500 sur DELETE /projects/{id}. Causes typiques :\n"

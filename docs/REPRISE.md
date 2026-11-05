@@ -5,6 +5,109 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 05/11/2026 : Dolibarr 1.8.15, tâches masquées par la route projet, commitée, non installée
+
+Cette section prime sur les suivantes pour la découverte des tâches d'un projet. Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-05-dolibarr-taches-masquees/mcp-foss-connectors`, branche
+`lot/2026-11-05-dolibarr-taches-masquees`, partie de `2b67497` (1.8.13, pointe de
+`lot/2026-11-05-dolibarr-temps-agregats`). Suivi : carte KB 262 dédiée, liée à la #8070 dont le
+commentaire 2872 a relevé le défaut. **Rien de poussé, rien de fusionné, rien d'installé : la 1.8.13
+tourne toujours.** Installation et redémarrage soumis à l'accord de Benjamin.
+
+## Objectif
+
+`dolibarr_list_tasks(project_id=13)` rendait `total=0`, `total_exact=true` ;
+`dolibarr_list_time_entries(project_id=13)` rendait `tasks_total=0`, `aggregates_complete=true`,
+`reason=complete`. Or la tâche 3 porte l'écriture 4, 1 h, `project_id=13`. Rendre les tâches du projet,
+et ne plus certifier un total qu'un masquage peut fausser.
+
+## Faits vérifiés
+
+- Reproduit en production le 05/11/2026 vers 20:00, 1.8.13 installée, lecture seule : projet 13 à
+  `total=0, total_exact=true` ; `task_id=3` rend l'écriture 4 du projet 13. Projet 4 : `assigned_to`
+  null sur ses tâches, la route projet ne rendant ni responsable ni créateur.
+- Lu dans le cœur 24.0.1 (copie `_lots_wt/audit-depots-2026-10-23/banc-suite-2610/restauration-privee`) :
+  - `Projects::getLines` appelle `getLinesArray(DolibarrApiAccess::$user)`, qui passe le compte en
+    `$userp` à `Task::getTasksArray`. Celle-ci écarte une ligne si le projet n'est pas public et que
+    `getUserRolesForProjectsOrTasks($userp, null, projectid, 0)` est vide, sans exception pour admin
+    ni `projet all lire`. Le test porte sur le projet : tout ou rien par projet.
+  - `Tasks::index` (`GET tasks`) : `projet lire`, filtre `t.entity`, `sqlfilters` libre, et
+    `search_sale` si le compte n'a pas `societe client voir` (projets des tiers dont il est
+    commercial ; un projet sans tiers est alors écarté). Compte externe : `p.fk_soc` de son tiers.
+    Ce filtre aussi porte sur le projet entier. Les lignes viennent de `Task::fetch`, avec
+    `fk_project` et `fk_user_creat` ; le nettoyage ne retire que `fk_projet`.
+  - `User::hasRight` : pas de passe-droit administrateur ; un compte externe n'a jamais
+    `societe client voir`. `users/info?includepermissions=1` garde `rights` dans sa réponse et exige
+    `user self creer`, `user user lire` ou admin.
+- `dolibarr_get_project` n'a jamais lu les tâches, malgré sa docstring.
+
+## Décisions prises en cours de lot, à revoir si Benjamin les conteste
+
+- Base : la 1.8.14 n'étant commitée nulle part, la branche part de la 1.8.13. Version **1.8.15**, la
+  1.8.14 restant au lot des agrégats. Le plan du commentaire 2872 (route `inno3dashboard`, connecteur
+  « 1.8.15 ») passe donc à 1.8.16.
+- `GET tasks` n'est lu que si la route projet ne rend rien : un projet visible coûte une requête, comme
+  avant, et les deux filtres étant par projet, une tâche visible prouve qu'elles le sont toutes.
+- Zéro des deux côtés : certifié seulement si `users/info` confirme `societe client voir` sur un compte
+  interne. Droit lu une fois par processus, lecture en échec non retenue. Sans lui, non certifié.
+- `GET tasks` rendant un 404 « No task found » est lu comme vide (`_LIST_404_AS_EMPTY`), comme les
+  autres listes : des cœurs antérieurs le font, le 24.0.1 non.
+- `assigned_to` : une tâche retrouvée garde null, son créateur n'étant pas la personne affectée.
+  Le filtre `assigned_to` ne retient rien en production, avant comme après : documenté, non corrigé.
+- `dolibarr_delete_project` : `tasks_remaining` du diagnostic 500 passe par la même lecture, null
+  si non certifié.
+
+## Livré, commit du lot
+
+Détail dans `dolibarr_mcp/CHANGELOG.md`, section 1.8.15, et `dolibarr_mcp/README.md`, « Tâches
+masquées par la route projet, 1.8.15 ». `_discover_project_tasks` et `_task_route_unfiltered` dans
+`server.py`, ajouts additifs `task_discovery` et `tasks_warning`, `reason="tasks_unverified"`.
+Aucun paramètre ni aucune clé retirés, aucun test existant modifié.
+
+## Contrôles du 05/11/2026
+
+- Tests rouges d'abord : 26 échecs, 7 réussis sur `tests/test_dolibarr_project_tasks_masked.py` avant
+  le code ; puis 1 échec sur le cas 404 « No task found » ajouté ensuite, avant son correctif.
+- Final : 1 937 réussis, 4 ignorés, sous garde réseau (`PYTEST_PLUGINS=pytest_offline`, greffon copié
+  dans `_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`), 0 tentative réseau. Départ : 1 902
+  réussis, 4 ignorés. Ruff propre, `git diff --check` propre.
+- Les données de production (libellé, note, références) ne figurent pas dans les tests, seuls les
+  identifiants 13, 3 et 4.
+
+## Non vérifié et limites
+
+- **`GET tasks?sqlfilters=(t.fk_projet:=:13)` n'a jamais été appelé.** La route a répondu sans filtre
+  le 20/08/2026, par appel direct. Production en v23, cœur lu en 24.0.1.
+- Droit `societe client voir` du compte de la clef : déduit du fonctionnement de
+  `tasks/{id}/timespent` (commentaire 2872), non lu. `users/info` peut aussi lui être refusé : tous les
+  projets vides resteraient alors non certifiés.
+- Ampleur : 117 projets sur 222 annoncent zéro tâche, part réellement vide inconnue.
+- Coût : un projet masqué coûte une page de `GET tasks` par centaine de tâches, `Task::fetch` par ligne
+  côté serveur, plus `users/info` une fois si le projet est vide.
+
+## Fusion avec la 1.8.14
+
+Conflits attendus dans `server.py` (`__version__`, `dolibarr_list_time_entries`), le manifeste, le
+README, le CHANGELOG et ce document. Dans `dolibarr_list_time_entries`, la branche `if aggregate:` de
+la 1.8.14 rend ses totaux avant le calcul de `aggregates_complete` : y calculer `tasks_known` avant
+elle, rendre `complete = next_cursor is None and tasks_known`, `tasks_total` comme ici,
+`reason = reason or "tasks_unverified"` si `tasks_known` est faux, et ajouter `task_discovery` et
+`tasks_warning`. Sans cela, l'agrégat par projet certifierait encore un total masqué. Ajouter le test
+correspondant dans `tests/test_dolibarr_time_aggregate.py`.
+
+## Prochaines actions
+
+1. Benjamin : accord pour fusionner dans `main` (avant ou après la 1.8.14), construire le bundle et
+   l'installer, puis redémarrer le client.
+2. Recette en lecture seule après redémarrage, processus postérieur à l'installation :
+   `dolibarr_list_tasks(project_id=13, limit=1)` doit rendre la tâche 3, `task_discovery` avec
+   `project_route=0` ; `dolibarr_list_time_entries(project_id=13, limit=1, task_limit=100)` doit
+   rendre l'écriture 4, 1 h, `aggregates_complete=true`. Un projet visible (4) : une seule route lue.
+   Un projet vide : `exact` vrai si le droit est confirmé, sinon `tasks_warning`.
+3. Si `GET tasks` refuse le filtre (400) : relire la forme acceptée par la v23 avant toute retouche.
+4. Mesurer ensuite les 117 projets à zéro avec la 1.8.15 installée.
+5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
+
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
 
 Cette section prime sur les suivantes, hormis les chemins ci-dessus. `main` contient le correctif

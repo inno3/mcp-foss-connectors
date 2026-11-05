@@ -5,7 +5,11 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.13, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.15, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+
+Les tâches d'un projet non public dont le compte de la clef n'est pas contact sont
+désormais retrouvées par `GET tasks`, et un total qu'un masquage peut encore fausser
+n'est plus annoncé exact : voir « Tâches masquées par la route projet ».
 
 `dolibarr_create_project` demande sa référence à Dolibarr dès la création
 (`ref="auto"`, numéroteur `PROJECT_ADDON`), brouillon compris, puis rend la référence
@@ -696,7 +700,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | Outil, préfixe `dolibarr_` | Tableau et champs principaux | Filtres et statuts | Période et collecte |
 | --- | --- | --- | --- |
 | `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
-| `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet |
+| `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet, tâches masquées comprises ; total non certifié si un masquage reste possible |
 | `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
 | `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues |
 | `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
@@ -901,6 +905,51 @@ rendues avant la page), `total_exact`, `total_lower_bound` et `scan_truncated`.
 des tâches lues dans cet appel. `scan_truncated` signale ces agrégats partiels,
 y compris à la fin du parcours, tandis que `truncated` indique uniquement une
 suite à lire. `scan_note` explique cette différence. Ces minorants ne se somment pas.
+
+### Tâches masquées par la route projet, 1.8.15
+
+`projects/{id}/tasks` passe par `Project::getLinesArray($user)`, qui écarte toutes
+les tâches d'un projet non public dont le compte de la clef n'est pas contact,
+administrateur et « projet all lire » compris (lu dans le cœur 24.0.1). Jusqu'à la
+1.8.14, `dolibarr_list_tasks` en tirait `total=0` avec `total_exact=true`, et
+`dolibarr_list_time_entries` `tasks_total=0` avec `aggregates_complete=true`, alors
+que le projet portait des tâches et des heures. Constaté le 05/11/2026 sur un projet
+de production : sa tâche était lisible directement, avec son écriture de temps.
+
+Désormais, si la route projet ne rend aucune tâche, `GET tasks` filtré sur le projet
+(`t.fk_projet`, balayé page par page, chaque ligne revérifiée par `fk_project`) les
+retrouve. Une tâche visible suffit : les deux filtres du cœur portent sur le projet
+entier, si bien qu'un projet visible coûte toujours une seule requête, comme avant.
+`dolibarr_list_tasks`, `dolibarr_list_time_entries` et le diagnostic de
+`dolibarr_delete_project` partagent cette lecture.
+
+| Situation | `task_discovery.exact` | Total |
+| --- | --- | --- |
+| La route projet rend des tâches | vrai | certifié |
+| Elle n'en rend aucune, `GET tasks` en rend, balayage complet | vrai | certifié |
+| Aucune des deux, `users/info` confirme « societe client voir » | vrai | zéro certifié |
+| Aucune des deux, droit non confirmé ou compte externe | faux | `null`, `tasks_warning` |
+| `GET tasks` en échec ou balayage incomplet | faux | `null`, `tasks_warning` |
+
+Limite qui ne peut pas être levée par le connecteur : sans « societe client voir »,
+ou pour un compte externe, `GET tasks` ne garde que les projets des tiers dont le
+compte est commercial. Le droit est lu une fois par processus par
+`users/info?includepermissions=1`, qui exige `user self creer`, `user user lire` ou un
+compte administrateur ; une lecture en échec n'est pas retenue et sera retentée.
+Sans ce droit confirmé, un projet vide des deux côtés reste non certifié.
+
+`task_discovery` donne le nombre de tâches rendues par chaque route, `null` si elle
+n'a pas été lue ou a échoué, et ajoute `project_route_error` ou `task_route_error`.
+Quand le total n'est pas certifié, `dolibarr_list_tasks` rend `total=null`,
+`total_exact=false` et `scan_truncated=true`. `dolibarr_list_time_entries` rend
+`tasks_total=null`, `total=null`, `aggregates_complete=false` et, si rien d'autre n'a
+arrêté le parcours, `reason="tasks_unverified"`. Les heures rendues sont un minimum.
+Aucune clé ni aucun paramètre n'est retiré.
+
+`assigned_to` reste `null` sur une tâche retrouvée : `GET tasks` rend le créateur, qui
+n'est pas la personne affectée. La route projet n'a rendu ni l'un ni l'autre en
+production, si bien que le filtre `assigned_to` de `dolibarr_list_tasks` ne retient
+rien, avant comme après la 1.8.15. `dolibarr_list_task_contacts` lit les affectations.
 
 ## Modulepart non servis par le cœur (1.8.7)
 
