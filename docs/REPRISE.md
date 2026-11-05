@@ -10,8 +10,8 @@ retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 Cette section prime sur les suivantes pour la découverte des tâches d'un projet. Worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-05-dolibarr-taches-masquees/mcp-foss-connectors`, branche
 `lot/2026-11-05-dolibarr-taches-masquees`, partie de `2b67497` (1.8.13, pointe de
-`lot/2026-11-05-dolibarr-temps-agregats`). Suivi : carte KB 262 dédiée, liée à la #8070 dont le
-commentaire 2872 a relevé le défaut. **Rien de poussé, rien de fusionné, rien d'installé : la 1.8.13
+`lot/2026-11-05-dolibarr-temps-agregats`). Correctif : commit `2939bb0`. Suivi : KB 262 #8073, liée à
+la #8070 dont le commentaire 2872 a relevé le défaut. **Rien de poussé, rien de fusionné, rien d'installé : la 1.8.13
 tourne toujours.** Installation et redémarrage soumis à l'accord de Benjamin.
 
 ## Objectif
