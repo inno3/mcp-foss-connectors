@@ -57,6 +57,9 @@ Installé à chaud selon RELEASE 4bis : `src/server.py` du commit de fusion du l
 du manifeste (113 outils inchangés). Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.16`
 dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Candidat vérifié d'abord par
 `scripts/check_mcp_stdio.py` sous `/usr/bin/python3` : 1.8.17, 113 outils, stderr vide.
+`dist/dolibarr-erp-inno3-v2.mcpb` du clone principal (ignoré par git) repacké depuis l'installé,
+sans `__pycache__`, un seul `dist-info` d'extension (0.9.2), sha256 `3937c4fe...`, vérifié par le
+même script ; l'ancien est gardé sous `dist/dolibarr-erp-inno3-v2-1.8.16.mcpb`.
 
 Recette faite avant tout redémarrage du client : le `server.py` installé a été lancé dans un second
 processus, avec la seule URL et la seule clef du processus du client, sans les afficher, et n'a
