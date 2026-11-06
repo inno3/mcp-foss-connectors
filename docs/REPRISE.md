@@ -277,18 +277,39 @@ d'application, volontairement non lu.
 4. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
 5. WordPress et HedgeDoc : réglages optionnels sans valeur par défaut, à vérifier séparément.
 
-# Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
+# Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée, installée et recettée en réel le 06/11/2026
 
 Cette section prime sur les suivantes pour Dolibarr, hormis les chemins ci-dessus. `main` contient le correctif
 (`ff60747`). Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-02-dolibarr-projet-prov/mcp-foss-connectors`,
 branche `lot/2026-11-02-dolibarr-projet-prov`. Suivi : KB 262 #8060. Vérifications, correction, commit,
 fusion et installation demandés par Benjamin le 03/11/2026.
 
-Installée à 09:49. **Elle n'est chargée qu'au redémarrage du client : à cette heure, les processus
-datent encore de la 1.8.12 et aucun Dolibarr réel n'a vu la 1.8.13. Ce dépôt public reste non poussé.**
-Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-03-v1.8.12` dans
-`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
-`bascule-dolibarr-1.8.13.sh retour` dans `_lots_wt/2026-11-02-dolibarr-projet-prov/dist/`, puis redémarrage.
+Installée le 03/11/2026 à 09:49. **Périmé depuis :** la 1.8.15, construite sur ce correctif, est
+l'installé depuis le 06/11/2026 ; son retour arrière est celui de la section du 06/11, pas
+`bascule-dolibarr-1.8.13.sh`, qui refuserait d'ailleurs une version autre que 1.8.12. Ce dépôt public
+reste non poussé.
+
+## Recette réelle du 06/11/2026, en 1.8.15, sur le projet de test 324
+
+Processus chargés à 10:15, `__version__ = "1.8.15"`, serveur identique à `main` et porteur du code de
+la 1.8.13. Le 317 ayant été supprimé, un projet de test sans tiers a été créé en brouillon.
+
+| Appel | Résultat |
+|---|---|
+| `list_projects(status="0,1,2")` | refus explicite, `status=""` proposé |
+| `update_project(999999, status=9)` | refus avant écriture, pas de 404 : aucun appel parti |
+| `update_project(999999, opp_status="PROSPEC")` | refus avant écriture, même preuve |
+| `create_project(status=0, opp_status="qualification")` | 324, `PJ2611-0229`, sans avertissement ; relu `opp_status="2"`, `opp_percent="20.00"`, `usage_opportunity=1` |
+| `update_project(324, opp_status="prospect")` | sans `update_warning` ; relu `"1"`, `"0.00"`, `1` |
+| `update_project(324, status=1)` | sans `update_warning` ; relu `status="1"`, là où la 1.8.12 ne changeait rien |
+
+- Effets de bord : le passage à `status=1` par PUT a créé un dossier Nextcloud vide sous `/Interne`
+  (NextBarr, `PROJECT_MODIFY`), comme prévu par la source. Aucun tableau Kanboard.
+- Constaté aussi : le 316, renommé `PJ2610-0223` par Benjamin, a vu son dossier Nextcloud suivre le
+  renommage. Il porte désormais `opp_status="2"`, `opp_percent="20.00"`, `usage_opportunity=1`.
+- Le dossier Nextcloud du 317 a survécu à la suppression du projet, comme prévu.
+- Non couvert en réel : `update_warning` et `enrich_warning` sur une réponse qui ne confirme pas,
+  `status=2`, `won`. Banc et tests seulement.
 
 ## Constaté en réel le 03/11/2026, en 1.8.12, sur le projet de test 317
 
@@ -342,8 +363,6 @@ dictionnaire que Dolibarr efface. Aucun test supprimé.
 
 ## Limites
 
-- La 1.8.13 n'a vu aucun Dolibarr réel : réponse réelle du PUT et lecture de `usage_opportunity`
-  restent à constater.
 - Clôture par `status=2` : ni `PROJECT_CLOSE`, ni date, ni auteur de clôture, faute de route d'API.
 - Des projets écrits par les versions antérieures peuvent porter un statut sans `opp_percent` ni
   `usage_opportunity`. Non mesuré, la lecture n'existe qu'à partir de la 1.8.13.
@@ -353,13 +372,14 @@ dictionnaire que Dolibarr efface. Aucun test supprimé.
 
 ## Suite ordonnée
 
-1. Benjamin : redémarrer le client pour charger la 1.8.13.
-2. Recette sur le 317 : `opp_status="qualification"`, relire `opp_status=2`, `opp_percent=20`,
-   `usage_opportunity=1`, sans `update_warning` ; `status=0` puis `status=1` ; liste avec
-   `status="0,1,2"` refusée.
-3. Benjamin : supprimer les projets 317 et 318 et le dossier Nextcloud du 317, renommer la
-   référence du 316 et vérifier que son dossier suit.
-4. Benjamin : décider le push de ce dépôt public.
+1. Benjamin : supprimer le projet de test 324 dans Dolibarr, puis les dossiers Nextcloud
+   `/Interne/[TEST connecteur Dolibarr 1.8.12] à supprimer PJ2611-0223` et
+   `/Interne/[TEST connecteur Dolibarr 1.8.15] à supprimer PJ2611-0229`.
+2. Benjamin : décider le push de ce dépôt public.
+3. Facultatif : mesurer les projets qui portent un statut d'opportunité sans `opp_percent` ni
+   `usage_opportunity`, écrits par les versions antérieures.
+
+Fait depuis le 03/11 : 317 et 318 supprimés, référence du 316 renommée, dossier du 316 renommé avec.
 
 # Reprise du 02/11/2026 : Dolibarr 1.8.12 fusionné, installé et recetté, ce dépôt public non poussé
 
