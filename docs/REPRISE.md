@@ -61,7 +61,10 @@ contient le correctif (`2939bb0`) par la fusion `7469de9`. Worktree
 2872 a relevé le défaut. Fusion et installation demandées par Benjamin le 06/11/2026.
 
 Installée le 06/11/2026 à 08:29, chargée à 10:15 après redémarrage du client, recette réelle
-conforme. **Ce dépôt public reste non poussé.**
+conforme. **`main` poussé sur `origin` le 06/11/2026, accord de Benjamin : `2e27d59..90a1cad`, 39
+commits relus avant envoi (ni `packaging/`, ni branche `vague/`, ni secret, ni nom de client),
+plus `90a1cad`, recette d'une autre session commitée pendant la relecture et relue après coup.**
+Crochet `pre-push` passé sur `90a1cad`. `sauvegarde/main` reste à `2e27d59`.
 Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.13` dans
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-dolibarr-1.8.15.sh retour` dans `_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`, puis
@@ -111,7 +114,8 @@ rattache chaque réponse à son projet sans dépendre de l'ordre. Relevé local,
   Chiffre lu sur les tâches, non recompté depuis les écritures.
 - Un appel a rendu « Connection closed » vers 10:33 ; une autre session a eu la même erreur sur
   `list_actions_open` à 10:32:45, et l'autre processus du connecteur journalise des délais de
-  connexion vers Dolibarr à 10:32 et 10:33. Relancé, l'appel a abouti. Non imputé à la 1.8.15.
+  connexion vers Dolibarr à 10:32 et 10:33. Poste sur un Wi-Fi de train (section précédente).
+  Relancé, l'appel a abouti. Non imputé à la 1.8.15.
 
 ## Fusion et installation du 06/11/2026
 
@@ -234,7 +238,7 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 4. Fait le 06/11/2026 : 20 des 117 projets portent 52 tâches et 504,25 h, les 97 autres sont vides
    et certifiés. Voir « Mesure du 06/11/2026 ».
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
-6. Benjamin : décider le push de ce dépôt public.
+6. Fait le 06/11/2026 : `main` poussé sur `origin`. `sauvegarde` non mis à jour.
 
 # Reprise du 06/11/2026 : Nextcloud 1.5.0 recettée en réel, 1.5.1 à installer
 
