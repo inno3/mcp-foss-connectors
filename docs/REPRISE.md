@@ -111,14 +111,60 @@ commit `538cba5`.
 4. **Benjamin** : décider du push de `main`, en avance sur `origin/main`.
 5. Prochaine version Dolibarr : 1.8.17, la 1.8.16 étant prise.
 
-# Lot du 06/11/2026 : WordPress 1.6.1 et HedgeDoc 1.2.1, gabarits `${user_config.x}` non résolus
+# Reprise du 06/11/2026 : WordPress 1.6.1 et HedgeDoc 1.2.1 fusionnées et installées, recette après redémarrage
 
 Cette section prime sur les suivantes pour les réglages de WordPress et HedgeDoc. Worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-06-gabarits-wp-hedgedoc/mcp-foss-connectors`, branche
-`lot/2026-11-06-gabarits-wp-hedgedoc`, partie de `main` `6ef1ed5`. Suivi : KB 262 #8074, liée à
-la #8072 (Nextcloud) dont la recette a trouvé le défaut. **Commité sur la branche du lot
-seulement : ni fusionné, ni installé, ni poussé.** `main` a reçu `ddd8442` (ce document seul)
-pendant le lot.
+`lot/2026-11-06-gabarits-wp-hedgedoc`, partie de `main` `6ef1ed5`, commit `4981c9f`. Suivi :
+KB 262 #8074, liée à la #8072 (Nextcloud) dont la recette a trouvé le défaut. Fusion et
+installation demandées par Benjamin le 06/11/2026.
+
+**Fusionné dans `main` (`1d5ed66`) et installé le 06/11/2026 à 21:25, non poussé.** Les processus
+en cours datent du redémarrage de 21:15 et exécutent encore 1.6.0 et 1.2.0 : la nouvelle version ne
+se charge qu'au prochain redémarrage du client. Sauvegardes `.backup-wordpress-inno3-2026-11-06-v1.6.0`
+et `.backup-hedgedoc-inno3-2026-11-06-v1.2.0` dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`.
+Retour : `bascule.sh wordpress retour` ou `bascule.sh hedgedoc retour` dans
+`_lots_wt/2026-11-06-gabarits-wp-hedgedoc/dist/`, puis redémarrage.
+
+## Fusion et installation du 06/11/2026
+
+- Fusion `--no-ff` préparée dans un worktree détaché, puis `main` avancé en avance rapide seulement :
+  le checkout partagé n'est jamais resté en fusion. `main` ayant reçu `ddd8442`, `2d28d4c` et
+  `ec8150e` pendant le lot, la fusion a été refaite sur `ec8150e`. Seul conflit : ce document, deux
+  zones. En tête, les deux sections gardées, avec le titre renommé par `main` pour la section
+  commune. Dans les actions Nextcloud, la liste de `main`, son point 3 mis à jour. Contrôlé ligne à
+  ligne : aucune ligne perdue de part et d'autre hors ce point 3.
+- Arbre fusionné : 2 002 réussis, 4 ignorés sans garde ; mêmes chiffres sous la garde
+  `pytest_offline_loopback` (`_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`), 0 tentative
+  réseau hors boucle locale ; tests de manifeste et de réglages joués avant les autres : 188 réussis.
+  Ruff, `git diff --check` et JSON des manifestes propres.
+- Bundles construits depuis `main` `1d5ed66` par `dist/construire.py`, repack de l'installé : seuls
+  `manifest.json` et `src/server.py` diffèrent. Manifeste installé conservé (nom, libellés,
+  réglages) ; il gagne la version et, pour WordPress, `"default": ""` sur les deux réglages de
+  sous-sites. Celui de HedgeDoc ne gagne que la version, faute de `hedgedoc_api_token`.
+
+| Bundle | Entrées | sha256 du bundle | sha256 du serveur, identique à `main` et à l'installé |
+|---|---|---|---|
+| `wordpress-inno3-1.6.1.mcpb` | 991 | `c940e53b55c9caa8a21f45e99752834e45a8c37a01a9024112a3057b2efd3daf` | `0a0749de5bf2e361202a8fb07c9f8656545753ab3643c267a0d2e712562b53a8` |
+| `hedgedoc-inno3-1.2.1.mcpb` | 960 | `52f4c8b2baa30aa8e3b26fdea6c2243b168b6a1b8ce09faf10b0f0caffac03b0` | `5a575ab9c11d5991bb349ffbc8462a0a110f1045ba9344dbf9d9e50adefd847f` |
+
+- `bascule.sh` sur copies : `installer` donne une copie identique au bundle, un second `installer`
+  est refusé, `retour` rend une copie identique au témoin hors `__pycache__`. Sur les extensions
+  réelles, `installer` seul : installé identique au bundle, fichier par fichier ; date et taille des
+  deux fichiers de réglages inchangées, contenu non lu.
+- Banc `dist/banc_reglages.py`, python système et `src/lib` de l'extension, sans réseau ni réglage
+  réel. Scénario `client` : ce que le client transmet quand rien n'est renseigné. Sorties
+  `dist/banc-*.json`.
+
+| Scénario | 1.6.0 et 1.2.0 installées | 1.6.1 et 1.2.1 |
+|---|---|---|
+| WordPress, `client` | `WP_*_SUBSITES` en gabarit, deux « JSON invalide » au journal | aucun gabarit transmis, aucun avertissement de sous-sites |
+| WordPress, tout en gabarit | URL rendues en `${user_config...}` | tout vide, onze avertissements nommés |
+| HedgeDoc, `client` | aucun gabarit : défaut latent confirmé | inchangé |
+| HedgeDoc, tout en gabarit | URL et compte en gabarit, connexion tentée | tout vide, aucune connexion, trois avertissements |
+
+- Le scénario `client` WordPress affiche aussi « Vérification TLS DÉSACTIVÉE pour le serveur
+  'test' » : c'est le défaut `"false"` de `wp_test_verify_ssl` relevé plus bas, inchangé.
 
 ## Faits vérifiés le 06/11/2026
 
@@ -166,20 +212,19 @@ pendant le lot.
 
 ## Limites et non vérifié
 
-- Aucun bundle construit, aucune installation : le comportement réel ne sera vérifié qu'après
-  installation et redémarrage du client.
+- Installé mais pas encore chargé : le comportement réel ne sera vérifié qu'après redémarrage du
+  client. Le banc rejoue l'environnement à partir du manifeste, il ne lit pas celui du processus.
 - Hors périmètre, relevé : le manifeste WordPress met `wp_test_verify_ssl` à `"false"` par défaut,
   ce qui désactive la vérification TLS du serveur de test, alors que le code et la description
   visent l'inverse. À arbitrer par Benjamin, non modifié.
 
 ## Prochaines actions
 
-1. Benjamin : accord pour fusionner la branche dans `main` local (conflit attendu sur ce seul
-   document, deux sections en tête à garder).
-2. Construire et installer les bundles WordPress 1.6.1 et HedgeDoc 1.2.1, avec sauvegarde des
-   1.6.0 et 1.2.0, puis redémarrer le client.
-3. Recette : environnement des deux processus sans `${user_config`, journal WordPress sans
-   « JSON invalide », sous-sites inchangés.
+1. Redémarrer le client pour charger WordPress 1.6.1 et HedgeDoc 1.2.1.
+2. Recette : environnement des deux processus sans `${user_config`, journal WordPress sans
+   « JSON invalide », `wordpress_check_connection` et `hedgedoc_me` en lecture seule.
+3. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl`.
+4. Pousser `main` sur `origin` seulement sur demande de Benjamin.
 
 # Recette du lot du 01/11 sur réseau fixe, 06/11/2026 à 17:15, lecture seule : conforme
 
@@ -586,8 +631,8 @@ d'application, volontairement non lu.
 1. Benjamin : choisir les dossiers de `nextcloud_save_dirs`, puis redémarrer. Sans cela, seul
    `~/Downloads` reste autorisé.
 2. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
-3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit fusionné dans `main`
-   le 06/11/2026, voir la section en tête de ce document, KB 262 #8074.
+3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit fusionné dans `main` et installé
+   le 06/11/2026, à charger au redémarrage ; voir la section dédiée plus haut, KB 262 #8074.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée, installée et recettée en réel le 06/11/2026
 
