@@ -286,17 +286,35 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
 6. Fait le 06/11/2026 : `main` poussé sur `origin`. `sauvegarde` non mis à jour.
 
-# Reprise du 06/11/2026 : Nextcloud 1.5.0 recettée en réel, 1.5.1 à installer
+# Reprise du 06/11/2026 : Nextcloud 1.5.1 installée et recettée en réel
 
-Cette section prime sur les suivantes pour Nextcloud. `main` contient la 1.5.0 (`9ff6ab2`) ; la
-1.5.1 corrige le défaut de réglages trouvé par la recette réelle ci-dessous.
+Cette section prime sur les suivantes pour Nextcloud. `main` contient la 1.5.0 (`9ff6ab2`) et la
+1.5.1 (`de84b07`), qui corrige le défaut de réglages trouvé par la recette réelle ci-dessous. Ces
+commits sont sur `origin/main` depuis le push de `6ef1ed5`, fait par une autre session le 06/11.
+
+1.5.1 installée le 06/11 à 10:36 et chargée au redémarrage de 21:15. Sauvegarde
+`.backup-nextcloud-inno3-2026-11-06-v1.5.0`, retour `bascule-nextcloud-1.5.1.sh retour` dans
+`_lots_wt/2026-11-05-nextcloud-download/dist/`, puis redémarrage. Bundle
+`dist/nextcloud-inno3-1.5.1.mcpb` : sha256 `6a37723029057677506d8dcfe0624503d098f1862d43526dfb01db1cc5378028` ;
+serveur sha256 `e63a87cd53ec91dadfcb87957a36c177804030560226f491a44b562c34e91a78`, identique à l'installé.
+
+## Recette réelle de la 1.5.1, 06/11/2026 vers 21:20
+
+- Environnement des processus : `NEXTCLOUD_DOWNLOAD_DIR` et `NEXTCLOUD_SAVE_DIRS` vides, plus
+  aucun `${user_config`, aucun avertissement au journal.
+- PDF de 856 255 octets en relatif, en absolu sous `~/Downloads` et en `~/Downloads/...` : écrit sous
+  `/home/bjean/Downloads`, `size_checks` à 856 255 trois fois, trois empreintes égales à celle de la 1.4.1.
+- `~/Documents` hors racines : refusé, `allowed_roots=["/home/bjean/Downloads"]`, rien écrit.
+- Cible existante sans `overwrite` : refusée avant le réseau. Fichiers de recette mis à la corbeille.
+
+Historique de la 1.5.0 conservé ci-dessous.
 Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
 `lot/2026-11-05-nextcloud-download`. Suivi : KB 262 #8072, qui porte le chemin exact du fichier
 concerné, absent d'ici parce que ce dépôt est public. Commit, fusion et installation demandés par
 Benjamin le 05/11/2026.
 
 La 1.5.0 est installée le 05/11 à 18:39 et chargée au redémarrage du 06/11, processus de 10:15. Une
-extension de bureau ne se recharge pas depuis une session. **Ce dépôt public reste non poussé.** Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
+extension de bureau ne se recharge pas depuis une session. Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
 dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-nextcloud-1.5.0.sh retour` dans `_lots_wt/2026-11-05-nextcloud-download/dist/`, puis
 redémarrage.
@@ -383,21 +401,17 @@ d'application, volontairement non lu.
 
 ## Non vérifié et limites
 
-- **La 1.5.0 n'a jamais parlé au vrai Nextcloud.** Elle ne s'y chargera qu'au redémarrage du
-  client. Selon la réponse du serveur sans `Range`, la copie défaillante donnera soit
-  le PDF entier, soit l'erreur explicite : les deux issues sont couvertes, seul le réel tranchera.
 - La comparaison porte sur la taille et l'ETag, pas sur le contenu.
 - 64 reprises à 32 Ko couvrent environ 2 Mo. Le délai d'un appel d'outil côté client n'a pas été mesuré.
 - `mcp-inno3/nextcloud_mcp` (1.3.0) reste une ancienne lignée, non modifiée.
 
 ## Prochaines actions
 
-1. Installer la 1.5.1 par `dist/bascule-nextcloud-1.5.1.sh installer`, puis redémarrer le client.
-2. Recette : environnement du processus sans `${user_config`, `save_path` absolu sous `~/Downloads`
-   écrit, absolu hors racines refusé avec `allowed_roots`, relatif écrit sous `~/Downloads`.
-3. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
-4. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
-5. WordPress et HedgeDoc : réglages optionnels sans valeur par défaut, à vérifier séparément.
+1. Benjamin : choisir les dossiers de `nextcloud_save_dirs`, puis redémarrer. Sans cela, seul
+   `~/Downloads` reste autorisé.
+2. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
+3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit commité par une autre session
+   en `4981c9f` sur `lot/2026-11-06-gabarits-wp-hedgedoc`, ni fusionné, ni installé.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée, installée et recettée en réel le 06/11/2026
 
