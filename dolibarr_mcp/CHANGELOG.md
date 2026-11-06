@@ -1,5 +1,24 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.17
+
+`dolibarr_list_time_entries` :
+
+- Changement visible : `note` n'est plus rendue par défaut dans `entries`, et
+  `omitted_fields` le signale. Tout lecteur de ce champ doit passer `fields`.
+  `dolibarr_update_time_entry` relit toujours la note et ne l'efface pas.
+- Ajout de `fields`, colonnes séparées par des virgules ou `all`. Une colonne
+  inconnue est refusée avant tout appel. Les totaux et la pagination n'en dépendent
+  pas, et les curseurs déjà émis restent valides.
+- Ajout de `aggregate` : `user`, `project`, `month` ou `year`, qui ne rend que les
+  totaux en heures et en secondes. `limit` y est sans objet et `fields` refusé.
+- Un parcours incomplet est annoncé par `truncated` et `aggregates_complete`.
+  `next_cursor` porte le cumul, la dernière réponse donne donc le total complet.
+- Limite : le périmètre reste une tâche ou un projet, `aggregate="project"` rend une
+  seule ligne.
+- Test adapté : `test_the_entry_id_needed_to_correct_a_line_is_exposed` demande
+  désormais `fields="all"` pour lire la note. Aucun test supprimé.
+
 ## Non publié : 1.8.16
 
 Branche `lot/2026-11-06-dolibarr-actions-balayage`, partie de `main` en 1.8.15.
