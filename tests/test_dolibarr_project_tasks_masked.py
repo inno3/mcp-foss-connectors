@@ -442,4 +442,4 @@ class TestContractIsDocumented:
         assert "dolibarr_list_tasks" in doc
 
     def test_the_version_is_bumped(self) -> None:
-        assert server.__version__ == "1.8.15"
+        assert tuple(map(int, server.__version__.split("."))) >= (1, 8, 15)

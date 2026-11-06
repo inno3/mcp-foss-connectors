@@ -86,7 +86,7 @@ async def test_without_filter_sorts_by_planned_date_then_id(monkeypatch):
     assert endpoint == "agendaevents"
     assert params["sortfield"] == "t.datep,t.id"
     assert params["sortorder"] == "ASC"
-    assert params["sqlfilters"] == "(t.percent:<>:100)"
+    assert params["sqlfilters"] == "(t.percent:>=:0) AND (t.percent:<:100)"
 
 
 async def test_assigned_to_keeps_owner_and_coassigned(monkeypatch):

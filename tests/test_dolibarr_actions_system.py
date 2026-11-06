@@ -56,7 +56,7 @@ async def test_default_excludes_system_or_not_applicable_once(monkeypatch, field
     assert [row["id"] for row in result["actions"]] == ["2"]
     assert result["total"] == result["count"] == result["returned"] == 1
     assert result["excluded_system"] == 1
-    assert result["excluded_system_exact"] is True
+    assert result["excluded_system_exact"] is False
     assert result["total_exact"] is True
 
 
@@ -132,7 +132,7 @@ async def test_filters_before_pagination_with_system_events_filling_the_first_ap
         assert result["total"] == 230
         assert result["count"] == result["returned"] == expected
         assert result["excluded_system"] == 120
-        assert result["excluded_system_exact"] is True
+        assert result["excluded_system_exact"] is False
         assert result["scan_truncated"] is False
         ids.extend(row["id"] for row in result["actions"])
         cursor = result["next_cursor"]
@@ -146,7 +146,7 @@ async def test_filters_before_pagination_with_system_events_filling_the_first_ap
     ([], 0),
     ([_action(1, type="systemauto"), _action(2, percentage="-1")], 2),
 ])
-async def test_empty_result_has_exact_counters(monkeypatch, rows, excluded):
+async def test_empty_result_has_exact_totals(monkeypatch, rows, excluded):
     monkeypatch.setattr(server, "api_get", _pages(rows))
 
     result = json.loads(await server.dolibarr_list_actions_open(limit=3))
@@ -154,7 +154,7 @@ async def test_empty_result_has_exact_counters(monkeypatch, rows, excluded):
     assert result["actions"] == []
     assert result["total"] == result["count"] == result["returned"] == 0
     assert result["excluded_system"] == excluded
-    assert result["excluded_system_exact"] is True
+    assert result["excluded_system_exact"] is False
     assert result["next_cursor"] is None
     assert result["truncated"] is False
 
@@ -213,7 +213,7 @@ async def test_dates_filter_the_api_for_inclusive_whole_days(monkeypatch, kwargs
     assert result["total"] == 0
     assert len(calls) == 1
     filters = calls[0]["sqlfilters"]
-    assert "(t.percent:<>:100)" in filters
+    assert "(t.percent:>=:0)" in filters and "(t.percent:<:100)" in filters
     assert "(t.fk_project:=:12)" in filters
     assert "(t.fk_soc:=:34)" in filters
     assert all(clause in filters for clause in expected)

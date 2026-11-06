@@ -981,6 +981,15 @@ Si le balayage est incomplet, `total` reste nul et `excluded_system_exact=False`
 signale que le compteur d'exclusion est seulement un minimum observé. Chaque
 page recalcule ces compteurs ; il ne faut pas les additionner entre pages.
 
-Le filtrage système reste local pour compter les exclusions et respecter les
-co-assignés. Sans période, l'historique entier est donc encore parcouru dans les
-limites du contrat d'export. Pour une lecture fréquente, fixer une période utile.
+Depuis la 1.8.16, les événements à -1 sont écartés par l'API elle-même
+(`t.percent` de 0 à 99) : la production en comptait plus de 8 600 depuis 2022, que
+la route relit un par un, et l'appel sans filtre dépassait le délai du client. Ils
+ne sont donc plus comptés : par défaut, `excluded_system_exact` vaut toujours
+`False` et `excluded_system_note` le dit. `include_system=True` rend le compte
+exact, au prix de ce balayage long. `type=systemauto` et l'assignation restent
+filtrés localement, pour respecter les co-assignés.
+
+`time_budget` borne le balayage : 20 secondes par défaut, 25 au plus, reprises
+comprises. À l'échéance, la page en cours est annulée et aucune autre n'est
+demandée ; la réponse porte `scan_truncated=true`, `total=null` et une
+`scan_note`. Pour une lecture fréquente, fixer une période utile.
