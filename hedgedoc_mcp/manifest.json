@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "hedgedoc-mcp",
   "display_name": "HedgeDoc",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Connecteur HedgeDoc : lecture, création, mise à jour de notes collaboratives Markdown, historique et recherche.",
   "author": {
     "name": "inno³",
@@ -54,7 +54,8 @@
       "title": "Jeton d'API HedgeDoc",
       "description": "Jeton d'API optionnel, utilisé en en-tête Authorization quand l'instance en expose un. Sans lui, l'authentification passe par login/mot de passe et cookie de session.",
       "required": false,
-      "sensitive": true
+      "sensitive": true,
+      "default": ""
     }
   },
   "tools": [

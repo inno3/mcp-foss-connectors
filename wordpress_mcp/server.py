@@ -41,33 +41,49 @@ mcp = FastMCP("wordpress")
 # Chaque serveur = {url, user, password}
 _SERVER_CONFIGS: dict[str, dict] = {}
 
+# Claude Desktop transmet `${user_config.x}` tel quel quand un réglage optionnel
+# sans valeur par défaut n'est pas renseigné. Constaté le 06/11/2026 sur
+# WP_PROD_SUBSITES et WP_TEST_SUBSITES, que le serveur lisait comme un JSON
+# invalide à chaque démarrage. Le texte entier doit être le gabarit : une valeur
+# qui ne fait que le contenir reste la valeur choisie.
+_UNRESOLVED_SETTING = re.compile(r"\$\{user_config\.[A-Za-z0-9_]+\}")
+
+
+def _setting(name: str, default: str = "") -> str:
+    """Réglage lu dans l'environnement ; un gabarit non résolu vaut non renseigné."""
+    value = os.environ.get(name, default)
+    if _UNRESOLVED_SETTING.fullmatch(value.strip()):
+        logger.warning("%s : gabarit non résolu ignoré : %s", name, value.strip())
+        return default
+    return value
+
 
 def _init_servers() -> None:
     """Initialise les configs serveurs depuis les variables d'environnement."""
     global _SERVER_CONFIGS
     _SERVER_CONFIGS = {
         "prod": {
-            "url": os.environ.get("WP_PROD_URL", "").rstrip("/"),
-            "user": os.environ.get("WP_PROD_USER", ""),
-            "password": os.environ.get("WP_PROD_APP_PASSWORD", ""),
+            "url": _setting("WP_PROD_URL").rstrip("/"),
+            "user": _setting("WP_PROD_USER"),
+            "password": _setting("WP_PROD_APP_PASSWORD"),
             "verify_ssl": True,
             # Pas de Basic Auth serveur en prod
             "server_auth_user": "",
             "server_auth_pass": "",
-            "subsites": _parse_subsites(os.environ.get("WP_PROD_SUBSITES", "")),
+            "subsites": _parse_subsites(_setting("WP_PROD_SUBSITES")),
         },
         "test": {
-            "url": os.environ.get("WP_TEST_URL", "").rstrip("/"),
-            "user": os.environ.get("WP_TEST_USER", ""),
-            "password": os.environ.get("WP_TEST_APP_PASSWORD", ""),
+            "url": _setting("WP_TEST_URL").rstrip("/"),
+            "user": _setting("WP_TEST_USER"),
+            "password": _setting("WP_TEST_APP_PASSWORD"),
             # Vérification TLS active par défaut : opt-out explicite uniquement
             # (l'auth est Basic, un MITM capterait les credentials en clair).
-            "verify_ssl": os.environ.get("WP_TEST_VERIFY_SSL", "1").strip().lower()
+            "verify_ssl": _setting("WP_TEST_VERIFY_SSL", "1").strip().lower()
                           not in ("0", "false", "no", "off"),
             # Basic Auth serveur (Nginx/Apache) si le site de test est protégé
-            "server_auth_user": os.environ.get("WP_TEST_SERVER_AUTH_USER", ""),
-            "server_auth_pass": os.environ.get("WP_TEST_SERVER_AUTH_PASS", ""),
-            "subsites": _parse_subsites(os.environ.get("WP_TEST_SUBSITES", "")),
+            "server_auth_user": _setting("WP_TEST_SERVER_AUTH_USER"),
+            "server_auth_pass": _setting("WP_TEST_SERVER_AUTH_PASS"),
+            "subsites": _parse_subsites(_setting("WP_TEST_SUBSITES")),
         },
     }
     if not _SERVER_CONFIGS["test"]["verify_ssl"]:

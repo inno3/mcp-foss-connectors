@@ -5,6 +5,8 @@ MCP server for the [WordPress](https://wordpress.org/) REST API (+ [ACF](https:/
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
+**Version courante : 1.6.1.** Voir le [CHANGELOG](CHANGELOG.md).
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -18,6 +20,13 @@ environment variables — no host, login or secret is baked into the code.
 | `WP_TEST_SERVER_AUTH_USER` | no | HTTP Basic-Auth user, if the staging site sits behind a reverse-proxy auth. |
 | `WP_TEST_SERVER_AUTH_PASS` | no | HTTP Basic-Auth password for the staging proxy. |
 | `WP_TEST_VERIFY_SSL` | no | Set to `0` to skip TLS verification on the test site (self-signed certs). Default verifies. |
+| `WP_PROD_SUBSITES` | no | JSON declaration of multisite/multilingual subsites, e.g. `{"en": "/en"}`, `{"en": "https://en.example.org"}` or `{"en": {"lang": "en"}}`. Empty = single site. |
+| `WP_TEST_SUBSITES` | no | Same format as `WP_PROD_SUBSITES`, for the test site. |
+
+A value left as an unresolved `${user_config.x}` placeholder counts as unset, with a
+warning in the log that names the variable (1.6.1). Claude Desktop passes the
+placeholder through literally when an optional setting without a default is left
+empty.
 
 ## Tools (34)
 

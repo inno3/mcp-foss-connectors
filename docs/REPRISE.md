@@ -5,6 +5,76 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Lot du 06/11/2026 : WordPress 1.6.1 et HedgeDoc 1.2.1, gabarits `${user_config.x}` non résolus
+
+Cette section prime sur les suivantes pour les réglages de WordPress et HedgeDoc. Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-06-gabarits-wp-hedgedoc/mcp-foss-connectors`, branche
+`lot/2026-11-06-gabarits-wp-hedgedoc`, partie de `main` `6ef1ed5`. Suivi : KB 262 #8074, liée à
+la #8072 (Nextcloud) dont la recette a trouvé le défaut. **Commité sur la branche du lot
+seulement : ni fusionné, ni installé, ni poussé.** `main` a reçu `ddd8442` (ce document seul)
+pendant le lot.
+
+## Faits vérifiés le 06/11/2026
+
+- Claude Desktop transmet `${user_config.x}` tel quel pour un réglage optionnel sans défaut et
+  non renseigné (section Nextcloud ci-dessous).
+- WordPress installé, 1.6.0, `src/server.py` identique à `main` (sha256 `87b2f271...`) :
+  manifeste installé sans défaut pour `wp_prod_subsites` et `wp_test_subsites`. Journal
+  `mcp-server-local.mcpb.inno.wordpress-inno3.log` : 54 lignes « WP subsites JSON invalide,
+  ignoré : ${user_config.wp_..._subsites} », dont celles du démarrage de 10:15. Effet : sous-sites
+  écartés, donc site unique comme voulu, mais avertissement trompeur à chaque démarrage, sans le
+  nom de la variable, indistinct d'une vraie déclaration mal formée.
+- HedgeDoc installé, 1.2.0, `src/server.py` identique à `main` (sha256 `d68846f8...`) : le
+  manifeste installé ne déclare ni `hedgedoc_api_token` ni `HEDGEDOC_API_TOKEN`. Le défaut y est
+  **latent** : il ne touche qu'un bundle construit depuis le manifeste du dépôt.
+- Mesuré par les tests rouges sur le code de `main` : avec le jeton en gabarit, HedgeDoc envoie
+  `Authorization: Bearer ${user_config.hedgedoc_api_token}` tant qu'aucune session n'est ouverte,
+  et tente une connexion avant chaque requête en mode anonyme.
+- Les manifestes installés diffèrent du dépôt par le nom (`-inno3`), les libellés et les
+  descriptions d'outils : surcouche de construction, connue. Seul le numéro de version a été
+  comparé pour numéroter : 1.6.0 et 1.2.0 installées, d'où 1.6.1 et 1.2.1.
+
+## Livré, commit du lot
+
+- Manifestes : `"default": ""` sur `wp_prod_subsites`, `wp_test_subsites`, `hedgedoc_api_token`.
+- Serveurs : `_setting()` lit chaque réglage ; un texte qui est entièrement un gabarit vaut non
+  renseigné, avec l'avertissement « NOM : gabarit non résolu ignoré ». Une valeur qui ne fait que
+  contenir le gabarit est gardée. `WP_TEST_VERIFY_SSL` en gabarit reprend son défaut, vérification
+  active.
+- `tests/test_manifests.py` : `KNOWN_OPTIONAL_WITHOUT_DEFAULT` vide, plus aucune exception admise.
+- Nouveaux : `tests/test_wordpress_config.py`, `tests/test_hedgedoc_config.py`, import dans un
+  processus séparé ; les variables jouées sont lues dans le manifeste. `CHANGELOG.md` créés pour
+  les deux connecteurs, README complétés (WordPress : `WP_*_SUBSITES` manquaient au tableau).
+- Aucun outil, paramètre ni champ de réponse modifié.
+
+## Contrôles du 06/11/2026
+
+- Tests rouges d'abord : 5 échecs, 7 réussis sur les deux nouveaux fichiers ; puis 2 échecs sur
+  `test_optional_settings_passed_to_env_have_a_default` (HedgeDoc, WordPress) une fois la dette
+  retirée de `test_manifests.py`.
+- Final : 2 002 réussis, 4 ignorés, `ruff check` propre, `git diff --check` propre. Suite lancée
+  sans garde réseau.
+- Préexistant sur `main`, non corrigé : `test_hedgedoc.py::TestHelpers::test_extract_note_id_strips_base_and_anchor`
+  échoue si `test_manifests.py` est joué avant lui (son `HEDGEDOC_URL=x` est lu au premier
+  import). L'ordre alphabétique de la suite complète ne le déclenche pas.
+
+## Limites et non vérifié
+
+- Aucun bundle construit, aucune installation : le comportement réel ne sera vérifié qu'après
+  installation et redémarrage du client.
+- Hors périmètre, relevé : le manifeste WordPress met `wp_test_verify_ssl` à `"false"` par défaut,
+  ce qui désactive la vérification TLS du serveur de test, alors que le code et la description
+  visent l'inverse. À arbitrer par Benjamin, non modifié.
+
+## Prochaines actions
+
+1. Benjamin : accord pour fusionner la branche dans `main` local (conflit attendu sur ce seul
+   document, deux sections en tête à garder).
+2. Construire et installer les bundles WordPress 1.6.1 et HedgeDoc 1.2.1, avec sauvegarde des
+   1.6.0 et 1.2.0, puis redémarrer le client.
+3. Recette : environnement des deux processus sans `${user_config`, journal WordPress sans
+   « JSON invalide », sous-sites inchangés.
+
 # Recette du lot du 01/11 sur réseau fixe, 06/11/2026 à 17:15, lecture seule : conforme
 
 Cette section clôt la recette des quatre correctifs relevés le 30/10 et prime sur la suivante,
@@ -410,8 +480,8 @@ d'application, volontairement non lu.
 1. Benjamin : choisir les dossiers de `nextcloud_save_dirs`, puis redémarrer. Sans cela, seul
    `~/Downloads` reste autorisé.
 2. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
-3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit commité par une autre session
-   en `4981c9f` sur `lot/2026-11-06-gabarits-wp-hedgedoc`, ni fusionné, ni installé.
+3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit fusionné dans `main`
+   le 06/11/2026, voir la section en tête de ce document, KB 262 #8074.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée, installée et recettée en réel le 06/11/2026
 
