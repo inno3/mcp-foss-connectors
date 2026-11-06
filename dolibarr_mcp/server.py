@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.15"
+__version__ = "1.8.16"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -510,11 +510,14 @@ def _unique_rows(rows: list, identity: str = "") -> list:
     return result
 
 
-async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None) -> ExportRows:
+async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None,
+                     deadline: float | None = None) -> ExportRows:
     """Lit des pages stables jusqu'à la fin, sans certifier un parcours interrompu.
 
     Les routes sans pagination ne doivent pas passer par ce helper.
     Une API qui ignore page est détectée au premier lot sans nouvel ID.
+    deadline, sur l'horloge time.monotonic, annule la page en cours à
+    l'échéance et n'en demande plus aucune : le résultat est rendu incomplet.
     """
     fetch = fetch or _api_get_list
     base = dict(params or {})
@@ -528,7 +531,21 @@ async def _scan_list(endpoint: str, params: dict | None = None, *, fetch=None) -
     result = ExportRows()
     fingerprints = set()
     for page in range(EXPORT_SCAN_MAX_PAGES):
-        chunk = await fetch(endpoint, dict(base, page=page))
+        if deadline is None:
+            chunk = await fetch(endpoint, dict(base, page=page))
+        else:
+            try:
+                if time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError
+                chunk = await asyncio.wait_for(
+                    fetch(endpoint, dict(base, page=page)), max(0, deadline - time.monotonic()),
+                )
+            except asyncio.TimeoutError:
+                if time.monotonic() < deadline:
+                    raise
+                result.complete = False
+                result.scan_note = "Budget de temps atteint. Restreindre les filtres."
+                return result
         if not isinstance(chunk, list):
             raise ValueError("Export invalide : la route ne renvoie pas une liste.")
         fingerprint = _dumps(chunk)
@@ -4651,6 +4668,7 @@ async def dolibarr_list_actions_open(
     include_system: bool=False,
     date_from: str='',
     date_to: str='',
+    time_budget: float = 20.0,
 ) -> str:
     """Liste les actions ouvertes (agenda, CR, suivi) dans Dolibarr.
 
@@ -4659,7 +4677,8 @@ async def dolibarr_list_actions_open(
 
     Retourne les actions dont percent diffère de 100, triées par date prévue
     ascendante puis par identifiant. Par défaut, exclut type=systemauto et
-    percent=-1 (sans objet), qui ne sont pas des tâches ouvertes.
+    percent=-1 (sans objet), qui ne sont pas des tâches ouvertes : les
+    événements à -1 sont écartés par l'API elle-même (percent de 0 à 99).
     Utile pour le suivi des engagements client et des actions projet.
 
     Paramètres :
@@ -4670,15 +4689,24 @@ async def dolibarr_list_actions_open(
       revient à son auteur. Ce filtre s'applique après le balayage.
     - limit : nombre max de résultats (défaut 20, max 100)
     - include_system : inclure aussi les événements automatiques ou sans objet
-      (défaut faux), sans inclure les actions terminées à 100.
+      (défaut faux), sans inclure les actions terminées à 100. Sans autre
+      filtre, le périmètre dépasse 8 600 événements depuis 2022 : le balayage
+      s'arrête alors au budget de temps et rend un résultat partiel.
     - date_from, date_to : dates prévues YYYY-MM-DD, facultatives et inclusives.
       Filtrent t.datep côté API, du début au dernier instant du jour selon le
       calendrier du serveur. Une borne seule est acceptée.
+    - time_budget : secondes allouées au balayage, reprises comprises (20 par
+      défaut, 25 au plus). À l'échéance, la page en cours est annulée, aucune
+      autre n'est demandée, et la réponse porte scan_truncated=true, total=null
+      et scan_note. time_budget et elapsed_seconds sont rendus.
 
     excluded_system compte les événements écartés dans le périmètre des filtres,
     après assignation et avant pagination (0 avec include_system=true).
     excluded_system_exact est faux si le balayage est incomplet ; le compteur
-    est alors un minimum observé. total porte uniquement sur les lignes retenues.
+    est alors un minimum observé. Il est aussi toujours faux par défaut : les
+    événements à -1, écartés par l'API, n'y sont pas comptés, ce que dit
+    excluded_system_note. Seul include_system=true donne un compte exact.
+    total porte uniquement sur les lignes retenues.
 
     Retourne : id, label, code type, tiers, projet, date prévue, progression,
     porteur (assigned_to) et tous les assignés (assigned_users).
@@ -4695,6 +4723,12 @@ async def dolibarr_list_actions_open(
                     raise ValueError(f"Format {name} invalide. Attendu : YYYY-MM-DD.") from None
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from doit précéder ou égaler date_to.")
+        import math
+
+        if not math.isfinite(time_budget) or time_budget <= 0:
+            raise ValueError("time_budget doit être un nombre positif fini.")
+        budget = min(float(time_budget), 25.0)
+        started = time.monotonic()
 
         params: dict[str, Any] = {
             "sortfield": "t.datep",
@@ -4702,9 +4736,13 @@ async def dolibarr_list_actions_open(
             "limit": _clamp_limit(limit),
         }
 
-        # Conserver les événements sans objet dans le balayage permet de
-        # compter les exclusions sans lancer un second parcours distant.
-        sql_parts: list[str] = ["(t.percent:<>:100)"]
+        # La route relit chaque ligne, et les événements sans objet (-1) se
+        # comptent par milliers : le 06/11/2026, les garder dans le balayage
+        # pour les compter faisait dépasser le délai du client.
+        sql_parts: list[str] = (
+            ["(t.percent:<>:100)"] if include_system
+            else ["(t.percent:>=:0)", "(t.percent:<:100)"]
+        )
         if project_id:
             sql_parts.append(f"(t.fk_project:=:{project_id})")
         if thirdparty_id:
@@ -4715,7 +4753,7 @@ async def dolibarr_list_actions_open(
             sql_parts.append(f"(t.datep:<=:'{date_to} 23:59:59')")
         params["sqlfilters"] = " AND ".join(sql_parts)
 
-        actions = await _scan_list("agendaevents", params)
+        actions = await _scan_list("agendaevents", params, deadline=started + budget)
 
         if not isinstance(actions, list):
             return _dumps(_export_payload({"count": 0, "actions": [], "excluded_system": 0, "excluded_system_exact": False}, "actions", limit, cursor, scan=actions))
@@ -4753,11 +4791,21 @@ async def dolibarr_list_actions_open(
                 "fulldayevent": a.get("fulldayevent"),
             })
 
-        return _dumps(_export_payload({
+        payload = {
             "count": len(results), "actions": results,
             "excluded_system": excluded_system,
-            "excluded_system_exact": getattr(actions, "complete", True),
-        }, "actions", limit, cursor, scan=actions))
+            "excluded_system_exact": include_system and getattr(actions, "complete", True),
+            "time_budget": budget,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+        if not include_system:
+            payload["excluded_system_note"] = (
+                "Les événements sans objet (percent=-1) sont écartés par l'API et ne "
+                "sont pas comptés : excluded_system ne compte que les événements "
+                "systemauto lus. include_system=true donne le compte exact, au prix "
+                "d'un balayage long."
+            )
+        return _dumps(_export_payload(payload, "actions", limit, cursor, scan=actions))
 
     except Exception as exc:
         return _format_error(exc)

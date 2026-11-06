@@ -1,5 +1,29 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.16
+
+Branche `lot/2026-11-06-dolibarr-actions-balayage`, partie de `main` en 1.8.15.
+
+Défaut constaté en réel le 06/11/2026, en 1.8.15, en lecture seule :
+`dolibarr_list_actions_open` sans filtre rendait « Request timed out ». Le balayage
+continuait après l'abandon du client (deux `ConnectTimeout` vers l'instance dans le
+journal), et un appel limité à deux mois échouait dans la foulée. Avec un projet ou
+un mois, l'appel répondait en 4 secondes.
+
+- Cause : `percent<>100` gardait les événements sans objet à -1, plus de 8 600
+  depuis 2022, que la route relit un par un, pour les compter puis les écarter
+  localement.
+- Par défaut, l'API filtre `t.percent` de 0 à 99. `excluded_system_exact` vaut
+  donc toujours `False` hors `include_system=True`, et la réponse porte
+  `excluded_system_note`. `include_system=True` garde l'ancien périmètre.
+- Ajout additif de `time_budget` (20 s par défaut, 25 au plus) et des clés
+  `time_budget` et `elapsed_seconds`. `_scan_list` accepte une échéance : la page en
+  cours est annulée, aucune autre n'est demandée, et le résultat est rendu
+  incomplet. Les autres balayages n'ont pas d'échéance.
+- Cinq assertions des tests existants changent avec le contrat : le compteur exact
+  par défaut et le filtre `<>100`. Le test de version du lot 1.8.15 vérifie
+  désormais un minimum.
+
 ## Non publié : 1.8.15
 
 Branche `lot/2026-11-05-dolibarr-taches-masquees`, partie de la 1.8.13 : la 1.8.14
