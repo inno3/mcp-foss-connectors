@@ -5,7 +5,7 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Recette du lot du 01/11, 06/11/2026 de 10:30 à 10:45, lecture seule, sur Wi-Fi de train
+# Recette du lot du 01/11, 06/11/2026 de 10:30 à 11:46, lecture seule, sur Wi-Fi de train
 
 Cette section ne couvre que les quatre correctifs relevés le 30/10, branche
 `lot/2026-11-01-correctifs-connecteurs`, fusionnée depuis. Elle ne remplace pas la section
@@ -42,14 +42,30 @@ Non concluant sur ce lien, à rejouer sur un réseau stable :
 Constat indépendant du réseau : la route `agendaevents` ne porte que des événements
 automatiques, les actions de suivi sont dans `dolibarr_list_meetingnotes_actions`.
 
-Piste Kanboard, hypothèse non mesurée : le 262 est à la fois le tableau le plus utile (Action
-Benjamin, Suspens, Backlog) et le plus lourd. `getBoard` rend aussi les cartes fermées ;
-`getAllTasks` sur les seules cartes actives porte `column_id` et `swimlane_id` et coûterait
-probablement moins.
+## Rejeu de 11:32 à 11:46, même lien
 
-Suite : rejouer les quatre lectures non concluantes sur un réseau stable. Si
-`list_actions_open` dépasse encore 60 s, filtrer les événements système côté serveur plutôt
-qu'après balayage.
+Le poste était toujours sur le Wi-Fi du train (poignée TLS de 3 à 10 s vers `deb.debian.org`).
+Durées lues dans le journal du client.
+
+- `list_actions_open` sans filtre : délai dépassé à nouveau. Avec `date_from="2026-10-01"`,
+  filtre côté serveur (`t.datep:>=`) : réponse en 5 s, balayage complet, 344 événements système
+  écartés, 0 action réelle. Le coût vient du parcours de tout l'historique. `assigned_to=5` seul
+  n'a pas été rejoué : il parcourt le même ensemble, le filtre s'appliquant après coup.
+- `kanboard_my_overdue(with_columns=True)` en 22 s : seul le 262 reste hors budget, 36 cartes
+  non résolues, le 283 est résolu. `kanboard_get_board(262)` seul : 54 s.
+  `kanboard_list_tasks(262)`, donc `getAllTasks` : plus de 60 s. La piste notée à 10:45, lire
+  le 262 par `getAllTasks` plutôt que par `getBoard`, n'apporte rien sur ce lien : abandonnée.
+- `check_missing_carnets(since="2026-10-01")` : délai dépassé à nouveau.
+- `caldav_list_events` compact : délai dépassé sur le 30/10 au 04/11, puis sur la seule journée
+  du 06/11. La forme compacte n'est donc pas en cause. La session du lot CalDAV mesure ce même
+  matin une liste d'un jour en 2 min 21 s et note Bluemind dégradé depuis 09:48. Taille compacte
+  toujours non mesurée en réel.
+
+Suite : sur un réseau stable et un Bluemind rétabli, rejouer `list_actions_open` sans filtre,
+`check_missing_carnets`, `caldav_list_events` compact (taille sous 20 000 caractères) et
+`kanboard_my_overdue(with_columns=True)`. Si `list_actions_open` dépasse encore 60 s, borner
+par défaut le parcours dans le temps ou filtrer les événements système côté serveur. Si le 262
+ne tient pas dans 20 s, le budget seul ne suffira pas : son tableau entier est le coût.
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée, installée et recettée en réel
 
