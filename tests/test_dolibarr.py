@@ -1909,7 +1909,7 @@ class TestListTimeEntries:
     async def test_the_entry_id_needed_to_correct_a_line_is_exposed(self) -> None:
         with patch("dolibarr_mcp.server.api_get", new_callable=AsyncMock) as get:
             get.return_value = [_entry(2264)]
-            data = json.loads(await dolibarr_list_time_entries(task_id=42))
+            data = json.loads(await dolibarr_list_time_entries(task_id=42, fields="all"))
 
         entry = data["entries"][0]
         assert entry["entry_id"] == 2264

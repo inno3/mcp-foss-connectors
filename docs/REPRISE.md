@@ -5,6 +5,91 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
+
+Cette section prime sur les suivantes pour ce lot. Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-05-dolibarr-temps-agregats/mcp-foss-connectors`, branche
+`lot/2026-11-05-dolibarr-temps-agregats`. Demandé par Benjamin le 05/11/2026, intégration, installation,
+recette et fusion validées par lui le 06/11/2026. Ce dépôt public reste non poussé.
+
+## Historique du lot
+
+- Développé le 05/11/2026 comme 1.8.14 sur la 1.8.13, jamais installé ni fusionné sous ce numéro.
+- Le 06/11/2026, les lots voisins 1.8.15 (tâches masquées) et 1.8.16 (actions ouvertes) étaient
+  fusionnés et installés : le lot a été commité, rebasé sur la 1.8.16 (repère local
+  `repere/avant-rebase-1.8.17` sur le commit d'origine) et renuméroté 1.8.17, au-dessus de l'installé.
+
+## Livré
+
+Sur `dolibarr_list_time_entries`, détail dans `dolibarr_mcp/CHANGELOG.md`, section 1.8.17 :
+`aggregate` (`user`, `project`, `month`, `year`) ne rend que les totaux ; `fields` choisit les colonnes,
+`all` les rend toutes ; `note` retirée par défaut et signalée par `omitted_fields`.
+
+Correction d'intégration : la sortie `aggregate` rendait ses totaux avant la vérification des tâches
+masquées de la 1.8.15, et aurait certifié un projet dont des tâches peuvent manquer. Elle porte
+désormais `task_discovery` et `tasks_warning`, et `aggregates_complete` reste faux avec
+`reason="tasks_unverified"`, sans `next_cursor`, y compris à la reprise d'un curseur. Six tests dans
+`tests/test_dolibarr_project_tasks_masked.py`, quatre vus rouges avant la correction.
+
+## Décisions prises dans ce lot
+
+- Le cumul d'un agrégat voyage dans `next_cursor` : la dernière réponse donne le total complet, l'appelant
+  n'additionne rien. Plafond du curseur porté à 16 384 caractères en agrégat, 2 048 inchangé en liste.
+- `task_limit` garde son défaut de 20 en agrégat : un projet plus grand demande plusieurs appels, annoncés.
+- `fields` avec `aggregate`, colonne inconnue et axe inconnu sont refusés avant tout appel.
+- Le retrait de `note` se fait à la sortie de l'outil, pas dans `_format_time_entry` : la correction
+  d'une écriture relit la note et ne doit pas l'effacer.
+- Le test de schéma de la 1.8.15 admet `aggregate` et `fields` après les paramètres existants, à
+  condition qu'ils soient facultatifs.
+
+## Contrôles
+
+- 05/11/2026 : tests rouges d'abord (41 sur 42), puis 1 945 réussis. Forme réelle lue en 1.8.13 sur la
+  tâche 482 : `task_ref` nul, `project_id` et `project_ref` renseignés, reprise par le jeu de test.
+- 06/11/2026, après rebase sur la 1.8.16 et correction : 2 050 réussis, 4 ignorés, ruff et
+  `git diff --check` propres. Suite de `inno3-mcp-extensions` contre ce worktree : 522 réussis.
+- Aucun lecteur de `note` trouvé dans `inno3-mcp-extensions`, `dev_bje`, `mcp-inno3`, la mémoire ni les
+  tâches planifiées ; la recette de la route d'agrégat du 06/11 n'en lit pas.
+
+## Installation et recette réelle du 06/11/2026, lecture seule
+
+Installé à chaud selon RELEASE 4bis : `src/server.py` du commit de fusion du lot et la seule `version`
+du manifeste (113 outils inchangés). Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.16`
+dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Candidat vérifié d'abord par
+`scripts/check_mcp_stdio.py` sous `/usr/bin/python3` : 1.8.17, 113 outils, stderr vide.
+
+Recette faite avant tout redémarrage du client : le `server.py` installé a été lancé dans un second
+processus, avec la seule URL et la seule clef du processus du client, sans les afficher, et n'a
+appelé que `dolibarr_list_time_entries`. Les processus du client restent en 1.8.16 jusqu'au prochain
+redémarrage.
+
+| Appel | Résultat |
+|---|---|
+| `initialize`, `tools/list` | 1.8.17, 113 outils, `aggregate` et `fields` facultatifs, rien de requis |
+| tâche 482, liste et `aggregate="user"` | 50 écritures ; `by_user` identique à la liste, 40,52 h pour l'utilisateur 5 |
+| tâche 482, `month`, `year`, `project` | somme de chaque ventilation égale au total de la liste |
+| tâche 482, tailles de réponse | `fields="all"` 15 501 caractères, défaut 13 096, `entry_id,date,hours` 3 022, `aggregate` 318 |
+| projet 13, `aggregate="project"` | 1 h certifiée, tâche retrouvée par `GET tasks` (`project_route` 0, `task_route` 1) |
+| projet 73, `aggregate="month"`, `task_limit=1` | 2 pages par curseur, 140,57 h, mêmes mois qu'en une lecture |
+| axe, colonne inconnus, `fields` avec `aggregate` | refusés par message, sans appel distant |
+
+Non vérifié en réel : un projet de plus de 100 tâches parcouru au budget, pour ne pas charger la
+production ; ce cas n'est couvert que hors ligne.
+
+## Limites
+
+- `aggregate="project"` rend une seule ligne, le périmètre restant une tâche ou un projet. La ventilation
+  entre projets passe par une route d'agrégat côté module Dolibarr interne, en service depuis le
+  06/11/2026 (KB 262 #8070). Son fournisseur côté connecteur reste à écrire, sur la version suivante.
+- Changement visible : un lecteur de `note` sans `fields` ne la reçoit plus.
+
+## Suite ordonnée
+
+1. Fait : installation à chaud et recette réelle ci-dessus.
+2. Fait : fusion dans `main`, non poussée.
+3. Au prochain redémarrage du client, vérifier que les processus Dolibarr annoncent 1.8.17.
+4. Fournisseur de la route d'agrégat dans le connecteur, numéro 1.8.18 au moins (#8070).
+
 # Reprise du 06/11/2026 : Dolibarr 1.8.16 fusionnée, déployée et recettée en réel
 
 Branche `lot/2026-11-06-dolibarr-actions-balayage`, worktree

@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.16"
+__version__ = "1.8.17"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -2024,6 +2024,23 @@ def _format_time_entry(raw: dict) -> dict:
     }
 
 
+_TIME_ENTRY_FIELDS = tuple(_format_time_entry({}))
+# Texte libre, parfois plusieurs paragraphes par ligne : rendu seulement sur
+# demande. La correction d'une écriture relit la note par _fetch_time_entries,
+# que ce retrait ne touche pas : elle ne l'efface donc jamais.
+_TIME_ENTRY_LONG_FIELDS = ("note",)
+_TIME_AGGREGATES = ("user", "project", "month", "year")
+
+
+def _time_group_key(entry: dict, aggregate: str, project_id: int) -> str:
+    """Clef de cumul d'une écriture. Une donnée manquante est nommée, jamais écartée."""
+    if aggregate == "user":
+        return str(entry["user_id"])
+    if aggregate == "project":
+        return entry["project_ref"] or str(entry["project_id"] or project_id or "sans_projet")
+    return entry["date"][:7 if aggregate == "month" else 4] or "sans_date"
+
+
 async def _fetch_time_entries(task_id: int) -> list[dict]:
     """Écritures de temps d'une tâche, normalisées. Liste vide si aucune."""
     raw = await api_get(TIMESPENT_LIST_ENDPOINT.format(task_id=task_id))
@@ -2043,6 +2060,8 @@ async def dolibarr_list_time_entries(
     cursor: str = "",
     task_limit: int = 20,
     time_budget: float = 20.0,
+    aggregate: str = "",
+    fields: str = "",
 ) -> str:
     """Liste les temps avec pagination par tache et budget global explicite.
 
@@ -2067,7 +2086,27 @@ async def dolibarr_list_time_entries(
     des tâches lues dans cet appel. scan_truncated signale ces agrégats partiels,
     même en dernière page. offset compte les écritures rendues avant cette page.
 
-    Chaque ligne expose entry_id, task_id, date, hours, seconds, user_id et note.
+    Colonnes : fields les liste, separees par des virgules, parmi entry_id,
+    task_id, task_ref, task_label, project_id, project_ref, date, datehour,
+    datehour_ts, hours, seconds, user_id, product_id et note. Par defaut toutes
+    sauf note, texte libre parfois long : omitted_fields le signale. Pour la
+    lire, fields="entry_id,date,hours,note" ; fields="all" rend tout. Une colonne
+    inconnue est refusee. fields ne change ni les totaux ni la pagination.
+
+    Totaux seuls : aggregate vaut user, project, month ou year. La reponse rend
+    alors by_user, by_project, by_month ou by_year, sous la forme
+    {clef: {hours, seconds}}, avec total_hours et total_seconds, sans entries ni
+    autre ventilation. limit est sans objet et fields refuse. Mois et annee sont
+    ceux de `date`, en GMT ; une ligne sans date est comptee sous sans_date, un
+    projet sans reference sous son ID. Le perimetre reste une tache ou un
+    projet : aggregate=project rend donc une seule ligne.
+    Tant que truncated est vrai, ces totaux sont partiels : reprendre next_cursor
+    avec les memes filtres. Chaque reponse cumule les pages precedentes, ne pas
+    les additionner ; aggregates_complete dit quand le perimetre est couvert.
+    Il reste faux, sans next_cursor, si des taches du projet peuvent manquer :
+    voir tasks_warning ci-dessous. task_limit=100 reduit le nombre d'appels. Ces totaux passent aussi par le
+    curseur, qui s'allonge avec le nombre de groupes.
+
     Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
 
     Tâches d'un projet : comme dolibarr_list_tasks, projects/{id}/tasks
@@ -2082,6 +2121,7 @@ async def dolibarr_list_time_entries(
     tasks_total=null, total=null, total_exact et aggregates_complete faux,
     reason=tasks_unverified si rien d'autre n'a arrêté le parcours, et
     tasks_warning donne la cause. Les heures rendues sont alors un minimum.
+    Avec aggregate, task_discovery et tasks_warning accompagnent les totaux.
 
     Dates et heures sont en GMT, comme l'API les rend et comme
     dolibarr_log_time les ecrit : `date` est le jour GMT de `datehour`, et
@@ -2100,6 +2140,21 @@ async def dolibarr_list_time_entries(
         invalid = _valid_dates(date_start=date_start, date_end=date_end)
         if invalid:
             return invalid
+        aggregate = aggregate.strip().lower()
+        if aggregate and aggregate not in _TIME_AGGREGATES:
+            return f"aggregate invalide : '{aggregate}'. Valeurs : {', '.join(_TIME_AGGREGATES)}."
+        if aggregate and fields.strip():
+            return "fields est refuse avec aggregate, qui ne rend que des totaux."
+        requested = list(dict.fromkeys(f.strip() for f in fields.split(",") if f.strip()))
+        columns = [c for c in _TIME_ENTRY_FIELDS if c not in _TIME_ENTRY_LONG_FIELDS]
+        if requested == ["all"]:
+            columns = list(_TIME_ENTRY_FIELDS)
+        elif requested:
+            unknown = [f for f in requested if f not in _TIME_ENTRY_FIELDS]
+            if unknown:
+                return (f"fields invalide : {', '.join(unknown)}. "
+                        f"Colonnes : {', '.join(_TIME_ENTRY_FIELDS)}, ou all.")
+            columns = requested
         if not math.isfinite(time_budget) or time_budget <= 0:
             raise ValueError("time_budget doit etre un nombre positif fini.")
         budget = min(float(time_budget), 25.0)
@@ -2107,10 +2162,14 @@ async def dolibarr_list_time_entries(
         capped = _clamp_limit(limit)
         task_limit = max(1, min(int(task_limit), 100))
         scope = [task_id, project_id, user_id, date_start, date_end]
+        if aggregate:
+            scope.append(aggregate)
         current, offset, emitted = 0, 0, 0
+        carried: dict[str, int] = {}
         if cursor:
             try:
-                if len(cursor) > 2048:
+                # Un curseur d'agrégat porte le cumul de chaque groupe, d'où sa taille.
+                if len(cursor) > (16384 if aggregate else 2048):
                     raise ValueError()
                 decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
                 if decoded["v"] != 2 or decoded["scope"] != scope:
@@ -2119,14 +2178,33 @@ async def dolibarr_list_time_entries(
                 emitted = decoded["emitted"]
                 if any(type(v) is not int or v < 0 for v in (current, offset, emitted)):
                     raise ValueError()
+                if aggregate:
+                    carried = decoded["sums"]
+                    if (not isinstance(carried, dict)
+                            or any(type(v) is not int or v < 0 for v in carried.values())):
+                        raise ValueError()
             except (ValueError, KeyError, TypeError, UnicodeError):
                 raise ValueError("Curseur invalide : reprendre next_cursor avec les memes filtres.") from None
 
+        def group_sums() -> dict[str, int]:
+            sums = dict(carried)
+            for entry in scanned_entries:
+                key = _time_group_key(entry, aggregate, project_id)
+                sums[key] = sums.get(key, 0) + (entry["seconds"] or 0)
+            return sums
+
         def next_token(tid: int, position: int) -> str:
-            return base64.urlsafe_b64encode(json.dumps({
+            state: dict[str, Any] = {
                 "v": 2, "scope": scope, "task": tid, "offset": position,
                 "emitted": emitted + len(entries),
-            }, separators=(",", ":")).encode()).decode()
+            }
+            if aggregate:
+                # Chaque tâche n'est lue qu'une fois : le cumul suit le curseur,
+                # et emitted y compte les écritures cumulées, aucune n'étant rendue.
+                state.update(emitted=emitted + len(scanned_entries), sums=group_sums())
+            return base64.urlsafe_b64encode(json.dumps(
+                state, separators=(",", ":"),
+            ).encode()).decode()
 
         async def read(awaitable):
             return await asyncio.wait_for(awaitable, max(0, deadline - time.monotonic()))
@@ -2173,6 +2251,8 @@ async def dolibarr_list_time_entries(
                             and (not date_end or (e["date"] and e["date"] <= date_end))]
             task_entries = sorted(_unique_rows(task_entries, identity="entry_id"), key=lambda e: e["entry_id"] or 0)
             scanned_entries.extend(task_entries)
+            if aggregate:
+                continue
             shown = task_entries[position:position + capped - len(entries)]
             entries.extend(shown)
             if position + len(shown) < len(task_entries):
@@ -2182,14 +2262,52 @@ async def dolibarr_list_time_entries(
                 reason, next_cursor = "limit", next_token(remaining_tasks[index + 1], 0)
                 break
 
-        aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
-        if not task_ids and reason is None:
-            aggregates_complete = True
         tasks_known = discovery is None or discovery["exact"]
         if not tasks_known:
             # Des tâches peuvent manquer à la liste lue : rien n'est certifié.
-            aggregates_complete = False
             reason = reason or "tasks_unverified"
+
+        if aggregate:
+            sums = group_sums()
+            seconds_total = sum(sums.values())
+            complete = next_cursor is None and tasks_known
+            totals = {
+                "task_id": task_id or None, "project_id": project_id or None,
+                "aggregate": aggregate,
+                "tasks_scanned": scanned,
+                "tasks_total": None if not tasks_known or (not task_ids and reason is not None) else len(task_ids),
+                "matched": emitted + len(scanned_entries),
+                "truncated": next_cursor is not None, "next_cursor": next_cursor,
+                "reason": reason or "complete", "time_budget": budget,
+                "elapsed_seconds": round(time.monotonic() - (deadline - budget), 3),
+                "aggregates_complete": complete,
+                "total_hours": _seconds_to_hours(seconds_total), "total_seconds": seconds_total,
+                f"by_{aggregate}": {k: {"hours": _seconds_to_hours(v), "seconds": v}
+                                    for k, v in sorted(sums.items())},
+            }
+            if discovery is not None:
+                totals["task_discovery"] = discovery
+            if tasks_warning:
+                totals["tasks_warning"] = tasks_warning
+            if error:
+                totals["scan_error"] = error
+            if next_cursor is not None:
+                totals["scan_note"] = (
+                    "Totaux partiels : reprendre next_cursor avec les mêmes filtres. "
+                    "Chaque réponse cumule les précédentes, ne pas les additionner."
+                )
+            elif not complete:
+                totals["scan_note"] = (
+                    "Tâches du projet non certifiées : voir tasks_warning. "
+                    "Ces totaux sont un minimum."
+                )
+            return _dumps(totals)
+
+        aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
+        if not task_ids and reason is None:
+            aggregates_complete = True
+        if not tasks_known:
+            aggregates_complete = False
         by_user, by_task = {}, {}
         for entry in scanned_entries:
             seconds = entry["seconds"] or 0
@@ -2213,8 +2331,10 @@ async def dolibarr_list_time_entries(
             "total_hours": _seconds_to_hours(total_seconds), "total_seconds": total_seconds,
             "by_user": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_user.items()},
             "by_task": {k: {"hours": _seconds_to_hours(v), "seconds": v} for k, v in by_task.items()},
-            "entries": entries,
+            "entries": [{c: e[c] for c in columns} for e in entries],
         }
+        if not requested:
+            result["omitted_fields"] = list(_TIME_ENTRY_LONG_FIELDS)
         if discovery is not None:
             result["task_discovery"] = discovery
         if tasks_warning:

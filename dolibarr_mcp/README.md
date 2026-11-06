@@ -522,7 +522,7 @@ async def main():
         assert logged["cause"] == "bug_dolibarr_addtimespent", logged
         print("ajout indisponible sur cette version :", logged["cause"]); return
 
-    listed = json.loads(await dolibarr_list_time_entries(task_id=TASK, user_id=USER))
+    listed = json.loads(await dolibarr_list_time_entries(task_id=TASK, user_id=USER, fields="all"))
     entry = next(e for e in listed["entries"] if e["note"] == "test integration")
     assert entry["seconds"] == 5400, entry     # 1,5 h stockée en secondes
     assert entry["hours"] == 1.5, entry
@@ -702,7 +702,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
 | `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet, tâches masquées comprises ; total non certifié si un masquage reste possible |
 | `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
-| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours, note | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues |
+| `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours ; note sur demande par `fields` | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues, totaux seuls par `aggregate` |
 | `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
 | `list_supplier_invoices` | `invoices`, id, ref, ref_supplier, total_ttc, échéance, statut, retard | mêmes statuts, thirdparty_id, search_ref sur les deux références | mêmes bornes et tri que les factures clients |
 | `list_proposals` | `proposals`, id, ref, tiers, total_ht, total_ttc, date_validity, status | status vide tous, 0 brouillon, 1 validé, 2 signé, 3 refusé, 4 facturé, thirdparty_id | Toutes dates, datep décroissante, REST paginé |
@@ -882,6 +882,34 @@ la même lecture : `date_echeance` prime sur `date_lim_reglement`, même quand
 sa valeur est explicitement nulle. Le signal `date_due_is_default` est une
 heuristique (facture + un jour), pas une preuve de l'absence d'accord ; vérifier
 les conditions avant une relance.
+
+### Totaux et colonnes des temps depuis 1.8.17
+
+`dolibarr_list_time_entries` ne rend plus `note` par défaut : ce texte libre peut
+compter plusieurs paragraphes par ligne. `omitted_fields` le signale.
+`fields="entry_id,date,hours,note"` choisit les colonnes, `fields="all"` les rend
+toutes, une colonne inconnue est refusée. La correction d'une écriture relit
+toujours la note, elle ne l'efface pas.
+
+`aggregate` vaut `user`, `project`, `month` ou `year` et ne rend que les totaux :
+`by_user`, `by_project`, `by_month` ou `by_year`, chaque clef portant `hours` et
+`seconds`, plus `total_hours` et `total_seconds`. `limit` y est sans objet et
+`fields` refusé. Le mois et l'année sont ceux de `date`, en GMT. Une ligne sans
+date est comptée sous `sans_date`.
+
+Sur un projet de plus de `task_limit` tâches, ou si le budget s'épuise, la réponse
+est partielle : `truncated` est vrai et `aggregates_complete` faux. `next_cursor`
+porte le cumul, chaque réponse inclut donc les précédentes et les totaux ne
+s'additionnent pas entre pages.
+
+Sur un projet, les tâches sont lues comme en mode liste, masquées comprises (voir
+plus bas, 1.8.15) : `task_discovery` et `tasks_warning` accompagnent les totaux.
+Si des tâches peuvent manquer, `aggregates_complete` reste faux avec
+`reason="tasks_unverified"`, sans `next_cursor` : les totaux sont un minimum.
+
+Limite : le périmètre reste une tâche ou un projet, `aggregate="project"` rend donc
+une seule ligne. Une ventilation entre projets demanderait une requête par tâche de
+toute la base, ou une route d'agrégat côté Dolibarr.
 
 ### Lecture des temps bornée depuis 1.8.2
 

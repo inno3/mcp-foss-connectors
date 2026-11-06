@@ -401,6 +401,81 @@ class TestListTimeEntriesOnMaskedTasks:
         assert second["next_cursor"] is None
 
 
+class TestAggregateOnMaskedTasks:
+    """aggregate (1.8.17) lit les tâches comme la liste et ne certifie pas davantage."""
+
+    async def test_project_13_hours_are_counted_and_certified(self) -> None:
+        fake = FakeDolibarr(task_route=[_task(3)], entries={3: [_entry(4)]})
+        data = await _list_entries(fake, project_id=PROJECT, aggregate="user")
+
+        assert data["by_user"] == {"1": {"hours": 1.0, "seconds": 3600}}
+        assert data["total_hours"] == 1.0
+        assert data["tasks_total"] == 1
+        assert data["aggregates_complete"] is True
+        assert data["reason"] == "complete"
+        assert data["task_discovery"] == {"project_route": 0, "task_route": 1, "exact": True}
+        assert "tasks_warning" not in data
+
+    async def test_an_uncertified_discovery_never_reports_complete_totals(self) -> None:
+        data = await _list_entries(FakeDolibarr(task_error=_http_error(403)),
+                                   project_id=PROJECT, aggregate="project")
+
+        assert data["aggregates_complete"] is False
+        assert data["tasks_total"] is None
+        assert data["reason"] == "tasks_unverified"
+        assert data["truncated"] is False
+        assert data["next_cursor"] is None
+        assert data["total_seconds"] == 0
+        assert "GET tasks" in data["tasks_warning"]
+        assert data["task_discovery"]["exact"] is False
+        assert "tasks_warning" in data["scan_note"]
+        assert "next_cursor" not in data["scan_note"]
+
+    async def test_an_empty_project_stays_uncertified_without_the_thirdparty_right(self) -> None:
+        data = await _list_entries(FakeDolibarr(me=_me(voir=0)), project_id=PROJECT,
+                                   aggregate="month")
+
+        assert data["aggregates_complete"] is False
+        assert data["reason"] == "tasks_unverified"
+        assert data["by_month"] == {}
+
+    async def test_an_empty_project_is_certified_with_the_thirdparty_right(self) -> None:
+        data = await _list_entries(FakeDolibarr(me=_me(voir=1)), project_id=PROJECT,
+                                   aggregate="year")
+
+        assert data["aggregates_complete"] is True
+        assert data["tasks_total"] == 0
+        assert data["total_seconds"] == 0
+
+    async def test_a_cursor_cumulates_recovered_tasks(self) -> None:
+        fake = FakeDolibarr(task_route=[_task(3), _task(8)],
+                            entries={3: [_entry(4)], 8: [_entry(11, 8)]})
+        first = await _list_entries(fake, project_id=PROJECT, aggregate="month", task_limit=1)
+        second = await _list_entries(fake, project_id=PROJECT, aggregate="month", task_limit=1,
+                                     cursor=first["next_cursor"])
+
+        assert first["truncated"] is True
+        assert first["aggregates_complete"] is False
+        assert second["next_cursor"] is None
+        assert second["aggregates_complete"] is True
+        assert second["by_month"] == {"2023-02": {"hours": 2.0, "seconds": 7200}}
+
+    async def test_a_resume_whose_discovery_turns_uncertified_is_not_complete(self) -> None:
+        # Le cumul porté par le curseur ne doit pas passer pour un total certifié
+        # quand la reprise ne retrouve plus les tâches.
+        found = FakeDolibarr(task_route=[_task(3), _task(8)],
+                             entries={3: [_entry(4)], 8: [_entry(11, 8)]})
+        first = await _list_entries(found, project_id=PROJECT, aggregate="user", task_limit=1)
+        lost = FakeDolibarr(task_error=_http_error(503))
+        second = await _list_entries(lost, project_id=PROJECT, aggregate="user", task_limit=1,
+                                     cursor=first["next_cursor"])
+
+        assert second["aggregates_complete"] is False
+        assert second["reason"] == "tasks_unverified"
+        assert second["total_seconds"] == 3600
+        assert "tasks_warning" in second
+
+
 class TestDeleteProjectDiagnostic:
     async def _delete(self, fake: FakeDolibarr) -> dict:
         with patch("dolibarr_mcp.server.api_get", new=AsyncMock(side_effect=fake.get)), \
@@ -424,9 +499,13 @@ class TestContractIsDocumented:
     def test_input_schemas_are_unchanged(self) -> None:
         assert list(inspect.signature(dolibarr_list_tasks).parameters) == [
             "project_id", "assigned_to", "limit", "cursor"]
-        assert list(inspect.signature(dolibarr_list_time_entries).parameters) == [
-            "task_id", "project_id", "user_id", "date_start", "date_end", "limit",
-            "cursor", "task_limit", "time_budget"]
+        before = ["task_id", "project_id", "user_id", "date_start", "date_end", "limit",
+                  "cursor", "task_limit", "time_budget"]
+        params = list(inspect.signature(dolibarr_list_time_entries).parameters.values())
+        assert [p.name for p in params[:len(before)]] == before
+        # La 1.8.17 ajoute aggregate et fields après eux, tous deux facultatifs.
+        assert [p.name for p in params[len(before):]] == ["aggregate", "fields"]
+        assert all(p.default == "" for p in params[len(before):])
 
     @pytest.mark.parametrize("tool", [dolibarr_list_tasks, dolibarr_list_time_entries])
     def test_the_residual_limit_is_documented(self, tool) -> None:
