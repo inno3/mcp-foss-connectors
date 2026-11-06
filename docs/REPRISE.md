@@ -5,7 +5,7 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée et installée, recette réelle après redémarrage
+# Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée, installée et recettée en réel
 
 Cette section prime sur les suivantes pour Dolibarr et la découverte des tâches d'un projet. `main`
 contient le correctif (`2939bb0`) par la fusion `7469de9`. Worktree
@@ -14,12 +14,32 @@ contient le correctif (`2939bb0`) par la fusion `7469de9`. Worktree
 `lot/2026-11-05-dolibarr-temps-agregats`). Suivi : KB 262 #8073, liée à la #8070 dont le commentaire
 2872 a relevé le défaut. Fusion et installation demandées par Benjamin le 06/11/2026.
 
-Installée le 06/11/2026 à 08:29. **Les processus du connecteur datent du 05/11 à 07:42 : ils exécutent
-encore la 1.8.13, et aucun Dolibarr réel n'a vu la 1.8.15. Ce dépôt public reste non poussé.**
+Installée le 06/11/2026 à 08:29, chargée à 10:15 après redémarrage du client, recette réelle
+conforme. **Ce dépôt public reste non poussé.**
 Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.13` dans
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-dolibarr-1.8.15.sh retour` dans `_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`, puis
 redémarrage.
+
+## Recette réelle du 06/11/2026, lecture seule
+
+Processus lancés à 10:15, `__version__ = "1.8.15"`, serveur identique à `main`. Identifiants seuls,
+ce dépôt étant public.
+
+| Appel | Résultat |
+|---|---|
+| `list_tasks`, projet 13 | tâche 3, `total=1` exact, `project_route=0`, `task_route=1` |
+| `list_time_entries`, projet 13, `task_limit=100` | écriture 4, 1 h, `tasks_total=1`, `aggregates_complete=true`, `reason=complete` |
+| `list_tasks`, projet 4, visible | 14 tâches par la seule route projet, `task_route=null` |
+| `list_tasks`, projet 225, vide | `project_route=0`, `task_route=0`, `exact=true` |
+| `list_tasks`, projets 259 et 272 | 2 et 3 tâches retrouvées, `project_route=0` ; 25,33 h sur une tâche du 272 |
+| `list_tasks`, projet 317 | « Project not found », erreur conservée : projet supprimé après le 03/11 |
+
+- `GET tasks?sqlfilters=(t.fk_projet:=:ID)` est accepté par la production, sans 400.
+- Le projet 225, vide et certifié, prouve que `users/info` confirme `societe client voir` pour le
+  compte de la clef : ce droit n'est plus déduit mais lu. Ce projet n'a pas de tiers, que le filtre
+  `search_sale` aurait écarté sans ce droit.
+- Les 259 et 272, récents, montrent que le masquage ne se limite pas aux projets anciens.
 
 ## Fusion et installation du 06/11/2026
 
@@ -111,11 +131,8 @@ Aucun paramètre ni aucune clé retirés, aucun test existant modifié.
 
 ## Non vérifié et limites
 
-- **`GET tasks?sqlfilters=(t.fk_projet:=:13)` n'a jamais été appelé.** La route a répondu sans filtre
-  le 20/08/2026, par appel direct. Production en v23, cœur lu en 24.0.1.
-- Droit `societe client voir` du compte de la clef : déduit du fonctionnement de
-  `tasks/{id}/timespent` (commentaire 2872), non lu. `users/info` peut aussi lui être refusé : tous les
-  projets vides resteraient alors non certifiés.
+- Levé le 06/11/2026 par la recette réelle : le filtre de `GET tasks` est accepté et le droit
+  `societe client voir` est confirmé par `users/info`. Production en v23, cœur lu en 24.0.1.
 - Ampleur : 117 projets sur 222 annoncent zéro tâche, part réellement vide inconnue.
 - Coût : un projet masqué coûte une page de `GET tasks` par centaine de tâches, `Task::fetch` par ligne
   côté serveur, plus `users/info` une fois si le projet est vide.
@@ -134,15 +151,16 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 
 ## Prochaines actions
 
-1. Benjamin : redémarrer le client pour charger la 1.8.15.
-2. Recette en lecture seule après redémarrage, processus postérieur au 06/11/2026 08:29
+1. Fait le 06/11/2026 : redémarrage, processus de 10:15.
+2. Fait le 06/11/2026, conforme : recette en lecture seule, processus postérieur à 08:29
    (`ps -o lstart`) :
    `dolibarr_list_tasks(project_id=13, limit=1)` doit rendre la tâche 3, `task_discovery` avec
    `project_route=0` ; `dolibarr_list_time_entries(project_id=13, limit=1, task_limit=100)` doit
    rendre l'écriture 4, 1 h, `aggregates_complete=true`. Un projet visible (4) : une seule route lue.
    Un projet vide : `exact` vrai si le droit est confirmé, sinon `tasks_warning`.
-3. Si `GET tasks` refuse le filtre (400) : relire la forme acceptée par la v23 avant toute retouche.
-4. Mesurer ensuite les 117 projets à zéro avec la 1.8.15 installée.
+3. Sans objet : `GET tasks` accepte le filtre en production.
+4. Mesurer les 117 projets annoncés à zéro avec la 1.8.15. La route projet ne rend rien pour
+   259 et 272, que la 1.8.13 annonçait donc vides.
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
 6. Benjamin : décider le push de ce dépôt public.
 
