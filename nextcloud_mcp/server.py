@@ -55,26 +55,52 @@ _MAX_FILE_SIZE = 100 * 1024  # 100 KB pour le téléchargement de fichiers texte
 _DEFAULT_LIST_LIMIT = 100
 _MAX_LIST_LIMIT = 1000
 
+def _is_absolute_setting(value: str) -> bool:
+    """Un dossier de réglage doit être absolu ou en `~`.
+
+    Relatif, il se jugerait depuis le répertoire courant du processus, que personne
+    ne choisit. Claude Desktop transmet aussi `${user_config.x}` tel quel quand un
+    réglage optionnel sans valeur par défaut n'est pas renseigné : constaté le
+    06/11/2026, ce texte devenait la racine de téléchargement.
+    """
+    return os.path.isabs(value) or value.startswith("~")
+
+
+def _configured_dir(name: str) -> str:
+    """Dossier lu dans l'environnement, vide s'il n'est pas utilisable."""
+    value = os.environ.get(name, "").strip()
+    if value and not _is_absolute_setting(value):
+        logger.warning("%s : dossier relatif ou gabarit non résolu ignoré : %s", name, value)
+        return ""
+    return value
+
+
+def _configured_int(name: str, default: int) -> int:
+    """Entier lu dans l'environnement : une valeur illisible ne fait pas échouer l'import."""
+    value = os.environ.get(name, "").strip()
+    if value.isdigit():
+        return int(value)
+    if value:
+        logger.warning("%s : valeur non numérique ignorée : %s", name, value)
+    return default
+
+
 # Racine des chemins relatifs de nextcloud_download_file save_path, et première
 # racine autorisée pour une écriture locale. Sans ce garde-fou, le serveur écrase
 # n'importe quel fichier accessible à son utilisateur (~/.ssh/authorized_keys, un
 # .env…) sur simple instruction d'un modèle.
-_NC_DOWNLOAD_DIR = os.environ.get("NEXTCLOUD_DOWNLOAD_DIR") or os.path.join(
+_NC_DOWNLOAD_DIR = _configured_dir("NEXTCLOUD_DOWNLOAD_DIR") or os.path.join(
     os.path.expanduser("~"), "Downloads"
 )
 
 
 def _parse_dir_list(raw: str) -> list[str]:
-    """Découpe une liste de dossiers à la manière de PATH, absolus ou en `~` seulement.
-
-    Un dossier relatif se jugerait depuis le répertoire courant du processus, que
-    personne ne choisit. C'est aussi ce que deviendrait un `${user_config.x}` qu'un
-    client laisserait tel quel.
-    """
+    """Découpe une liste de dossiers à la manière de PATH, absolus ou en `~` seulement."""
     items = [item.strip() for item in (raw or "").split(os.pathsep) if item.strip()]
-    kept = [item for item in items if os.path.isabs(item) or item.startswith("~")]
+    kept = [item for item in items if _is_absolute_setting(item)]
     for ignored in set(items) - set(kept):
-        logger.warning("NEXTCLOUD_SAVE_DIRS : dossier relatif ignoré : %s", ignored)
+        logger.warning("NEXTCLOUD_SAVE_DIRS : dossier relatif ou gabarit non résolu ignoré : %s",
+                       ignored)
     return kept
 
 
@@ -84,7 +110,7 @@ def _parse_dir_list(raw: str) -> list[str]:
 _NC_SAVE_DIRS = _parse_dir_list(os.environ.get("NEXTCLOUD_SAVE_DIRS", ""))
 # Plafond par fichier écrit sur disque, distinct de _MAX_FILE_SIZE qui ne borne
 # que ce qui remonte dans le contexte.
-_MAX_SAVE_BYTES = int(os.environ.get("NEXTCLOUD_MAX_SAVE_BYTES") or 25 * 1024 * 1024)
+_MAX_SAVE_BYTES = _configured_int("NEXTCLOUD_MAX_SAVE_BYTES", 25 * 1024 * 1024)
 # Une requête qui apporte des octets n'est pas un échec. Cette borne n'arrête donc
 # qu'un serveur qui en rendrait quelques-uns à chaque fois, au-delà de ce qu'un
 # appel d'outil peut attendre.
@@ -96,10 +122,10 @@ _MAX_DOWNLOAD_RESUMES = 64
 # (~/.ssh/id_rsa, un .env) vers un dossier Nextcloud éventuellement partagé.
 # Par défaut la même racine que les téléchargements, pour n'avoir qu'un dossier
 # à surveiller.
-_NC_UPLOAD_DIR = os.environ.get("NEXTCLOUD_UPLOAD_DIR") or _NC_DOWNLOAD_DIR
+_NC_UPLOAD_DIR = _configured_dir("NEXTCLOUD_UPLOAD_DIR") or _NC_DOWNLOAD_DIR
 # Plafond par fichier téléversé, toutes sources confondues. Le corps du PUT
 # étant construit en mémoire, ce plafond borne aussi la RAM.
-_MAX_UPLOAD_BYTES = int(os.environ.get("NEXTCLOUD_MAX_UPLOAD_BYTES") or 25 * 1024 * 1024)
+_MAX_UPLOAD_BYTES = _configured_int("NEXTCLOUD_MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
 
 # mimetypes lit les tables du système : sur un hôte minimal (conteneur), les
 # formats bureautiques peuvent manquer et tout finirait en octet-stream. Cette

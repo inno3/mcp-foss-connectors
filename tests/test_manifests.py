@@ -9,6 +9,7 @@ import ast
 import importlib
 import json
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -26,6 +27,15 @@ for var in (
     "HEDGEDOC_API_TOKEN", "GITLAB_URL", "GITLAB_TOKEN",
 ):
     os.environ.setdefault(var, "x")
+
+
+# Claude Desktop transmet `${user_config.x}` tel quel quand un réglage optionnel
+# sans valeur par défaut n'est pas renseigné (constaté le 06/11/2026 sur Nextcloud).
+# Dette connue, relevée le même jour : à résorber connecteur par connecteur.
+KNOWN_OPTIONAL_WITHOUT_DEFAULT = {
+    "hedgedoc_mcp": {"hedgedoc_api_token"},
+    "wordpress_mcp": {"wp_prod_subsites", "wp_test_subsites"},
+}
 
 
 def _server_tool_names(pkg: str) -> set[str]:
@@ -76,6 +86,25 @@ def test_manifest_required_fields(pkg: str) -> None:
     # Every user_config field must carry a description (else the client refuses).
     for key, cfg in m.get("user_config", {}).items():
         assert cfg.get("description"), f"{pkg}: user_config.{key} lacks a description"
+
+
+@pytest.mark.parametrize("pkg", PACKAGES)
+def test_optional_settings_passed_to_env_have_a_default(pkg: str) -> None:
+    manifest_path = ROOT / pkg / "manifest.json"
+    if not manifest_path.exists():
+        pytest.skip(f"{pkg} has no manifest")
+    m = json.loads(manifest_path.read_text())
+    env = m["server"]["mcp_config"].get("env", {})
+    used = {key for value in env.values()
+            for key in re.findall(r"\$\{user_config\.([A-Za-z0-9_]+)\}", value)}
+    missing = {
+        key for key, cfg in m.get("user_config", {}).items()
+        if key in used and not cfg.get("required") and "default" not in cfg
+    }
+    assert missing == KNOWN_OPTIONAL_WITHOUT_DEFAULT.get(pkg, set()), (
+        f"{pkg}: optional settings without a default reach the server as a literal "
+        f"${{user_config.x}}: {sorted(missing)}"
+    )
 
 
 def test_pyproject_scripts_point_at_real_mains() -> None:

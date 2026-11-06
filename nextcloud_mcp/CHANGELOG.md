@@ -1,5 +1,15 @@
 # Historique Nextcloud
 
+## 1.5.1 - 2026-11-06
+
+- Recette réelle de la 1.5.0 : Claude Desktop transmet `${user_config.x}` tel quel
+  quand un réglage optionnel sans valeur par défaut n'est pas renseigné. Le texte
+  devenait la racine de téléchargement, relative au répertoire du processus.
+- Les quatre réglages optionnels concernés portent `"default": ""`.
+- Un dossier configuré relatif ou resté en gabarit est ignoré, avec un avertissement
+  au journal. Un plafond non numérique reprend sa valeur par défaut au lieu de faire
+  échouer l'import du serveur.
+
 ## 1.5.0 - 2026-11-05
 
 - `nextcloud_download_file` lit en flux. Après une coupure, il reprend par une plage

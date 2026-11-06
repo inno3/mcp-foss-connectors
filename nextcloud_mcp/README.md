@@ -5,7 +5,7 @@ MCP server for [Nextcloud](https://nextcloud.com/) via WebDAV (files) and the OC
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
-**Version courante : 1.5.0.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.5.1.** Voir le [CHANGELOG](CHANGELOG.md).
 
 ## Environment variables
 

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "nextcloud-mcp",
   "display_name": "Nextcloud",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Connecteur Nextcloud : fichiers (WebDAV), partages (OCS), recherche, statut utilisateur.",
   "author": {
     "name": "inno³",
@@ -56,21 +56,24 @@
       "title": "Dossier de téléchargement local",
       "description": "Racine des chemins relatifs de nextcloud_download_file, et premier dossier où il peut écrire. Défaut : ~/Downloads.",
       "required": false,
-      "sensitive": false
+      "sensitive": false,
+      "default": ""
     },
     "nextcloud_save_dirs": {
       "type": "string",
       "title": "Autres dossiers d'écriture autorisés",
       "description": "Dossiers supplémentaires où nextcloud_download_file peut écrire (save_path absolu ou en ~), séparés par « : » sous Linux et macOS, « ; » sous Windows. Tout autre emplacement est refusé, pour empêcher d'écraser un fichier arbitraire accessible au serveur : ne pas y mettre le dossier personnel entier. Vide = le seul dossier de téléchargement.",
       "required": false,
-      "sensitive": false
+      "sensitive": false,
+      "default": ""
     },
     "nextcloud_max_save_bytes": {
       "type": "string",
       "title": "Taille maximale d'un fichier écrit sur disque (octets)",
       "description": "Plafond par fichier enregistré localement. Défaut : 26214400 (25 Mo).",
       "required": false,
-      "sensitive": false
+      "sensitive": false,
+      "default": ""
     },
     "nextcloud_upload_dir": {
       "type": "string",
@@ -85,7 +88,8 @@
       "title": "Plafond de téléversement (octets)",
       "description": "Taille maximale d'un fichier envoyé par nextcloud_upload_file, toutes sources confondues. Vide = 26214400 (25 Mo).",
       "required": false,
-      "sensitive": false
+      "sensitive": false,
+      "default": ""
     }
   },
   "tools": [
