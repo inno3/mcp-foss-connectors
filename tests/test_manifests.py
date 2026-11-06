@@ -30,12 +30,10 @@ for var in (
 
 
 # Claude Desktop transmet `${user_config.x}` tel quel quand un réglage optionnel
-# sans valeur par défaut n'est pas renseigné (constaté le 06/11/2026 sur Nextcloud).
-# Dette connue, relevée le même jour : à résorber connecteur par connecteur.
-KNOWN_OPTIONAL_WITHOUT_DEFAULT = {
-    "hedgedoc_mcp": {"hedgedoc_api_token"},
-    "wordpress_mcp": {"wp_prod_subsites", "wp_test_subsites"},
-}
+# sans valeur par défaut n'est pas renseigné (constaté le 06/11/2026 sur Nextcloud
+# et WordPress). Dette relevée le même jour sur HedgeDoc et WordPress, résorbée en
+# HedgeDoc 1.2.1 et WordPress 1.6.1 : plus aucune exception admise.
+KNOWN_OPTIONAL_WITHOUT_DEFAULT: dict[str, set[str]] = {}
 
 
 def _server_tool_names(pkg: str) -> set[str]:

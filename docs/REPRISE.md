@@ -63,12 +63,40 @@ désormais `task_discovery` et `tasks_warning`, et `aggregates_complete` reste f
 1. Construire le bundle depuis l'état commité, l'installer à chaud, le recetter en lecture seule.
 2. Fusionner dans `main`, sans pousser.
 
-# Reprise du 06/11/2026 : Dolibarr 1.8.16, actions ouvertes filtrées par l'API et bornées
+# Reprise du 06/11/2026 : Dolibarr 1.8.16 fusionnée, déployée et recettée en réel
 
 Branche `lot/2026-11-06-dolibarr-actions-balayage`, worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-06-dolibarr-actions-balayage/mcp-foss-connectors`, partie
-de `main` `90a1cad` (1.8.15). Commit `538cba5`. **Ni fusionné ni poussé. L'installé (1.8.16)
-devance donc `main`** : reconstruire depuis `main` ferait revenir le délai dépassé.
+de `main` `90a1cad` (1.8.15). Commit `538cba5`. **Fusionné dans `main` le 06/11/2026 par
+`d62b9d6`, sur accord de Benjamin ; non poussé.** L'installé est identique à `main`.
+
+## Fusion et déploiement du 06/11/2026, 21:25
+
+- Avant fusion : `main` propre, aucun code Dolibarr modifié depuis la base, aucune autre branche
+  non fusionnée en 1.8.16 (la session des agrégats de temps travaille sur une base 1.8.14 non
+  commitée). Diff relu pour ce dépôt public : ni secret, ni trailer, ni nom d'outil privé absent
+  de `main`.
+- Fusion bâtie dans un worktree jetable puis avancée rapide de `main`. Une première tentative a
+  été refusée : `1d5ed66` (gabarits WordPress et HedgeDoc) est arrivé entre-temps. Refaite sur
+  `1d5ed66`, seul conflit `docs/REPRISE.md`, les deux côtés conservés. Suite sur l'arbre fusionné :
+  2 013 réussis, 4 ignorés ; ruff et manifestes conformes.
+- Déploiement : `src/server.py` installé égal à `main` (`0c38131e`), extension égale au `main`
+  d'`inno3-mcp-extensions`, manifeste installé en 1.8.16 sans outil cœur manquant. Les processus
+  de 21:15 chargent déjà ces fichiers : aucun redémarrage requis.
+- `dist/dolibarr-erp-inno3-v2.mcpb` du clone principal était resté en **1.8.9** : remplacé par le
+  bundle 1.8.16 vérifié égal à `main` (sha256 `db5b9239...`), l'ancien gardé sous
+  `dist/dolibarr-erp-inno3-v2-1.8.9.mcpb`.
+- Recette réelle après fusion, lecture seule, sans erreur ni avertissement au journal : actions
+  ouvertes sans filtre en 0,16 s, tiers 189 avec `include_system` (116 événements, 0,49 s),
+  projets, devis et contacts d'un tiers (routes du même balayage, sans échéance), comptes rendus
+  et actions d'un compte rendu.
+- Incident de checkout partagé : un commit de ce document (`8bc726e`, jamais poussé) a embarqué
+  par erreur la modification non commitée d'une session voisine. Il a été défait aussitôt par
+  `git reset --mixed`, la modification rendue intacte à l'arbre de travail ; ce commit ne porte
+  que les lignes de ce lot. Leçon : sur ce checkout, ne committer ce document qu'en indexant
+  ses propres lignes (`git apply --cached`), jamais par `git add` du fichier.
+- Non actualisée : la table « Copies installées sur disque » de la provenance, relevé du 23/10
+  dont toutes les lignes sont périmées (Dolibarr y figure en 1.8.4).
 
 ## Constaté en réel le 06/11/2026, en 1.8.15, lecture seule
 
@@ -137,10 +165,156 @@ commit `538cba5`.
 
 1. Fait le 06/11/2026 à 21:15 : redémarrage du client.
 2. Fait le 06/11/2026 à 21:20, conforme : recette en lecture seule ci-dessus.
-3. **Benjamin** : fusionner ce lot dans `main` (conflit attendu sur `docs/REPRISE.md` et
-   `dolibarr_mcp/CHANGELOG.md` seulement) ; ce dépôt public reste non poussé.
+3. Fait le 06/11/2026 à 21:25 : fusion dans `main` (`d62b9d6`), déploiement et recette conformes.
+4. **Benjamin** : décider du push de `main`, en avance sur `origin/main`.
+5. Prochaine version Dolibarr : 1.8.17, la 1.8.16 étant prise.
 
-# Recette du lot du 01/11, 06/11/2026 de 10:30 à 10:45, lecture seule, sur Wi-Fi de train
+# Reprise du 06/11/2026 : WordPress 1.6.1 et HedgeDoc 1.2.1 fusionnées et installées, recette après redémarrage
+
+Cette section prime sur les suivantes pour les réglages de WordPress et HedgeDoc. Worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-06-gabarits-wp-hedgedoc/mcp-foss-connectors`, branche
+`lot/2026-11-06-gabarits-wp-hedgedoc`, partie de `main` `6ef1ed5`, commit `4981c9f`. Suivi :
+KB 262 #8074, liée à la #8072 (Nextcloud) dont la recette a trouvé le défaut. Fusion et
+installation demandées par Benjamin le 06/11/2026.
+
+**Fusionné dans `main` (`1d5ed66`) et installé le 06/11/2026 à 21:25, non poussé.** Les processus
+en cours datent du redémarrage de 21:15 et exécutent encore 1.6.0 et 1.2.0 : la nouvelle version ne
+se charge qu'au prochain redémarrage du client. Sauvegardes `.backup-wordpress-inno3-2026-11-06-v1.6.0`
+et `.backup-hedgedoc-inno3-2026-11-06-v1.2.0` dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`.
+Retour : `bascule.sh wordpress retour` ou `bascule.sh hedgedoc retour` dans
+`_lots_wt/2026-11-06-gabarits-wp-hedgedoc/dist/`, puis redémarrage.
+
+## Fusion et installation du 06/11/2026
+
+- Fusion `--no-ff` préparée dans un worktree détaché, puis `main` avancé en avance rapide seulement :
+  le checkout partagé n'est jamais resté en fusion. `main` ayant reçu `ddd8442`, `2d28d4c` et
+  `ec8150e` pendant le lot, la fusion a été refaite sur `ec8150e`. Seul conflit : ce document, deux
+  zones. En tête, les deux sections gardées, avec le titre renommé par `main` pour la section
+  commune. Dans les actions Nextcloud, la liste de `main`, son point 3 mis à jour. Contrôlé ligne à
+  ligne : aucune ligne perdue de part et d'autre hors ce point 3.
+- Arbre fusionné : 2 002 réussis, 4 ignorés sans garde ; mêmes chiffres sous la garde
+  `pytest_offline_loopback` (`_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`), 0 tentative
+  réseau hors boucle locale ; tests de manifeste et de réglages joués avant les autres : 188 réussis.
+  Ruff, `git diff --check` et JSON des manifestes propres.
+- Bundles construits depuis `main` `1d5ed66` par `dist/construire.py`, repack de l'installé : seuls
+  `manifest.json` et `src/server.py` diffèrent. Manifeste installé conservé (nom, libellés,
+  réglages) ; il gagne la version et, pour WordPress, `"default": ""` sur les deux réglages de
+  sous-sites. Celui de HedgeDoc ne gagne que la version, faute de `hedgedoc_api_token`.
+
+| Bundle | Entrées | sha256 du bundle | sha256 du serveur, identique à `main` et à l'installé |
+|---|---|---|---|
+| `wordpress-inno3-1.6.1.mcpb` | 991 | `c940e53b55c9caa8a21f45e99752834e45a8c37a01a9024112a3057b2efd3daf` | `0a0749de5bf2e361202a8fb07c9f8656545753ab3643c267a0d2e712562b53a8` |
+| `hedgedoc-inno3-1.2.1.mcpb` | 960 | `52f4c8b2baa30aa8e3b26fdea6c2243b168b6a1b8ce09faf10b0f0caffac03b0` | `5a575ab9c11d5991bb349ffbc8462a0a110f1045ba9344dbf9d9e50adefd847f` |
+
+- `bascule.sh` sur copies : `installer` donne une copie identique au bundle, un second `installer`
+  est refusé, `retour` rend une copie identique au témoin hors `__pycache__`. Sur les extensions
+  réelles, `installer` seul : installé identique au bundle, fichier par fichier ; date et taille des
+  deux fichiers de réglages inchangées, contenu non lu.
+- Banc `dist/banc_reglages.py`, python système et `src/lib` de l'extension, sans réseau ni réglage
+  réel. Scénario `client` : ce que le client transmet quand rien n'est renseigné. Sorties
+  `dist/banc-*.json`.
+
+| Scénario | 1.6.0 et 1.2.0 installées | 1.6.1 et 1.2.1 |
+|---|---|---|
+| WordPress, `client` | `WP_*_SUBSITES` en gabarit, deux « JSON invalide » au journal | aucun gabarit transmis, aucun avertissement de sous-sites |
+| WordPress, tout en gabarit | URL rendues en `${user_config...}` | tout vide, onze avertissements nommés |
+| HedgeDoc, `client` | aucun gabarit : défaut latent confirmé | inchangé |
+| HedgeDoc, tout en gabarit | URL et compte en gabarit, connexion tentée | tout vide, aucune connexion, trois avertissements |
+
+- Le scénario `client` WordPress affiche aussi « Vérification TLS DÉSACTIVÉE pour le serveur
+  'test' » : c'est le défaut `"false"` de `wp_test_verify_ssl` relevé plus bas, inchangé.
+
+## Faits vérifiés le 06/11/2026
+
+- Claude Desktop transmet `${user_config.x}` tel quel pour un réglage optionnel sans défaut et
+  non renseigné (section Nextcloud ci-dessous).
+- WordPress installé, 1.6.0, `src/server.py` identique à `main` (sha256 `87b2f271...`) :
+  manifeste installé sans défaut pour `wp_prod_subsites` et `wp_test_subsites`. Journal
+  `mcp-server-local.mcpb.inno.wordpress-inno3.log` : 54 lignes « WP subsites JSON invalide,
+  ignoré : ${user_config.wp_..._subsites} », dont celles du démarrage de 10:15. Effet : sous-sites
+  écartés, donc site unique comme voulu, mais avertissement trompeur à chaque démarrage, sans le
+  nom de la variable, indistinct d'une vraie déclaration mal formée.
+- HedgeDoc installé, 1.2.0, `src/server.py` identique à `main` (sha256 `d68846f8...`) : le
+  manifeste installé ne déclare ni `hedgedoc_api_token` ni `HEDGEDOC_API_TOKEN`. Le défaut y est
+  **latent** : il ne touche qu'un bundle construit depuis le manifeste du dépôt.
+- Mesuré par les tests rouges sur le code de `main` : avec le jeton en gabarit, HedgeDoc envoie
+  `Authorization: Bearer ${user_config.hedgedoc_api_token}` tant qu'aucune session n'est ouverte,
+  et tente une connexion avant chaque requête en mode anonyme.
+- Les manifestes installés diffèrent du dépôt par le nom (`-inno3`), les libellés et les
+  descriptions d'outils : surcouche de construction, connue. Seul le numéro de version a été
+  comparé pour numéroter : 1.6.0 et 1.2.0 installées, d'où 1.6.1 et 1.2.1.
+
+## Livré, commit du lot
+
+- Manifestes : `"default": ""` sur `wp_prod_subsites`, `wp_test_subsites`, `hedgedoc_api_token`.
+- Serveurs : `_setting()` lit chaque réglage ; un texte qui est entièrement un gabarit vaut non
+  renseigné, avec l'avertissement « NOM : gabarit non résolu ignoré ». Une valeur qui ne fait que
+  contenir le gabarit est gardée. `WP_TEST_VERIFY_SSL` en gabarit reprend son défaut, vérification
+  active.
+- `tests/test_manifests.py` : `KNOWN_OPTIONAL_WITHOUT_DEFAULT` vide, plus aucune exception admise.
+- Nouveaux : `tests/test_wordpress_config.py`, `tests/test_hedgedoc_config.py`, import dans un
+  processus séparé ; les variables jouées sont lues dans le manifeste. `CHANGELOG.md` créés pour
+  les deux connecteurs, README complétés (WordPress : `WP_*_SUBSITES` manquaient au tableau).
+- Aucun outil, paramètre ni champ de réponse modifié.
+
+## Contrôles du 06/11/2026
+
+- Tests rouges d'abord : 5 échecs, 7 réussis sur les deux nouveaux fichiers ; puis 2 échecs sur
+  `test_optional_settings_passed_to_env_have_a_default` (HedgeDoc, WordPress) une fois la dette
+  retirée de `test_manifests.py`.
+- Final : 2 002 réussis, 4 ignorés, `ruff check` propre, `git diff --check` propre. Suite lancée
+  sans garde réseau.
+- Préexistant sur `main`, non corrigé : `test_hedgedoc.py::TestHelpers::test_extract_note_id_strips_base_and_anchor`
+  échoue si `test_manifests.py` est joué avant lui (son `HEDGEDOC_URL=x` est lu au premier
+  import). L'ordre alphabétique de la suite complète ne le déclenche pas.
+
+## Limites et non vérifié
+
+- Installé mais pas encore chargé : le comportement réel ne sera vérifié qu'après redémarrage du
+  client. Le banc rejoue l'environnement à partir du manifeste, il ne lit pas celui du processus.
+- Hors périmètre, relevé : le manifeste WordPress met `wp_test_verify_ssl` à `"false"` par défaut,
+  ce qui désactive la vérification TLS du serveur de test, alors que le code et la description
+  visent l'inverse. À arbitrer par Benjamin, non modifié.
+
+## Prochaines actions
+
+1. Redémarrer le client pour charger WordPress 1.6.1 et HedgeDoc 1.2.1.
+2. Recette : environnement des deux processus sans `${user_config`, journal WordPress sans
+   « JSON invalide », `wordpress_check_connection` et `hedgedoc_me` en lecture seule.
+3. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl`.
+4. Pousser `main` sur `origin` seulement sur demande de Benjamin.
+
+# Recette du lot du 01/11 sur réseau fixe, 06/11/2026 à 17:15, lecture seule : conforme
+
+Cette section clôt la recette des quatre correctifs relevés le 30/10 et prime sur la suivante,
+qui décrit les essais non concluants depuis le Wi-Fi d'un train. Poste sur le réseau domestique,
+poignée TLS de 0,15 s vers les quatre serveurs. Processus de cette session : Dolibarr **1.8.16**
+lancé à 17:11, venue de `lot/2026-11-06-dolibarr-actions-balayage` et non de `main` (1.8.15),
+Kanboard 0.19.1 identique à `main`, CalDAV 0.6.4 de `lot/2026-11-03-caldav-relecture`. Durées
+lues dans le journal du client.
+
+| Lecture | Résultat | Durée |
+|---|---|---|
+| `list_actions_open(limit=5)` sans filtre | 0 action réelle, `total_exact=true`, budget de 20 s annoncé | 0,1 s |
+| `list_actions_open(assigned_to=5, limit=5)` | 0 action réelle, `total_exact=true` | 0,1 s |
+| `check_missing_carnets(since="2026-10-01")` | 4 factures lues, 1 facture de carnets `ok`, 5 carnets sans facture, 2 liens à vérifier | 2 s |
+| `caldav_list_events` du 30/10 au 04/11, compact | page 1 : 42 sur 59, `truncated=true` ; page 2 : 17, curseur nul ; 59 sans perte | 1 s chacune |
+| `caldav_get_event`, invitation Teams | description entière, environ 1 500 caractères, plus coupée à 300 | 8 s |
+| `kanboard_my_overdue(with_columns=True)` | 63 retards, tous résolus, `columns_complete=true`, 10 tableaux, 262 compris | 0,7 s |
+
+- Le budget de 20 000 caractères de la forme compacte coupe la première page à 42 événements :
+  la plage compte 59 événements, contre 48 le 01/11. Taille exacte de la page non mesurée ici,
+  la borne est celle du code et de ses tests.
+- La 1.8.16 écarte côté API les événements sans objet (`percent=-1`) : c'est elle qui rend
+  l'appel sans filtre quasi immédiat. Ce correctif n'est pas encore dans `main`.
+- Les dépassements de 60 s du matin venaient du lien (Wi-Fi de train) et, pour CalDAV, d'un
+  Bluemind dégradé : tout répond sur réseau fixe. Le 262 lu en 54 s dans le train tient ici
+  dans le budget avec les neuf autres tableaux.
+
+Reste ouvert, hors de ce lot : décider du défaut de `compact` (faux, six tâches planifiées lisent
+les participants) ; fusionner les lots 1.8.16 et CalDAV 0.6.4 relève de leurs sessions.
+
+# Recette du lot du 01/11, 06/11/2026 de 10:30 à 11:46, lecture seule, sur Wi-Fi de train
 
 Cette section ne couvre que les quatre correctifs relevés le 30/10, branche
 `lot/2026-11-01-correctifs-connecteurs`, fusionnée depuis. Elle ne remplace pas la section
@@ -177,14 +351,30 @@ Non concluant sur ce lien, à rejouer sur un réseau stable :
 Constat indépendant du réseau : la route `agendaevents` ne porte que des événements
 automatiques, les actions de suivi sont dans `dolibarr_list_meetingnotes_actions`.
 
-Piste Kanboard, hypothèse non mesurée : le 262 est à la fois le tableau le plus utile (Action
-Benjamin, Suspens, Backlog) et le plus lourd. `getBoard` rend aussi les cartes fermées ;
-`getAllTasks` sur les seules cartes actives porte `column_id` et `swimlane_id` et coûterait
-probablement moins.
+## Rejeu de 11:32 à 11:46, même lien
 
-Suite : rejouer les quatre lectures non concluantes sur un réseau stable. Si
-`list_actions_open` dépasse encore 60 s, filtrer les événements système côté serveur plutôt
-qu'après balayage.
+Le poste était toujours sur le Wi-Fi du train (poignée TLS de 3 à 10 s vers `deb.debian.org`).
+Durées lues dans le journal du client.
+
+- `list_actions_open` sans filtre : délai dépassé à nouveau. Avec `date_from="2026-10-01"`,
+  filtre côté serveur (`t.datep:>=`) : réponse en 5 s, balayage complet, 344 événements système
+  écartés, 0 action réelle. Le coût vient du parcours de tout l'historique. `assigned_to=5` seul
+  n'a pas été rejoué : il parcourt le même ensemble, le filtre s'appliquant après coup.
+- `kanboard_my_overdue(with_columns=True)` en 22 s : seul le 262 reste hors budget, 36 cartes
+  non résolues, le 283 est résolu. `kanboard_get_board(262)` seul : 54 s.
+  `kanboard_list_tasks(262)`, donc `getAllTasks` : plus de 60 s. La piste notée à 10:45, lire
+  le 262 par `getAllTasks` plutôt que par `getBoard`, n'apporte rien sur ce lien : abandonnée.
+- `check_missing_carnets(since="2026-10-01")` : délai dépassé à nouveau.
+- `caldav_list_events` compact : délai dépassé sur le 30/10 au 04/11, puis sur la seule journée
+  du 06/11. La forme compacte n'est donc pas en cause. La session du lot CalDAV mesure ce même
+  matin une liste d'un jour en 2 min 21 s et note Bluemind dégradé depuis 09:48. Taille compacte
+  toujours non mesurée en réel.
+
+Suite : sur un réseau stable et un Bluemind rétabli, rejouer `list_actions_open` sans filtre,
+`check_missing_carnets`, `caldav_list_events` compact (taille sous 20 000 caractères) et
+`kanboard_my_overdue(with_columns=True)`. Si `list_actions_open` dépasse encore 60 s, borner
+par défaut le parcours dans le temps ou filtrer les événements système côté serveur. Si le 262
+ne tient pas dans 20 s, le budget seul ne suffira pas : son tableau entier est le coût.
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée, installée et recettée en réel
 
@@ -196,7 +386,10 @@ contient le correctif (`2939bb0`) par la fusion `7469de9`. Worktree
 2872 a relevé le défaut. Fusion et installation demandées par Benjamin le 06/11/2026.
 
 Installée le 06/11/2026 à 08:29, chargée à 10:15 après redémarrage du client, recette réelle
-conforme. **Ce dépôt public reste non poussé.**
+conforme. **`main` poussé sur `origin` le 06/11/2026, accord de Benjamin : `2e27d59..90a1cad`, 39
+commits relus avant envoi (ni `packaging/`, ni branche `vague/`, ni secret, ni nom de client),
+plus `90a1cad`, recette d'une autre session commitée pendant la relecture et relue après coup.**
+Crochet `pre-push` passé sur `90a1cad`. `sauvegarde/main` reste à `2e27d59`.
 Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.13` dans
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-dolibarr-1.8.15.sh retour` dans `_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`, puis
@@ -246,7 +439,8 @@ rattache chaque réponse à son projet sans dépendre de l'ordre. Relevé local,
   Chiffre lu sur les tâches, non recompté depuis les écritures.
 - Un appel a rendu « Connection closed » vers 10:33 ; une autre session a eu la même erreur sur
   `list_actions_open` à 10:32:45, et l'autre processus du connecteur journalise des délais de
-  connexion vers Dolibarr à 10:32 et 10:33. Relancé, l'appel a abouti. Non imputé à la 1.8.15.
+  connexion vers Dolibarr à 10:32 et 10:33. Poste sur un Wi-Fi de train (section précédente).
+  Relancé, l'appel a abouti. Non imputé à la 1.8.15.
 
 ## Fusion et installation du 06/11/2026
 
@@ -369,19 +563,37 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 4. Fait le 06/11/2026 : 20 des 117 projets portent 52 tâches et 504,25 h, les 97 autres sont vides
    et certifiés. Voir « Mesure du 06/11/2026 ».
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
-6. Benjamin : décider le push de ce dépôt public.
+6. Fait le 06/11/2026 : `main` poussé sur `origin`. `sauvegarde` non mis à jour.
 
-# Reprise du 06/11/2026 : Nextcloud 1.5.0 recettée en réel, 1.5.1 à installer
+# Reprise du 06/11/2026 : Nextcloud 1.5.1 installée et recettée en réel
 
-Cette section prime sur les suivantes pour Nextcloud. `main` contient la 1.5.0 (`9ff6ab2`) ; la
-1.5.1 corrige le défaut de réglages trouvé par la recette réelle ci-dessous.
+Cette section prime sur les suivantes pour Nextcloud. `main` contient la 1.5.0 (`9ff6ab2`) et la
+1.5.1 (`de84b07`), qui corrige le défaut de réglages trouvé par la recette réelle ci-dessous. Ces
+commits sont sur `origin/main` depuis le push de `6ef1ed5`, fait par une autre session le 06/11.
+
+1.5.1 installée le 06/11 à 10:36 et chargée au redémarrage de 21:15. Sauvegarde
+`.backup-nextcloud-inno3-2026-11-06-v1.5.0`, retour `bascule-nextcloud-1.5.1.sh retour` dans
+`_lots_wt/2026-11-05-nextcloud-download/dist/`, puis redémarrage. Bundle
+`dist/nextcloud-inno3-1.5.1.mcpb` : sha256 `6a37723029057677506d8dcfe0624503d098f1862d43526dfb01db1cc5378028` ;
+serveur sha256 `e63a87cd53ec91dadfcb87957a36c177804030560226f491a44b562c34e91a78`, identique à l'installé.
+
+## Recette réelle de la 1.5.1, 06/11/2026 vers 21:20
+
+- Environnement des processus : `NEXTCLOUD_DOWNLOAD_DIR` et `NEXTCLOUD_SAVE_DIRS` vides, plus
+  aucun `${user_config`, aucun avertissement au journal.
+- PDF de 856 255 octets en relatif, en absolu sous `~/Downloads` et en `~/Downloads/...` : écrit sous
+  `/home/bjean/Downloads`, `size_checks` à 856 255 trois fois, trois empreintes égales à celle de la 1.4.1.
+- `~/Documents` hors racines : refusé, `allowed_roots=["/home/bjean/Downloads"]`, rien écrit.
+- Cible existante sans `overwrite` : refusée avant le réseau. Fichiers de recette mis à la corbeille.
+
+Historique de la 1.5.0 conservé ci-dessous.
 Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
 `lot/2026-11-05-nextcloud-download`. Suivi : KB 262 #8072, qui porte le chemin exact du fichier
 concerné, absent d'ici parce que ce dépôt est public. Commit, fusion et installation demandés par
 Benjamin le 05/11/2026.
 
 La 1.5.0 est installée le 05/11 à 18:39 et chargée au redémarrage du 06/11, processus de 10:15. Une
-extension de bureau ne se recharge pas depuis une session. **Ce dépôt public reste non poussé.** Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
+extension de bureau ne se recharge pas depuis une session. Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
 dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-nextcloud-1.5.0.sh retour` dans `_lots_wt/2026-11-05-nextcloud-download/dist/`, puis
 redémarrage.
@@ -468,21 +680,17 @@ d'application, volontairement non lu.
 
 ## Non vérifié et limites
 
-- **La 1.5.0 n'a jamais parlé au vrai Nextcloud.** Elle ne s'y chargera qu'au redémarrage du
-  client. Selon la réponse du serveur sans `Range`, la copie défaillante donnera soit
-  le PDF entier, soit l'erreur explicite : les deux issues sont couvertes, seul le réel tranchera.
 - La comparaison porte sur la taille et l'ETag, pas sur le contenu.
 - 64 reprises à 32 Ko couvrent environ 2 Mo. Le délai d'un appel d'outil côté client n'a pas été mesuré.
 - `mcp-inno3/nextcloud_mcp` (1.3.0) reste une ancienne lignée, non modifiée.
 
 ## Prochaines actions
 
-1. Installer la 1.5.1 par `dist/bascule-nextcloud-1.5.1.sh installer`, puis redémarrer le client.
-2. Recette : environnement du processus sans `${user_config`, `save_path` absolu sous `~/Downloads`
-   écrit, absolu hors racines refusé avec `allowed_roots`, relatif écrit sous `~/Downloads`.
-3. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
-4. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
-5. WordPress et HedgeDoc : réglages optionnels sans valeur par défaut, à vérifier séparément.
+1. Benjamin : choisir les dossiers de `nextcloud_save_dirs`, puis redémarrer. Sans cela, seul
+   `~/Downloads` reste autorisé.
+2. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
+3. WordPress 1.6.1 et HedgeDoc 1.2.1 : correctif des réglages en gabarit fusionné dans `main` et installé
+   le 06/11/2026, à charger au redémarrage ; voir la section dédiée plus haut, KB 262 #8074.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée, installée et recettée en réel le 06/11/2026
 

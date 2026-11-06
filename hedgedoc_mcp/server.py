@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextvars import ContextVar
 from typing import Any
 
@@ -33,13 +34,31 @@ logger = logging.getLogger("hedgedoc-mcp")
 
 mcp = FastMCP("hedgedoc")
 
-HEDGEDOC_URL = os.environ.get("HEDGEDOC_URL", "").rstrip("/")
+# Claude Desktop transmet `${user_config.x}` tel quel quand un réglage optionnel
+# sans valeur par défaut n'est pas renseigné (constaté le 06/11/2026 sur Nextcloud
+# et WordPress). Pris pour un vrai jeton, `${user_config.hedgedoc_api_token}`
+# partait en en-tête Authorization et déclenchait une connexion avant chaque
+# requête en mode anonyme. Le texte entier doit être le gabarit : une valeur qui
+# ne fait que le contenir reste la valeur choisie.
+_UNRESOLVED_SETTING = re.compile(r"\$\{user_config\.[A-Za-z0-9_]+\}")
+
+
+def _setting(name: str) -> str:
+    """Réglage lu dans l'environnement ; un gabarit non résolu vaut non renseigné."""
+    value = os.environ.get(name, "")
+    if _UNRESOLVED_SETTING.fullmatch(value.strip()):
+        logger.warning("%s : gabarit non résolu ignoré : %s", name, value.strip())
+        return ""
+    return value
+
+
+HEDGEDOC_URL = _setting("HEDGEDOC_URL").rstrip("/")
 # Auth par login/mot de passe (recommandé — HedgeDoc 1.x n'a pas d'API key)
-HEDGEDOC_USER = os.environ.get("HEDGEDOC_USER", "")
-HEDGEDOC_PASSWORD = os.environ.get("HEDGEDOC_PASSWORD", "")
+HEDGEDOC_USER = _setting("HEDGEDOC_USER")
+HEDGEDOC_PASSWORD = _setting("HEDGEDOC_PASSWORD")
 # Fallback : Bearer token (non supporté nativement par HedgeDoc 1.x mais
 # laissé pour compatibilité avec des versions patchées)
-API_TOKEN = os.environ.get("HEDGEDOC_API_TOKEN", "")
+API_TOKEN = _setting("HEDGEDOC_API_TOKEN")
 
 # Limite par défaut pour l'historique
 MAX_HISTORY = 50

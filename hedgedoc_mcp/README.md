@@ -5,6 +5,8 @@ MCP server for [HedgeDoc](https://hedgedoc.org/) 1.x. Read, create, update, sear
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables — no host, login or secret is baked into the code.
 
+**Version courante : 1.2.1.** Voir le [CHANGELOG](CHANGELOG.md).
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -13,6 +15,12 @@ environment variables — no host, login or secret is baked into the code.
 | `HEDGEDOC_API_TOKEN` | no | Session/API token (preferred). If set, used directly. |
 | `HEDGEDOC_USER` | no | Email/login for password authentication (when no token is supplied). |
 | `HEDGEDOC_PASSWORD` | no | Password for the login above. |
+
+A value left as an unresolved `${user_config.x}` placeholder counts as unset, with a
+warning in the log that names the variable (1.2.1). Claude Desktop passes the
+placeholder through literally when an optional setting without a default is left
+empty; before 1.2.1 an empty token went out as
+`Authorization: Bearer ${user_config.hedgedoc_api_token}`.
 
 ## Tools (8)
 
