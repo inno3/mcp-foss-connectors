@@ -5,12 +5,40 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Reprise du 06/11/2026 : Dolibarr 1.8.16, actions ouvertes filtrées par l'API et bornées
+# Reprise du 06/11/2026 : Dolibarr 1.8.16 fusionnée, déployée et recettée en réel
 
 Branche `lot/2026-11-06-dolibarr-actions-balayage`, worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-06-dolibarr-actions-balayage/mcp-foss-connectors`, partie
-de `main` `90a1cad` (1.8.15). Commit `538cba5`. **Ni fusionné ni poussé. L'installé (1.8.16)
-devance donc `main`** : reconstruire depuis `main` ferait revenir le délai dépassé.
+de `main` `90a1cad` (1.8.15). Commit `538cba5`. **Fusionné dans `main` le 06/11/2026 par
+`d62b9d6`, sur accord de Benjamin ; non poussé.** L'installé est identique à `main`.
+
+## Fusion et déploiement du 06/11/2026, 21:25
+
+- Avant fusion : `main` propre, aucun code Dolibarr modifié depuis la base, aucune autre branche
+  non fusionnée en 1.8.16 (la session des agrégats de temps travaille sur une base 1.8.14 non
+  commitée). Diff relu pour ce dépôt public : ni secret, ni trailer, ni nom d'outil privé absent
+  de `main`.
+- Fusion bâtie dans un worktree jetable puis avancée rapide de `main`. Une première tentative a
+  été refusée : `1d5ed66` (gabarits WordPress et HedgeDoc) est arrivé entre-temps. Refaite sur
+  `1d5ed66`, seul conflit `docs/REPRISE.md`, les deux côtés conservés. Suite sur l'arbre fusionné :
+  2 013 réussis, 4 ignorés ; ruff et manifestes conformes.
+- Déploiement : `src/server.py` installé égal à `main` (`0c38131e`), extension égale au `main`
+  d'`inno3-mcp-extensions`, manifeste installé en 1.8.16 sans outil cœur manquant. Les processus
+  de 21:15 chargent déjà ces fichiers : aucun redémarrage requis.
+- `dist/dolibarr-erp-inno3-v2.mcpb` du clone principal était resté en **1.8.9** : remplacé par le
+  bundle 1.8.16 vérifié égal à `main` (sha256 `db5b9239...`), l'ancien gardé sous
+  `dist/dolibarr-erp-inno3-v2-1.8.9.mcpb`.
+- Recette réelle après fusion, lecture seule, sans erreur ni avertissement au journal : actions
+  ouvertes sans filtre en 0,16 s, tiers 189 avec `include_system` (116 événements, 0,49 s),
+  projets, devis et contacts d'un tiers (routes du même balayage, sans échéance), comptes rendus
+  et actions d'un compte rendu.
+- Incident de checkout partagé : un commit de ce document (`8bc726e`, jamais poussé) a embarqué
+  par erreur la modification non commitée d'une session voisine. Il a été défait aussitôt par
+  `git reset --mixed`, la modification rendue intacte à l'arbre de travail ; ce commit ne porte
+  que les lignes de ce lot. Leçon : sur ce checkout, ne committer ce document qu'en indexant
+  ses propres lignes (`git apply --cached`), jamais par `git add` du fichier.
+- Non actualisée : la table « Copies installées sur disque » de la provenance, relevé du 23/10
+  dont toutes les lignes sont périmées (Dolibarr y figure en 1.8.4).
 
 ## Constaté en réel le 06/11/2026, en 1.8.15, lecture seule
 
@@ -79,8 +107,9 @@ commit `538cba5`.
 
 1. Fait le 06/11/2026 à 21:15 : redémarrage du client.
 2. Fait le 06/11/2026 à 21:20, conforme : recette en lecture seule ci-dessus.
-3. **Benjamin** : fusionner ce lot dans `main` (conflit attendu sur `docs/REPRISE.md` et
-   `dolibarr_mcp/CHANGELOG.md` seulement) ; ce dépôt public reste non poussé.
+3. Fait le 06/11/2026 à 21:25 : fusion dans `main` (`d62b9d6`), déploiement et recette conformes.
+4. **Benjamin** : décider du push de `main`, en avance sur `origin/main`.
+5. Prochaine version Dolibarr : 1.8.17, la 1.8.16 étant prise.
 
 # Lot du 06/11/2026 : WordPress 1.6.1 et HedgeDoc 1.2.1, gabarits `${user_config.x}` non résolus
 
