@@ -1,5 +1,38 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.15
+
+Branche `lot/2026-11-05-dolibarr-taches-masquees`, partie de la 1.8.13 : la 1.8.14
+(colonnes et agrégats de `dolibarr_list_time_entries`) est menée dans un autre lot et
+n'est pas comprise ici.
+
+Défaut constaté en réel le 05/11/2026, en 1.8.13, en lecture seule, sur un projet de
+production : `dolibarr_list_tasks` rendait `total=0` et `total_exact=true`,
+`dolibarr_list_time_entries` `tasks_total=0`, `aggregates_complete=true` et
+`reason=complete`, alors qu'une tâche du projet portait une heure, lisible par `task_id`.
+
+- Cause, lue dans le cœur 24.0.1 : `projects/{id}/tasks` écarte toutes les tâches d'un
+  projet non public dont le compte de la clef n'est pas contact, administrateur et
+  « projet all lire » compris.
+- Si cette route ne rend rien, `GET tasks?sqlfilters=(t.fk_projet:=:ID)` est balayé et
+  chaque ligne revérifiée par `fk_project`. Un projet visible coûte toujours une seule
+  requête.
+- Un total n'est plus certifié quand un masquage reste possible : `GET tasks` en échec,
+  balayage incomplet, ou projet vide des deux côtés sans que `users/info` confirme le
+  droit « societe client voir », faute duquel `GET tasks` écarte les projets des tiers
+  dont le compte n'est pas commercial. Ce droit est lu une fois par processus.
+- Ajout additif de `task_discovery` (nombre par route, `exact`, erreurs) et de
+  `tasks_warning`. `dolibarr_list_time_entries` : `tasks_total=null`,
+  `aggregates_complete=false` et `reason="tasks_unverified"` dans ce cas.
+- `dolibarr_delete_project` : `tasks_remaining` du diagnostic compte les tâches
+  masquées, `null` s'il n'est pas certifié, avec `tasks_warning`.
+- `dolibarr_get_project` : la docstring promettait les tâches et les contacts, que
+  l'outil n'a jamais rendus. Elle renvoie vers `dolibarr_list_tasks`.
+- `assigned_to` reste `null` sur une tâche retrouvée, son créateur n'étant pas la
+  personne affectée. Le filtre `assigned_to` ne retenait déjà rien en production ;
+  c'est documenté, non corrigé.
+- Aucun paramètre ni aucune clé retirés, aucun test existant modifié.
+
 ## Non publié : 1.8.13
 
 Défauts constatés en réel le 03/11/2026 sur un projet de test, en 1.8.12 :
