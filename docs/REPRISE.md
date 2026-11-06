@@ -5,18 +5,31 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Reprise du 05/11/2026 : Dolibarr 1.8.14, totaux et colonnes des temps, ni commitée ni installée
+# Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
 
 Cette section prime sur les suivantes pour ce lot. Worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-05-dolibarr-temps-agregats/mcp-foss-connectors`, branche
-`lot/2026-11-05-dolibarr-temps-agregats`, partie de `main` `2b67497`, dont le `server.py` est identique
-à la 1.8.13 installée (comparé par md5). Demandé par Benjamin le 05/11/2026.
+`lot/2026-11-05-dolibarr-temps-agregats`. Demandé par Benjamin le 05/11/2026, intégration, installation,
+recette et fusion validées par lui le 06/11/2026. Ce dépôt public reste non poussé.
 
-## Livré dans le worktree, modifications non commitées
+## Historique du lot
 
-Sur `dolibarr_list_time_entries`, détail dans `dolibarr_mcp/CHANGELOG.md`, section 1.8.14 :
+- Développé le 05/11/2026 comme 1.8.14 sur la 1.8.13, jamais installé ni fusionné sous ce numéro.
+- Le 06/11/2026, les lots voisins 1.8.15 (tâches masquées) et 1.8.16 (actions ouvertes) étaient
+  fusionnés et installés : le lot a été commité, rebasé sur la 1.8.16 (repère local
+  `repere/avant-rebase-1.8.17` sur le commit d'origine) et renuméroté 1.8.17, au-dessus de l'installé.
+
+## Livré
+
+Sur `dolibarr_list_time_entries`, détail dans `dolibarr_mcp/CHANGELOG.md`, section 1.8.17 :
 `aggregate` (`user`, `project`, `month`, `year`) ne rend que les totaux ; `fields` choisit les colonnes,
 `all` les rend toutes ; `note` retirée par défaut et signalée par `omitted_fields`.
+
+Correction d'intégration : la sortie `aggregate` rendait ses totaux avant la vérification des tâches
+masquées de la 1.8.15, et aurait certifié un projet dont des tâches peuvent manquer. Elle porte
+désormais `task_discovery` et `tasks_warning`, et `aggregates_complete` reste faux avec
+`reason="tasks_unverified"`, sans `next_cursor`, y compris à la reprise d'un curseur. Six tests dans
+`tests/test_dolibarr_project_tasks_masked.py`, quatre vus rouges avant la correction.
 
 ## Décisions prises dans ce lot
 
@@ -26,54 +39,29 @@ Sur `dolibarr_list_time_entries`, détail dans `dolibarr_mcp/CHANGELOG.md`, sect
 - `fields` avec `aggregate`, colonne inconnue et axe inconnu sont refusés avant tout appel.
 - Le retrait de `note` se fait à la sortie de l'outil, pas dans `_format_time_entry` : la correction
   d'une écriture relit la note et ne doit pas l'effacer.
+- Le test de schéma de la 1.8.15 admet `aggregate` et `fields` après les paramètres existants, à
+  condition qu'ils soient facultatifs.
 
-## Contrôles du 05/11/2026
+## Contrôles
 
-- Tests rouges d'abord : 41 échecs sur 42 avant le code. Seul le test du curseur ancien passait.
-- Après le code : 1 945 réussis, 4 ignorés, ruff et `git diff --check` propres. Suite de
-  `inno3-mcp-extensions` lancée contre ce worktree : 522 réussis.
-- Schéma contrôlé par `mcp.list_tools()` : deux paramètres optionnels ajoutés, aucun requis.
-- Forme réelle lue en production en 1.8.13 sur la tâche 482 : `task_ref` nul, `project_id` et `project_ref`
-  renseignés. Le jeu de test reprend cette forme.
+- 05/11/2026 : tests rouges d'abord (41 sur 42), puis 1 945 réussis. Forme réelle lue en 1.8.13 sur la
+  tâche 482 : `task_ref` nul, `project_id` et `project_ref` renseignés, reprise par le jeu de test.
+- 06/11/2026, après rebase sur la 1.8.16 et correction : 2 050 réussis, 4 ignorés, ruff et
+  `git diff --check` propres. Suite de `inno3-mcp-extensions` contre ce worktree : 522 réussis.
+- Aucun lecteur de `note` trouvé dans `inno3-mcp-extensions`, `dev_bje`, `mcp-inno3`, la mémoire ni les
+  tâches planifiées ; la recette de la route d'agrégat du 06/11 n'en lit pas.
 
 ## Limites
 
-- Aucun Dolibarr réel n'a vu la 1.8.14 : tests hors ligne uniquement.
-- `aggregate="project"` rend une seule ligne, le périmètre restant une tâche ou un projet. Ventilation entre
-  projets étudiée le 05/11/2026 : route d'agrégat recommandée dans `inno3dashboard`, chiffres, droits et plan
-  sur KB 262 #8070, commentaire 2872. Route validée et écrite le 06/11/2026 : `inno3dashboard` 6.82.0,
-  `GET /inno3dashboardapi/timesummary`, commit local `523cd76` du dépôt `dolibarr-plugins`, branche
-  `lot/2026-11-06-dashboard-temps-agregat`, non poussé. Livré en recette puis en production le 06/11/2026 :
-  la route est en service, ses totaux égalent ceux du connecteur sur trois projets (#8070, commentaires
-  2877, 2880 et 2883). Le fournisseur
-  côté connecteur reste à écrire, sur la version qui suivra ce lot. Le connecteur n'utilise aucune route `GET tasks`
-  globale ; elle a répondu une fois en production, par appel REST direct, le 20/08/2026 (747 tâches).
-- Défaut constaté le 05/11/2026, dont cet agrégat hérite : `projects/{id}/tasks` masque les tâches d'un projet
-  non public dont le compte de la clef n'est pas contact. Projet 13 : 0 tâche et `aggregates_complete=true`,
-  alors que sa tâche 3 porte 1 h. Cause lue dans le cœur 24.0.1, ampleur non mesurée, non corrigé ici.
-  Correctif commité, ni poussé ni fusionné, sur `lot/2026-11-05-dolibarr-taches-masquees` (`2939bb0`, doc
-  `36fcebf`, numéro 1.8.15, worktree `_lots_wt/2026-11-05-dolibarr-taches-masquees`, KB 8073). Essai de fusion
-  avec ce lot par `git merge-tree`, sans toucher aux branches : conflits dans `server.py` (numéro, fin du
-  résultat liste), `CHANGELOG.md`, `manifest.json`, `docs/REPRISE.md`. Défaut de sens à corriger à
-  l'intégration : la sortie `aggregate` rend ses totaux avant la vérification `tasks_known` du correctif, et
-  certifierait donc encore le projet 13. Il faut `complete = next_cursor is None and tasks_known`,
-  `tasks_total=null`, `task_discovery` et `tasks_warning` dans les totaux, plus un test du cas projet 13.
-- `main` a avancé à `d636ed2` (Nextcloud 1.5.0) depuis la base `2b67497` de ce lot ; `docs/REPRISE.md` y a
-  changé, rien sous `dolibarr_mcp`.
-- Changement visible : un lecteur de `note` sans `fields` ne la reçoit plus. Aucun lecteur trouvé dans
-  `inno3-mcp-extensions`, `dev_bje`, `mcp-inno3/dolibarr_mcp` ni la mémoire ; la revue hebdomadaire n'utilise
-  l'outil que pour rapprocher le temps saisi.
+- `aggregate="project"` rend une seule ligne, le périmètre restant une tâche ou un projet. La ventilation
+  entre projets passe par une route d'agrégat côté module Dolibarr interne, en service depuis le
+  06/11/2026 (KB 262 #8070). Son fournisseur côté connecteur reste à écrire, sur la version suivante.
+- Changement visible : un lecteur de `note` sans `fields` ne la reçoit plus.
 
 ## Suite ordonnée
 
-1. Benjamin : valider le commit et la fusion dans `main`. Ce dépôt public reste non poussé. Ne pas installer
-   la 1.8.14 seule : ses totaux par projet hériteraient du masquage. Intégrer d'abord le correctif 1.8.15
-   avec l'adaptation décrite dans les limites, puis livrer l'ensemble sous un seul numéro.
-2. Construire le bundle depuis l'état commité, puis installer et redémarrer le client.
-3. Recette en lecture seule sur la tâche 482 : `aggregate="user"` doit redonner les totaux par utilisateur
-   de la liste, soit 40,52 h pour l'utilisateur 5 au 05/11/2026 si rien n'a été saisi depuis.
-4. Route d'agrégat : `inno3dashboard` 6.82.0 livré en production et intégré dans main de `dolibarr-plugins`
-   (`ec666e9`) le 06/11/2026. Reste le fournisseur dans le connecteur et l'extension 0.9.3 (#8070).
+1. Construire le bundle depuis l'état commité, l'installer à chaud, le recetter en lecture seule.
+2. Fusionner dans `main`, sans pousser.
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.16, actions ouvertes filtrées par l'API et bornées
 

@@ -2,6 +2,9 @@
 
 ## Non publié : 1.8.17
 
+Branche `lot/2026-11-05-dolibarr-temps-agregats`, replacée sur la 1.8.16. Développée
+d'abord comme 1.8.14 sur la 1.8.13, ni installée ni fusionnée sous ce numéro.
+
 `dolibarr_list_time_entries` :
 
 - Changement visible : `note` n'est plus rendue par défaut dans `entries`, et
@@ -16,8 +19,15 @@
   `next_cursor` porte le cumul, la dernière réponse donne donc le total complet.
 - Limite : le périmètre reste une tâche ou un projet, `aggregate="project"` rend une
   seule ligne.
-- Test adapté : `test_the_entry_id_needed_to_correct_a_line_is_exposed` demande
-  désormais `fields="all"` pour lire la note. Aucun test supprimé.
+- Les totaux lisent les tâches d'un projet comme la liste depuis la 1.8.15, masquées
+  comprises, et portent `task_discovery` et `tasks_warning`. Si des tâches peuvent
+  manquer, `aggregates_complete` reste faux avec `reason="tasks_unverified"`, sans
+  `next_cursor`, y compris à la reprise d'un curseur dont le cumul viendrait d'une
+  découverte certifiée.
+- Tests adaptés : `test_the_entry_id_needed_to_correct_a_line_is_exposed` demande
+  désormais `fields="all"` pour lire la note ; `test_input_schemas_are_unchanged`
+  (1.8.15) admet `aggregate` et `fields` après les paramètres existants, facultatifs.
+  Aucun test supprimé.
 
 ## Non publié : 1.8.16
 

@@ -2103,7 +2103,8 @@ async def dolibarr_list_time_entries(
     Tant que truncated est vrai, ces totaux sont partiels : reprendre next_cursor
     avec les memes filtres. Chaque reponse cumule les pages precedentes, ne pas
     les additionner ; aggregates_complete dit quand le perimetre est couvert.
-    task_limit=100 reduit le nombre d'appels. Ces totaux passent aussi par le
+    Il reste faux, sans next_cursor, si des taches du projet peuvent manquer :
+    voir tasks_warning ci-dessous. task_limit=100 reduit le nombre d'appels. Ces totaux passent aussi par le
     curseur, qui s'allonge avec le nombre de groupes.
 
     Aucune ecriture distante. Une erreur conserve les resultats deja collectes.
@@ -2120,6 +2121,7 @@ async def dolibarr_list_time_entries(
     tasks_total=null, total=null, total_exact et aggregates_complete faux,
     reason=tasks_unverified si rien d'autre n'a arrêté le parcours, et
     tasks_warning donne la cause. Les heures rendues sont alors un minimum.
+    Avec aggregate, task_discovery et tasks_warning accompagnent les totaux.
 
     Dates et heures sont en GMT, comme l'API les rend et comme
     dolibarr_log_time les ecrit : `date` est le jour GMT de `datehour`, et
@@ -2260,17 +2262,22 @@ async def dolibarr_list_time_entries(
                 reason, next_cursor = "limit", next_token(remaining_tasks[index + 1], 0)
                 break
 
+        tasks_known = discovery is None or discovery["exact"]
+        if not tasks_known:
+            # Des tâches peuvent manquer à la liste lue : rien n'est certifié.
+            reason = reason or "tasks_unverified"
+
         if aggregate:
             sums = group_sums()
             seconds_total = sum(sums.values())
-            complete = next_cursor is None
+            complete = next_cursor is None and tasks_known
             totals = {
                 "task_id": task_id or None, "project_id": project_id or None,
                 "aggregate": aggregate,
                 "tasks_scanned": scanned,
-                "tasks_total": None if not task_ids and reason is not None else len(task_ids),
+                "tasks_total": None if not tasks_known or (not task_ids and reason is not None) else len(task_ids),
                 "matched": emitted + len(scanned_entries),
-                "truncated": not complete, "next_cursor": next_cursor,
+                "truncated": next_cursor is not None, "next_cursor": next_cursor,
                 "reason": reason or "complete", "time_budget": budget,
                 "elapsed_seconds": round(time.monotonic() - (deadline - budget), 3),
                 "aggregates_complete": complete,
@@ -2278,23 +2285,29 @@ async def dolibarr_list_time_entries(
                 f"by_{aggregate}": {k: {"hours": _seconds_to_hours(v), "seconds": v}
                                     for k, v in sorted(sums.items())},
             }
+            if discovery is not None:
+                totals["task_discovery"] = discovery
+            if tasks_warning:
+                totals["tasks_warning"] = tasks_warning
             if error:
                 totals["scan_error"] = error
-            if not complete:
+            if next_cursor is not None:
                 totals["scan_note"] = (
                     "Totaux partiels : reprendre next_cursor avec les mêmes filtres. "
                     "Chaque réponse cumule les précédentes, ne pas les additionner."
+                )
+            elif not complete:
+                totals["scan_note"] = (
+                    "Tâches du projet non certifiées : voir tasks_warning. "
+                    "Ces totaux sont un minimum."
                 )
             return _dumps(totals)
 
         aggregates_complete = bool(task_ids) and scanned == len(task_ids) and current in (0, task_ids[0])
         if not task_ids and reason is None:
             aggregates_complete = True
-        tasks_known = discovery is None or discovery["exact"]
         if not tasks_known:
-            # Des tâches peuvent manquer à la liste lue : rien n'est certifié.
             aggregates_complete = False
-            reason = reason or "tasks_unverified"
         by_user, by_task = {}, {}
         for entry in scanned_entries:
             seconds = entry["seconds"] or 0

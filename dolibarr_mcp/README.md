@@ -883,7 +883,7 @@ sa valeur est explicitement nulle. Le signal `date_due_is_default` est une
 heuristique (facture + un jour), pas une preuve de l'absence d'accord ; vérifier
 les conditions avant une relance.
 
-### Totaux et colonnes des temps depuis 1.8.14
+### Totaux et colonnes des temps depuis 1.8.17
 
 `dolibarr_list_time_entries` ne rend plus `note` par défaut : ce texte libre peut
 compter plusieurs paragraphes par ligne. `omitted_fields` le signale.
@@ -901,6 +901,11 @@ Sur un projet de plus de `task_limit` tâches, ou si le budget s'épuise, la ré
 est partielle : `truncated` est vrai et `aggregates_complete` faux. `next_cursor`
 porte le cumul, chaque réponse inclut donc les précédentes et les totaux ne
 s'additionnent pas entre pages.
+
+Sur un projet, les tâches sont lues comme en mode liste, masquées comprises (voir
+plus bas, 1.8.15) : `task_discovery` et `tasks_warning` accompagnent les totaux.
+Si des tâches peuvent manquer, `aggregates_complete` reste faux avec
+`reason="tasks_unverified"`, sans `next_cursor` : les totaux sont un minimum.
 
 Limite : le périmètre reste une tâche ou un projet, `aggregate="project"` rend donc
 une seule ligne. Une ventilation entre projets demanderait une requête par tâche de
