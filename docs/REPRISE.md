@@ -5,14 +5,49 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
-# Reprise du 05/11/2026 : Dolibarr 1.8.15, tâches masquées par la route projet, commitée, non installée
+# Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée et installée, recette réelle après redémarrage
 
-Cette section prime sur les suivantes pour la découverte des tâches d'un projet. Worktree
+Cette section prime sur les suivantes pour Dolibarr et la découverte des tâches d'un projet. `main`
+contient le correctif (`2939bb0`) par la fusion `7469de9`. Worktree
 `/home/bjean/RepoGit/_lots_wt/2026-11-05-dolibarr-taches-masquees/mcp-foss-connectors`, branche
 `lot/2026-11-05-dolibarr-taches-masquees`, partie de `2b67497` (1.8.13, pointe de
-`lot/2026-11-05-dolibarr-temps-agregats`). Correctif : commit `2939bb0`. Suivi : KB 262 #8073, liée à
-la #8070 dont le commentaire 2872 a relevé le défaut. **Rien de poussé, rien de fusionné, rien d'installé : la 1.8.13
-tourne toujours.** Installation et redémarrage soumis à l'accord de Benjamin.
+`lot/2026-11-05-dolibarr-temps-agregats`). Suivi : KB 262 #8073, liée à la #8070 dont le commentaire
+2872 a relevé le défaut. Fusion et installation demandées par Benjamin le 06/11/2026.
+
+Installée le 06/11/2026 à 08:29. **Les processus du connecteur datent du 05/11 à 07:42 : ils exécutent
+encore la 1.8.13, et aucun Dolibarr réel n'a vu la 1.8.15. Ce dépôt public reste non poussé.**
+Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.13` dans
+`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
+`bascule-dolibarr-1.8.15.sh retour` dans `_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/`, puis
+redémarrage.
+
+## Fusion et installation du 06/11/2026
+
+- Fusion `--no-ff` dans `main` (`7469de9`), `main` ayant reçu Nextcloud 1.5.0 entre-temps. Seul
+  conflit : ce document, deux sections ajoutées en tête, gardées toutes deux.
+- Suite sur l'arbre fusionné : 1 979 réussis, 4 ignorés, ruff propre. Sous la garde stricte, les 42
+  tests de `tests/test_nextcloud_download_stream.py` échouent, sur leur branche comme ici : ils
+  passent par un vrai socket local. Garde `pytest_offline_loopback` (boucle locale seule, dans le
+  `dist/` du lot) : 0 connexion hors boucle locale. Garde stricte sans ce fichier : 1 937 réussis.
+- Bundle `dist/dolibarr-erp-inno3-v2-1.8.15.mcpb`, construit depuis `main` `7469de9` par
+  `construire-1.8.15.py --main`, repack du 1.8.13 contrôlé identique à l'installé : 972 entrées,
+  seuls `manifest.json` et `src/server.py` diffèrent. Bundle sha256
+  `575593967bfd4af2df7d9e950efc1e5e26df1604b52cf92ce500791b826bd04a` ; serveur sha256
+  `e83ec6478106901384da8412c7f7c8c7b18a5579e088af189c1f0d68145f65ac`, identique à l'installé.
+- `bascule-dolibarr-1.8.15.sh installer` puis `retour` sur copie : identique au témoin hors
+  `__pycache__`, seconde installation refusée. Sur l'extension réelle, `installer` seul. Réglages
+  inchangés, par empreinte. Installé identique au bundle, entrée par entrée.
+- 113 outils, aucun ajouté ni retiré, aucun schéma d'entrée changé. Quatre descriptions changées :
+  `delete_project`, `get_project`, `list_tasks`, `list_time_entries`.
+- Banc stdio `dist/banc_taches_masquees.py`, faux Dolibarr sur 127.0.0.1, sorties
+  `dist/banc-1.8.13-installe.json` et `dist/banc-1.8.15-bascule.json` :
+
+| Appel | 1.8.13 installée | 1.8.15 basculée |
+|---|---|---|
+| `list_tasks`, projet 13 | 0 tâche, `total_exact=true` | tâche 3, `project_route=0`, `task_route=1` |
+| `list_time_entries`, projet 13 | 0 écriture, `aggregates_complete=true` | écriture 4, 1 h, `tasks_total=1` |
+| `list_tasks`, projet visible 4 | une route | une route, `task_route=null` |
+| `list_tasks`, projet vide 99 | une route, certifié | trois routes, certifié par `users/info` |
 
 ## Objectif
 
@@ -87,6 +122,8 @@ Aucun paramètre ni aucune clé retirés, aucun test existant modifié.
 
 ## Fusion avec la 1.8.14
 
+`main` porte désormais la 1.8.15 : le lot des agrégats, encore non commité, devra prendre un numéro
+supérieur (1.8.16) et la route du commentaire 2872 le suivant. Arbitrage à confirmer par Benjamin.
 Conflits attendus dans `server.py` (`__version__`, `dolibarr_list_time_entries`), le manifeste, le
 README, le CHANGELOG et ce document. Dans `dolibarr_list_time_entries`, la branche `if aggregate:` de
 la 1.8.14 rend ses totaux avant le calcul de `aggregates_complete` : y calculer `tasks_known` avant
@@ -97,9 +134,9 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 
 ## Prochaines actions
 
-1. Benjamin : accord pour fusionner dans `main` (avant ou après la 1.8.14), construire le bundle et
-   l'installer, puis redémarrer le client.
-2. Recette en lecture seule après redémarrage, processus postérieur à l'installation :
+1. Benjamin : redémarrer le client pour charger la 1.8.15.
+2. Recette en lecture seule après redémarrage, processus postérieur au 06/11/2026 08:29
+   (`ps -o lstart`) :
    `dolibarr_list_tasks(project_id=13, limit=1)` doit rendre la tâche 3, `task_discovery` avec
    `project_route=0` ; `dolibarr_list_time_entries(project_id=13, limit=1, task_limit=100)` doit
    rendre l'écriture 4, 1 h, `aggregates_complete=true`. Un projet visible (4) : une seule route lue.
@@ -107,6 +144,7 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 3. Si `GET tasks` refuse le filtre (400) : relire la forme acceptée par la v23 avant toute retouche.
 4. Mesurer ensuite les 117 projets à zéro avec la 1.8.15 installée.
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
+6. Benjamin : décider le push de ce dépôt public.
 
 # Reprise du 05/11/2026 : Nextcloud 1.5.0 installée, recette réelle à faire après rechargement
 
