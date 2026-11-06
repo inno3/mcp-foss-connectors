@@ -5,6 +5,36 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Recette du lot du 01/11 sur réseau fixe, 06/11/2026 à 17:15, lecture seule : conforme
+
+Cette section clôt la recette des quatre correctifs relevés le 30/10 et prime sur la suivante,
+qui décrit les essais non concluants depuis le Wi-Fi d'un train. Poste sur le réseau domestique,
+poignée TLS de 0,15 s vers les quatre serveurs. Processus de cette session : Dolibarr **1.8.16**
+lancé à 17:11, venue de `lot/2026-11-06-dolibarr-actions-balayage` et non de `main` (1.8.15),
+Kanboard 0.19.1 identique à `main`, CalDAV 0.6.4 de `lot/2026-11-03-caldav-relecture`. Durées
+lues dans le journal du client.
+
+| Lecture | Résultat | Durée |
+|---|---|---|
+| `list_actions_open(limit=5)` sans filtre | 0 action réelle, `total_exact=true`, budget de 20 s annoncé | 0,1 s |
+| `list_actions_open(assigned_to=5, limit=5)` | 0 action réelle, `total_exact=true` | 0,1 s |
+| `check_missing_carnets(since="2026-10-01")` | 4 factures lues, 1 facture de carnets `ok`, 5 carnets sans facture, 2 liens à vérifier | 2 s |
+| `caldav_list_events` du 30/10 au 04/11, compact | page 1 : 42 sur 59, `truncated=true` ; page 2 : 17, curseur nul ; 59 sans perte | 1 s chacune |
+| `caldav_get_event`, invitation Teams | description entière, environ 1 500 caractères, plus coupée à 300 | 8 s |
+| `kanboard_my_overdue(with_columns=True)` | 63 retards, tous résolus, `columns_complete=true`, 10 tableaux, 262 compris | 0,7 s |
+
+- Le budget de 20 000 caractères de la forme compacte coupe la première page à 42 événements :
+  la plage compte 59 événements, contre 48 le 01/11. Taille exacte de la page non mesurée ici,
+  la borne est celle du code et de ses tests.
+- La 1.8.16 écarte côté API les événements sans objet (`percent=-1`) : c'est elle qui rend
+  l'appel sans filtre quasi immédiat. Ce correctif n'est pas encore dans `main`.
+- Les dépassements de 60 s du matin venaient du lien (Wi-Fi de train) et, pour CalDAV, d'un
+  Bluemind dégradé : tout répond sur réseau fixe. Le 262 lu en 54 s dans le train tient ici
+  dans le budget avec les neuf autres tableaux.
+
+Reste ouvert, hors de ce lot : décider du défaut de `compact` (faux, six tâches planifiées lisent
+les participants) ; fusionner les lots 1.8.16 et CalDAV 0.6.4 relève de leurs sessions.
+
 # Recette du lot du 01/11, 06/11/2026 de 10:30 à 11:46, lecture seule, sur Wi-Fi de train
 
 Cette section ne couvre que les quatre correctifs relevés le 30/10, branche
