@@ -50,20 +50,35 @@ devance donc `main`** : reconstruire depuis `main` ferait revenir le délai dép
 - `dist/dolibarr-erp-inno3-v2-1.8.16.mcpb` dans ce worktree (ignoré par git), repacké depuis
   l'installé, sha256 `db5b9239...`. Le `dist/` du clone principal reste en 1.8.15.
 
+## Recette réelle du 06/11/2026 à 21:20, lecture seule
+
+Processus relancés à 21:15, `__version__ = "1.8.16"`, `src/server.py` installé identique au
+commit `538cba5`.
+
+| Appel | Résultat |
+|---|---|
+| `list_actions_open(limit=5)`, sans filtre | 0,15 s, 0 action, `total=0` exact, `scan_truncated=false` |
+| `list_actions_open(assigned_to=5)` | 0,11 s, 0 action, parcours complet |
+| `list_actions_open(include_system=True)`, novembre | 0,25 s, 87 événements, tous à `percent=-1` |
+
+- La production accepte `(t.percent:>=:0) AND (t.percent:<:100)`, sans 400 ni 503.
+- Le zéro par défaut est juste : le 02/11 déjà, les 8 667 lignes balayées étaient toutes écartées.
+  Les événements des comptes rendus (`[CR] ...`, code `AC_RDV`, type `system`) sont eux aussi à -1 :
+  ce ne sont jamais des actions ouvertes.
+- Le même appel sur novembre prenait 3,6 s le matin et 0,25 s ce soir : la charge de l'instance
+  pesait aussi dans le délai dépassé du matin.
+
 ## Non vérifié, limites
 
-- **Pas encore observé en réel** : les processus chargés restent en 1.8.15 jusqu'au prochain
-  redémarrage du client.
-- Que la production accepte `:>=:` et `:<:` sur `t.percent` n'est établi que sur le source amont.
-- Un événement `systemauto` à progression 0 à 99 reste lu puis écarté localement ; leur nombre en
-  production est inconnu.
+- Le budget de temps n'a pas été éprouvé en réel, pour ne pas charger la production 20 s : il ne l'a
+  été que contre un faux serveur lent.
+- Un événement `systemauto` à progression 0 à 99 reste lu puis écarté localement ; aucun n'a été vu.
 - `include_system=True` sans filtre s'arrêtera au budget : résultat partiel annoncé, pas d'erreur.
 
 ## Suite ordonnée
 
-1. **Benjamin** : redémarrer Claude Desktop.
-2. Recette en lecture seule : `dolibarr_list_actions_open(limit=5)` sans filtre, en relevant
-   `elapsed_seconds` et `scan_truncated`, puis avec `assigned_to=5`.
+1. Fait le 06/11/2026 à 21:15 : redémarrage du client.
+2. Fait le 06/11/2026 à 21:20, conforme : recette en lecture seule ci-dessus.
 3. **Benjamin** : fusionner ce lot dans `main` (conflit attendu sur `docs/REPRISE.md` et
    `dolibarr_mcp/CHANGELOG.md` seulement) ; ce dépôt public reste non poussé.
 
