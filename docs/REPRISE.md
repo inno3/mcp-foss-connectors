@@ -5,6 +5,52 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Recette du lot du 01/11, 06/11/2026 de 10:30 à 10:45, lecture seule, sur Wi-Fi de train
+
+Cette section ne couvre que les quatre correctifs relevés le 30/10, branche
+`lot/2026-11-01-correctifs-connecteurs`, fusionnée depuis. Elle ne remplace pas la section
+Dolibarr 1.8.15 qui suit.
+
+Conditions de mesure : poste sur le Wi-Fi d'un train, poignée TLS de 1 à 7 s, y compris vers
+`debian.org`. Délai d'un outil dans Claude Code : 60 s, lu dans les journaux
+`~/.cache/claude-cli-nodejs/*/mcp-logs-*`. Processus chargés à 10:15 : Dolibarr 1.8.15 et
+Kanboard 0.19.1 identiques à `main`, extension 0.9.2, CalDAV 0.6.3 depuis
+`lot/2026-11-03-caldav-relecture`.
+
+Établi :
+
+- Tri des actions ouvertes : filtrées par tiers 213, puis par projet 258 avec `assigned_to=5`,
+  réponse sans 503, balayage complet, 108 et 114 événements système écartés, 0 action réelle.
+- Outils MeetingNotes et carnets : 113 outils exposés. `list_meetingnotes` (357 CR),
+  `list_meetingnotes_actions` en retard (389) et `list_support_carnets` (37 carnets) répondent.
+- `kanboard_my_overdue(with_columns=True)` : 62 retards, 22 cartes résolues, 40 non résolues,
+  projets 262 et 283 hors budget de 20 s, `reason=budget`, `columns_complete=false`. Le
+  résultat partiel est annoncé comme prévu.
+
+Non concluant sur ce lien, à rejouer sur un réseau stable :
+
+- `list_actions_open` sans filtre, puis avec `assigned_to=5` seul : délai de 60 s dépassé trois
+  fois, appels en série. Le 02/11 les mêmes appels répondaient. Le balayage lit environ 8 700
+  événements.
+- `check_missing_carnets(since="2026-10-01")` : délai dépassé.
+- `caldav_list_events` du 30/10 au 04/11 en compact : délai dépassé deux fois, comme pour la
+  session du lot CalDAV à 10:34 et 10:35. Connexion à Bluemind en 34 s selon le journal du
+  serveur. Le chemin de liste est celui de `main`, la 0.6.3 ne change que la relecture après
+  création. Taille sous 20 000 caractères non mesurée en réel.
+- Kanboard : le projet 262 tient-il dans le budget de 20 s sur un lien normal ?
+
+Constat indépendant du réseau : la route `agendaevents` ne porte que des événements
+automatiques, les actions de suivi sont dans `dolibarr_list_meetingnotes_actions`.
+
+Piste Kanboard, hypothèse non mesurée : le 262 est à la fois le tableau le plus utile (Action
+Benjamin, Suspens, Backlog) et le plus lourd. `getBoard` rend aussi les cartes fermées ;
+`getAllTasks` sur les seules cartes actives porte `column_id` et `swimlane_id` et coûterait
+probablement moins.
+
+Suite : rejouer les quatre lectures non concluantes sur un réseau stable. Si
+`list_actions_open` dépasse encore 60 s, filtrer les événements système côté serveur plutôt
+qu'après balayage.
+
 # Reprise du 06/11/2026 : Dolibarr 1.8.15 fusionnée, installée et recettée en réel
 
 Cette section prime sur les suivantes pour Dolibarr et la découverte des tâches d'un projet. `main`
