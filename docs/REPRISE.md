@@ -5,6 +5,68 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 06/11/2026 : Dolibarr 1.8.16, actions ouvertes filtrées par l'API et bornées
+
+Branche `lot/2026-11-06-dolibarr-actions-balayage`, worktree
+`/home/bjean/RepoGit/_lots_wt/2026-11-06-dolibarr-actions-balayage/mcp-foss-connectors`, partie
+de `main` `90a1cad` (1.8.15). Commit `538cba5`. **Ni fusionné ni poussé. L'installé (1.8.16)
+devance donc `main`** : reconstruire depuis `main` ferait revenir le délai dépassé.
+
+## Constaté en réel le 06/11/2026, en 1.8.15, lecture seule
+
+- Le 503 sur `t.rowid` a disparu, et les outils MeetingNotes sont de retour (113 outils). Lectures
+  réelles conformes : `list_meetingnotes`, `get_meetingnote`, `list_meetingnote_participants`,
+  `list_meetingnotes_actions`.
+- `dolibarr_list_actions_open` répond en 4 s avec un projet et en 3,6 s sur un mois, mais **sans
+  filtre il dépasse le délai du client** (« Request timed out »). Le balayage continuait après cet
+  abandon : deux `ConnectTimeout` vers l'instance dans le journal, et un appel limité à deux mois a
+  échoué dans la foulée (« Connection closed »), puis a réussi après la relance du serveur.
+- Cause : `percent<>100` gardait les événements sans objet à -1 (8 654 au 02/11, depuis 2022),
+  relus un par un par la route, pour les compter puis les écarter localement.
+
+## Livré dans la 1.8.16
+
+- Par défaut, l'API filtre `(t.percent:>=:0) AND (t.percent:<:100)`. `include_system=True` garde
+  l'ancien périmètre.
+- `excluded_system_exact` vaut donc toujours `False` par défaut, avec `excluded_system_note`. Ce
+  compteur n'était exact que parce que tout l'historique était relu : décision de Benjamin du
+  06/11/2026 de renoncer à ce compte plutôt qu'au délai.
+- `time_budget` (20 s, 25 au plus), sur le modèle de `dolibarr_list_time_entries`. `_scan_list`
+  accepte une échéance : la page en cours est annulée et aucune autre n'est demandée. Les autres
+  balayages n'en ont pas.
+- Cinq assertions existantes suivent le contrat ; le test de version de la 1.8.15 vérifie un minimum.
+
+## Contrôles
+
+- Tests écrits avant correction, vus rouges (9 sur 11). Suite complète : 2 001 réussis, 4 ignorés.
+  Ruff propre.
+- Installé à chaud à 11:37 selon RELEASE 4bis : `src/server.py` et la seule `version` du manifeste.
+  Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.15` dans
+  `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`.
+- Bundle installé lancé comme le client, contre un faux Dolibarr local : 1.8.16, 113 outils dont 18
+  MeetingNotes, `time_budget` au schéma, filtre envoyé conforme. Avec un faux serveur à 3 s par page
+  et `time_budget=5` : réponse en 5,0 s, `scan_truncated=true`, la page 1 abandonnée, aucune requête
+  après l'échéance.
+- `dist/dolibarr-erp-inno3-v2-1.8.16.mcpb` dans ce worktree (ignoré par git), repacké depuis
+  l'installé, sha256 `db5b9239...`. Le `dist/` du clone principal reste en 1.8.15.
+
+## Non vérifié, limites
+
+- **Pas encore observé en réel** : les processus chargés restent en 1.8.15 jusqu'au prochain
+  redémarrage du client.
+- Que la production accepte `:>=:` et `:<:` sur `t.percent` n'est établi que sur le source amont.
+- Un événement `systemauto` à progression 0 à 99 reste lu puis écarté localement ; leur nombre en
+  production est inconnu.
+- `include_system=True` sans filtre s'arrêtera au budget : résultat partiel annoncé, pas d'erreur.
+
+## Suite ordonnée
+
+1. **Benjamin** : redémarrer Claude Desktop.
+2. Recette en lecture seule : `dolibarr_list_actions_open(limit=5)` sans filtre, en relevant
+   `elapsed_seconds` et `scan_truncated`, puis avec `assigned_to=5`.
+3. **Benjamin** : fusionner ce lot dans `main` (conflit attendu sur `docs/REPRISE.md` et
+   `dolibarr_mcp/CHANGELOG.md` seulement) ; ce dépôt public reste non poussé.
+
 # Recette du lot du 01/11, 06/11/2026 de 10:30 à 10:45, lecture seule, sur Wi-Fi de train
 
 Cette section ne couvre que les quatre correctifs relevés le 30/10, branche
