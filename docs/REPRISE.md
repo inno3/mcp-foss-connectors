@@ -164,20 +164,39 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
 6. Benjamin : décider le push de ce dépôt public.
 
-# Reprise du 05/11/2026 : Nextcloud 1.5.0 installée, recette réelle à faire après rechargement
+# Reprise du 06/11/2026 : Nextcloud 1.5.0 recettée en réel, 1.5.1 à installer
 
-Cette section prime sur les suivantes pour Nextcloud. `main` contient le correctif (`9ff6ab2`).
+Cette section prime sur les suivantes pour Nextcloud. `main` contient la 1.5.0 (`9ff6ab2`) ; la
+1.5.1 corrige le défaut de réglages trouvé par la recette réelle ci-dessous.
 Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-05-nextcloud-download/mcp-foss-connectors`, branche
 `lot/2026-11-05-nextcloud-download`. Suivi : KB 262 #8072, qui porte le chemin exact du fichier
 concerné, absent d'ici parce que ce dépôt est public. Commit, fusion et installation demandés par
 Benjamin le 05/11/2026.
 
-Installée à 18:39. **Les processus du connecteur datent de 07:42 : ils exécutent encore la 1.4.1,
-et aucun Nextcloud réel n'a vu la 1.5.0. Une extension de bureau ne se recharge pas depuis une
-session. Ce dépôt public reste non poussé.** Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
+La 1.5.0 est installée le 05/11 à 18:39 et chargée au redémarrage du 06/11, processus de 10:15. Une
+extension de bureau ne se recharge pas depuis une session. **Ce dépôt public reste non poussé.** Sauvegarde `.backup-nextcloud-inno3-2026-11-05-v1.4.1`
 dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-nextcloud-1.5.0.sh retour` dans `_lots_wt/2026-11-05-nextcloud-download/dist/`, puis
 redémarrage.
+
+## Recette réelle de la 1.5.0, 06/11/2026 vers 10:30
+
+- Copie saine du PDF de 512 219 octets : entière, `size_checks` à 512 219 trois fois, empreinte
+  égale à la copie synchronisée.
+- Copie défaillante : `incomplete`, 32 768 octets sur 512 219, `resumes=6`. Le GET sans `Range`
+  s'arrête au même octet : **défaut de cette copie côté serveur, établi**. Le connecteur ne peut
+  pas faire mieux que l'erreur explicite.
+- PDF de 856 255 octets vers un dossier désigné par `/` final : nom distant repris, empreinte égale
+  à celle obtenue en 1.4.1. Plage `offset=1000`, `length=100000` : octets identiques au fichier entier.
+- `Readme.md` de 1 775 octets dans le contexte : `size_checks` à 1 775 trois fois.
+- **Défaut trouvé** : Claude Desktop transmet `${user_config.x}` tel quel quand un réglage optionnel
+  sans valeur par défaut n'est pas renseigné. Le manifeste 1.5.0 avait perdu le `"default": ""` du
+  dossier de téléchargement : la racine devenait `/home/bjean/${user_config.nextcloud_download_dir}`.
+  Les écritures de la recette y sont parties, dossier retiré ensuite. `NEXTCLOUD_SAVE_DIRS`, filtré,
+  n'a rien fait. Même gabarit vu dans l'extension WordPress (`WP_PROD_SUBSITES`, `WP_TEST_SUBSITES`).
+- 1.5.1 : `"default": ""` sur les quatre réglages optionnels, dossier relatif ou gabarit ignoré avec
+  avertissement, plafond non numérique ramené au défaut. Test de manifeste sur les huit connecteurs,
+  dette connue nommée pour HedgeDoc et WordPress.
 
 ## Objectif
 
@@ -251,16 +270,12 @@ d'application, volontairement non lu.
 
 ## Prochaines actions
 
-1. Benjamin : redémarrer le client, ou autoriser l'essai direct avec les réglages du connecteur.
-2. Recette, après contrôle par `ps -o lstart` que le processus est postérieur à 18:39 :
-   - copie saine en entier : `size_verified=true`, empreinte égale à la copie synchronisée ;
-   - copie défaillante : PDF entier et même empreinte, ou erreur `incomplete` sans fichier écrit ;
-   - `save_path` absolu sous `~/Downloads`, absolu hors racines refusé avec `allowed_roots`, dossier
-     avec `/` final ;
-   - petit fichier texte dans le contexte, et plage `offset`/`length`.
+1. Installer la 1.5.1 par `dist/bascule-nextcloud-1.5.1.sh installer`, puis redémarrer le client.
+2. Recette : environnement du processus sans `${user_config`, `save_path` absolu sous `~/Downloads`
+   écrit, absolu hors racines refusé avec `allowed_roots`, relatif écrit sous `~/Downloads`.
 3. Benjamin : choisir les dossiers de `nextcloud_save_dirs`. Sans cela, seul `~/Downloads` reste autorisé.
-4. Si l'erreur persiste sur la copie défaillante : la faire examiner côté serveur, ou la remplacer
-   par une copie saine.
+4. Benjamin : faire examiner ou remplacer la copie défaillante, deux copies saines existent.
+5. WordPress et HedgeDoc : réglages optionnels sans valeur par défaut, à vérifier séparément.
 
 # Reprise du 03/11/2026 : Dolibarr 1.8.13 fusionnée et installée, recette réelle après redémarrage
 
