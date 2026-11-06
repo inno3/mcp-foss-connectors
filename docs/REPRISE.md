@@ -51,6 +51,31 @@ désormais `task_discovery` et `tasks_warning`, et `aggregates_complete` reste f
 - Aucun lecteur de `note` trouvé dans `inno3-mcp-extensions`, `dev_bje`, `mcp-inno3`, la mémoire ni les
   tâches planifiées ; la recette de la route d'agrégat du 06/11 n'en lit pas.
 
+## Installation et recette réelle du 06/11/2026, lecture seule
+
+Installé à chaud selon RELEASE 4bis : `src/server.py` du commit de fusion du lot et la seule `version`
+du manifeste (113 outils inchangés). Sauvegarde `.backup-dolibarr-erp-inno3-v2-2026-11-06-v1.8.16`
+dans `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Candidat vérifié d'abord par
+`scripts/check_mcp_stdio.py` sous `/usr/bin/python3` : 1.8.17, 113 outils, stderr vide.
+
+Recette faite avant tout redémarrage du client : le `server.py` installé a été lancé dans un second
+processus, avec la seule URL et la seule clef du processus du client, sans les afficher, et n'a
+appelé que `dolibarr_list_time_entries`. Les processus du client restent en 1.8.16 jusqu'au prochain
+redémarrage.
+
+| Appel | Résultat |
+|---|---|
+| `initialize`, `tools/list` | 1.8.17, 113 outils, `aggregate` et `fields` facultatifs, rien de requis |
+| tâche 482, liste et `aggregate="user"` | 50 écritures ; `by_user` identique à la liste, 40,52 h pour l'utilisateur 5 |
+| tâche 482, `month`, `year`, `project` | somme de chaque ventilation égale au total de la liste |
+| tâche 482, tailles de réponse | `fields="all"` 15 501 caractères, défaut 13 096, `entry_id,date,hours` 3 022, `aggregate` 318 |
+| projet 13, `aggregate="project"` | 1 h certifiée, tâche retrouvée par `GET tasks` (`project_route` 0, `task_route` 1) |
+| projet 73, `aggregate="month"`, `task_limit=1` | 2 pages par curseur, 140,57 h, mêmes mois qu'en une lecture |
+| axe, colonne inconnus, `fields` avec `aggregate` | refusés par message, sans appel distant |
+
+Non vérifié en réel : un projet de plus de 100 tâches parcouru au budget, pour ne pas charger la
+production ; ce cas n'est couvert que hors ligne.
+
 ## Limites
 
 - `aggregate="project"` rend une seule ligne, le périmètre restant une tâche ou un projet. La ventilation
@@ -60,8 +85,10 @@ désormais `task_discovery` et `tasks_warning`, et `aggregates_complete` reste f
 
 ## Suite ordonnée
 
-1. Construire le bundle depuis l'état commité, l'installer à chaud, le recetter en lecture seule.
-2. Fusionner dans `main`, sans pousser.
+1. Fait : installation à chaud et recette réelle ci-dessus.
+2. Fait : fusion dans `main`, non poussée.
+3. Au prochain redémarrage du client, vérifier que les processus Dolibarr annoncent 1.8.17.
+4. Fournisseur de la route d'agrégat dans le connecteur, numéro 1.8.18 au moins (#8070).
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.16 fusionnée, déployée et recettée en réel
 
