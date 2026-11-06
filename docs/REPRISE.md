@@ -41,6 +41,32 @@ ce dépôt étant public.
   `search_sale` aurait écarté sans ce droit.
 - Les 259 et 272, récents, montrent que le masquage ne se limite pas aux projets anciens.
 
+## Mesure du 06/11/2026 : les 222 projets, lecture seule
+
+`dolibarr_list_tasks(project_id=ID, limit=1, cursor=ID)` sur chaque projet de
+`dolibarr_list_projects(status="")` : le curseur fait revenir l'identifiant dans `offset`, ce qui
+rattache chaque réponse à son projet sans dépendre de l'ordre. Relevé local, hors dépôt :
+`_lots_wt/2026-11-05-dolibarr-taches-masquees/dist/mesure-2026-11-06/`.
+
+| Constat | Projets | Tâches |
+|---|---|---|
+| Route projet non vide | 105 | 769 |
+| Route projet vide : 117, chiffre annoncé le 05/11 | 117 | |
+| dont tâches retrouvées par `GET tasks` | 20 | 52 |
+| dont vides, certifiés par le droit lu | 97 | 0 |
+| Non certifiés | 0 | |
+
+- Les 20 projets : 13, 44, 45, 56, 74, 87, 96, 129, 217, 239, 250, 259, 270, 272, 299, 303, 305, 312,
+  313, 314. Douze ont un identifiant supérieur à 200, et des tâches créées en septembre et
+  octobre 2026 y sont masquées : le défaut touche le travail courant.
+- Temps passé porté par ces 52 tâches (`duration_effective`, somme de `spent_seconds`) : **504,25 h**,
+  dont 124 h, 98,75 h et 78 h sur les projets 45, 129 et 74. 17 projets en portent, 3 n'en ont
+  aucun. Jusqu'à la 1.8.14, `list_time_entries` par projet les annonçait à zéro, totaux certifiés.
+  Chiffre lu sur les tâches, non recompté depuis les écritures.
+- Un appel a rendu « Connection closed » vers 10:33 ; une autre session a eu la même erreur sur
+  `list_actions_open` à 10:32:45, et l'autre processus du connecteur journalise des délais de
+  connexion vers Dolibarr à 10:32 et 10:33. Relancé, l'appel a abouti. Non imputé à la 1.8.15.
+
 ## Fusion et installation du 06/11/2026
 
 - Fusion `--no-ff` dans `main` (`7469de9`), `main` ayant reçu Nextcloud 1.5.0 entre-temps. Seul
@@ -159,8 +185,8 @@ correspondant dans `tests/test_dolibarr_time_aggregate.py`.
    rendre l'écriture 4, 1 h, `aggregates_complete=true`. Un projet visible (4) : une seule route lue.
    Un projet vide : `exact` vrai si le droit est confirmé, sinon `tasks_warning`.
 3. Sans objet : `GET tasks` accepte le filtre en production.
-4. Mesurer les 117 projets annoncés à zéro avec la 1.8.15. La route projet ne rend rien pour
-   259 et 272, que la 1.8.13 annonçait donc vides.
+4. Fait le 06/11/2026 : 20 des 117 projets portent 52 tâches et 504,25 h, les 97 autres sont vides
+   et certifiés. Voir « Mesure du 06/11/2026 ».
 5. Suite séparée : filtre `assigned_to` de `dolibarr_list_tasks`, à fonder sur les contacts de tâche.
 6. Benjamin : décider le push de ce dépôt public.
 
