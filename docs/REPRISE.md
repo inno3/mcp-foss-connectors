@@ -414,8 +414,12 @@ lues dans le journal du client.
   Bluemind dégradé : tout répond sur réseau fixe. Le 262 lu en 54 s dans le train tient ici
   dans le budget avec les neuf autres tableaux.
 
-Reste ouvert, hors de ce lot : décider du défaut de `compact` (faux, six tâches planifiées lisent
-les participants) ; fusionner les lots 1.8.16 et CalDAV 0.6.4 relève de leurs sessions.
+Défaut de `compact` tranché le 06/11 par Benjamin : il reste faux. Ce sont les routines qui lisent
+plusieurs jours qui changent de méthode. Le 07/11, `demarrage-journee` lit l'agenda jour par jour et
+`revue-hebdomadaire` lit la semaine en compact, consignes collées dans Claude Desktop et vérifiées par
+l'API. Détail : `~/Documents/reinstallation-bjean/taches-cloud-2026-11-07/LISEZMOI.md`. Restent à
+décider `engagements-du-jour` et `inbox-zero-daily`, qui lisent aussi plusieurs jours. Fusionner les
+lots 1.8.16 et CalDAV 0.6.4 relève de leurs sessions.
 
 # Recette du lot du 01/11, 06/11/2026 de 10:30 à 11:46, lecture seule, sur Wi-Fi de train
 
