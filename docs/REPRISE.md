@@ -5,6 +5,68 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Reprise du 07/11/2026 : Dolibarr 1.8.18, filtre assigned_to, installée, recette après redémarrage
+
+Cette section prime sur les suivantes pour Dolibarr. `main` contient le correctif (`1f36d0a`) par la
+fusion `d0e1ad8`. Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-07-dolibarr-assigned-to/mcp-foss-connectors`,
+branche `lot/2026-11-07-dolibarr-assigned-to`. Demandé par Benjamin le 07/11/2026 : déployer, tout
+tester, corriger ce qui reste, et rendre l'ensemble fusionnable. Suivi : KB 262 #8073.
+
+Installée le 07/11/2026 à 10:32, à chaud. **Les processus du client datent du 06/11 à 21:15 : ils
+exécutent la 1.8.16, la 1.8.17 posée à 21:32 n'est pas chargée non plus.** Sauvegarde
+`.backup-dolibarr-erp-inno3-v2-2026-11-07-v1.8.17` dans
+`~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
+`bascule-dolibarr-1.8.18.sh retour` dans `_lots_wt/2026-11-07-dolibarr-assigned-to/dist/`, puis
+redémarrage.
+
+## Défaut corrigé
+
+`dolibarr_list_tasks(assigned_to=...)` comparait `fk_user_resp`, que ni `projects/{id}/tasks` ni
+`GET tasks` ne rendent en production : aucune tâche retenue, total certifié à 0. Le 07/11/2026, en
+lecture seule, `tasks/44/contacts` rend deux responsables internes (utilisateurs 5 et 16) alors que
+`list_tasks` annonçait `assigned_to=null`, et `tasks/3/contacts` (tâche masquée) répond sans erreur.
+Le filtre lit désormais les contacts internes de chaque tâche, `TASKEXECUTIVE` ou `TASKCONTRIBUTOR`,
+huit en parallèle, 20 s au plus, et ne certifie le total que si toutes les tâches ont été lues
+(`assignment_check`). Détail : `dolibarr_mcp/CHANGELOG.md`, section 1.8.18, et le README.
+
+Aussi : `tests/test_hedgedoc.py` ne dépend plus de l'ordre des modules (défaut relevé le 06/11).
+README Dolibarr : la ligne de version annonçait encore 1.8.15.
+
+## Contrôles du 07/11/2026
+
+- `main` à `df48e5e` avant le lot : 2 062 réussis, 4 ignorés, ruff propre.
+- Tests rouges d'abord : 12 sur 14 dans `tests/test_dolibarr_tasks_assigned_to.py`.
+- `main` fusionné (`d0e1ad8`), clone propre : 2 076 réussis, 4 ignorés, 0 connexion hors boucle
+  locale (garde `pytest_offline_loopback`), ruff propre.
+- Candidat : `server.py` de `main` et la seule `version` du manifeste installé. Les `tools` du
+  manifeste installé (113, extension comprise) sont gardés : ceux du dépôt n'en déclarent que 78.
+  `scripts/check_mcp_stdio.py` sous `/usr/bin/python3` : 1.8.18, 113 outils, stderr vide, avant et
+  après installation.
+- Banc stdio `dist/banc_assigned_to.py`, faux Dolibarr sur 127.0.0.1 : contacts lus pour chaque
+  tâche, rôles rendus, tâche masquée filtrée, contact externe ignoré, utilisateur absent à 0 certifié.
+  La 1.8.17 du même banc retenait les tâches de leur créateur.
+- Bascule répétée sur copie : retour identique au témoin, seconde installation refusée. Réglages
+  inchangés par empreinte.
+
+## État des connecteurs et des branches, 07/11/2026
+
+- Installés et identiques à `main` : HedgeDoc 1.2.1, Kanboard 0.19.1, Nextcloud 1.5.1, WordPress 1.6.1,
+  Dolibarr 1.8.18. Les autres extensions viennent de `mcp-inno3`, hors de ce dépôt.
+- Toutes les branches `lot/` et `integration/` sont fusionnées dans `main`.
+- `fix/dolibarr-list-documents-meetingnotes` (1.8.4, 17/10) : dépassée, ses trois tests passent sur
+  `main`, où le correctif a été refait en 1.8.7. Non fusionnée.
+- `vague/2026-11-01-*` : intégrées en contenu le 02/11, à ne jamais fusionner ni pousser (`packaging/`).
+
+## Restent ouverts
+
+1. Benjamin : redémarrer le client pour charger la 1.8.18 (et donc la 1.8.17).
+2. Recette en lecture seule : `list_tasks(project_id=4, assigned_to=5)` doit rendre la tâche 44 avec
+   `assigned_roles=["TASKEXECUTIVE"]` et `assignment_check.exact=true` ; `assigned_to=16` aussi ; un
+   projet masqué ; `list_time_entries(aggregate=...)` de la 1.8.17.
+3. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl` (WordPress) et celui de `compact`.
+4. Fournisseur de la route d'agrégat (#8070) : 1.8.19 au moins, session « Heures par projet ».
+5. Benjamin : pousser `main`, nettoyer les branches et worktrees fusionnés.
+
 # Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
 
 Cette section prime sur les suivantes pour ce lot. Worktree
