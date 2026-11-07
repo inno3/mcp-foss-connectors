@@ -33,7 +33,7 @@ from pydantic import Field
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dolibarr-mcp")
 
-__version__ = "1.8.17"
+__version__ = "1.8.18"
 
 mcp = FastMCP("dolibarr", log_level="WARNING")
 mcp._mcp_server.version = __version__
@@ -1262,6 +1262,49 @@ async def _discover_project_tasks(project_id: int) -> tuple[list[dict], dict, st
     return found, discovery, warning
 
 
+ASSIGNMENT_CHECK_BUDGET = 20.0
+ASSIGNMENT_CHECK_CONCURRENCY = 8
+
+
+async def _assigned_roles_by_task(task_ids: list, user_id: int) -> tuple[dict, dict]:
+    """Rôles de user_id sur chaque tâche, lus dans tasks/{id}/contacts.
+
+    Rend {id de tâche: rôles}, None quand l'utilisateur n'y est pas contact
+    interne. Une tâche dont les contacts n'ont pas été lus dans le budget n'y
+    figure pas : elle est nommée dans tasks_unverified, ni gardée ni écartée.
+    """
+    deadline = time.monotonic() + ASSIGNMENT_CHECK_BUDGET
+
+    async def _read(task_id):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            return await asyncio.wait_for(_fetch_task_contacts(int(task_id)), remaining)
+        except (asyncio.TimeoutError, TypeError, ValueError):
+            return None
+
+    rows_by_task = await _gather_limited(
+        [lambda t=t: _read(t) for t in task_ids], ASSIGNMENT_CHECK_CONCURRENCY)
+    roles_by_task, unverified = {}, []
+    for task_id, rows in zip(task_ids, rows_by_task):
+        if not isinstance(rows, list):
+            unverified.append(str(task_id))
+            continue
+        mine = [c for c in rows if c.get("user_id") == user_id]
+        codes = []
+        for contact in mine:
+            code = contact.get("role_code")
+            if code and code not in codes:
+                codes.append(code)
+        roles_by_task[str(task_id)] = codes if mine else None
+    return roles_by_task, {
+        "user_id": user_id, "tasks_checked": len(task_ids) - len(unverified),
+        "tasks_unverified": unverified, "exact": not unverified,
+        "time_budget": ASSIGNMENT_CHECK_BUDGET,
+    }
+
+
 @mcp.tool()
 async def dolibarr_list_tasks(
     project_id: int=0,
@@ -1301,11 +1344,18 @@ async def dolibarr_list_tasks(
     ou un balayage incomplet de GET tasks : total=null, total_exact=false, et
     tasks_warning donne la cause. Ce zéro ne prouve pas un projet vide.
 
-    assigned_to : la route projet n'a rendu ni responsable ni créateur en
-    production (constaté le 05/11/2026), la valeur est donc null et ce filtre
-    ne retient rien. Une tâche retrouvée par GET tasks garde null : son créateur
-    n'est pas la personne assignée. Les personnes affectées se lisent par
-    dolibarr_list_task_contacts.
+    assigned_to : garde les tâches dont l'utilisateur est un contact interne,
+    TASKEXECUTIVE (« Responsable ») ou TASKCONTRIBUTOR (« Intervenant »), lus
+    dans tasks/{id}/contacts : une requête par tâche du projet, huit en
+    parallèle, 20 s au plus. Chaque tâche gardée porte assigned_to (l'ID
+    filtré) et assigned_roles. assignment_check donne les tâches lues et
+    celles dont les contacts n'ont pas pu l'être, en échec ou faute de temps :
+    elles ne sont pas rendues, et le total n'est alors pas certifié
+    (total=null, total_exact=false). Jusqu'à la 1.8.17, le filtre comparait un
+    responsable que Dolibarr ne rend pas et ne retenait aucune tâche.
+    Sans filtre, assigned_to reste la valeur de la route, null en production
+    (constaté le 05/11/2026) ; une tâche retrouvée par GET tasks garde null,
+    son créateur n'étant pas la personne assignée.
     """
     try:
         if not project_id:
@@ -1313,6 +1363,10 @@ async def dolibarr_list_tasks(
 
         tasks, discovery, warning = await _discover_project_tasks(project_id)
         recovered = discovery["task_route"] is not None
+        check = None
+        if assigned_to:
+            roles_by_task, check = await _assigned_roles_by_task(
+                [t.get("id") for t in tasks], int(assigned_to))
 
         results = []
         for t in tasks:
@@ -1331,17 +1385,28 @@ async def dolibarr_list_tasks(
                 # mais il ne doit pas passer pour la personne assignée.
                 "assigned_to": t.get("fk_user_resp") or (None if recovered else t.get("fk_user_creat")),
             }
-            if assigned_to and str(entry.get("assigned_to")) != str(assigned_to):
-                continue
+            if check is not None:
+                roles = roles_by_task.get(str(t.get("id")))
+                if roles is None:
+                    continue
+                entry["assigned_to"] = int(assigned_to)
+                entry["assigned_roles"] = roles
             results.append(entry)
 
         scan = ExportRows()
-        scan.complete = discovery["exact"]
-        scan.scan_note = "Tâches du projet non certifiées : voir tasks_warning."
+        scan.complete = discovery["exact"] and (check is None or check["exact"])
+        notes = []
+        if not discovery["exact"]:
+            notes.append("Tâches du projet non certifiées : voir tasks_warning.")
+        if check is not None and not check["exact"]:
+            notes.append("Affectations non lues pour certaines tâches : voir assignment_check.")
+        scan.scan_note = " ".join(notes)
         payload = _export_payload({"count": len(results), "tasks": results}, "tasks", limit, cursor, scan=scan)
         payload["task_discovery"] = discovery
         if warning:
             payload["tasks_warning"] = warning
+        if check is not None:
+            payload["assignment_check"] = check
         return _dumps(payload)
 
     except Exception as exc:
