@@ -5,6 +5,16 @@ Les chemins dont la cible existe ont été corrigés dans ce document. Ceux qui 
 `/home/jean/...` désignent des emplacements de l'ancien poste qui n'existent plus (worktrees
 retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 
+# Publication du 07/11/2026 : `main` poussé sur `origin`
+
+`main` poussé sur `origin` le 07/11/2026, accord de Benjamin : `6ef1ed5..562ffdb`, 21 commits
+(Dolibarr 1.8.16 à 1.8.18, WordPress 1.6.1, HedgeDoc 1.2.1, recettes et reprises). Relus avant envoi :
+ni `packaging/`, ni branche `vague/`, ni secret, ni nom de client ; courriels et URL d'exemple
+seulement, une référence de projet sans titre dans un test. Le commit relu a été poussé par son
+empreinte, pas par le nom de branche, pour qu'un commit d'une autre session ne parte pas avec.
+Crochet `pre-push` passé sur `562ffdb` : 2 076 réussis, 4 ignorés, ruff propre. `sauvegarde/main`
+reste à `2e27d59`.
+
 # Reprise du 07/11/2026 : Dolibarr 1.8.18, filtre assigned_to, installée, recette après redémarrage
 
 Cette section prime sur les suivantes pour Dolibarr. `main` contient le correctif (`1f36d0a`) par la
