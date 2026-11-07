@@ -1,5 +1,29 @@
 # Historique Dolibarr
 
+## Non publié : 1.8.18
+
+Branche `lot/2026-11-07-dolibarr-assigned-to`, partie de `main` en 1.8.17.
+
+`dolibarr_list_tasks`, filtre `assigned_to` :
+
+- Défaut corrigé : le filtre comparait `fk_user_resp`, que ni `projects/{id}/tasks` ni
+  `GET tasks` ne rendent en production. Il ne retenait aucune tâche, total certifié à 0.
+  Constaté le 05/11/2026 sur le projet 4, et le 07/11/2026 sur la tâche 44, qui porte
+  deux responsables internes.
+- Le filtre lit `tasks/{id}/contacts` pour chaque tâche, huit en parallèle, 20 s au plus,
+  et garde celles où l'utilisateur est contact interne, `TASKEXECUTIVE` ou
+  `TASKCONTRIBUTOR`. Chaque tâche gardée porte `assigned_to`, l'ID filtré, et
+  `assigned_roles`.
+- `assignment_check` : tâches lues, tâches non vérifiées, `exact`, budget. Une tâche
+  dont les contacts échouent, sont illisibles ou n'ont pas été lus à temps n'est pas
+  rendue, et le total n'est pas certifié.
+- Sans filtre, rien ne change : aucune lecture de contacts, mêmes clés.
+- Schéma d'entrée inchangé.
+
+Tests : `tests/test_dolibarr_tasks_assigned_to.py`, 12 rouges sur 14 avant le code.
+Hors Dolibarr, `tests/test_hedgedoc.py` ne dépend plus de l'ordre des modules : il
+échouait quand `tests/test_manifests.py` était importé avant lui.
+
 ## Non publié : 1.8.17
 
 Branche `lot/2026-11-05-dolibarr-temps-agregats`, replacée sur la 1.8.16. Développée

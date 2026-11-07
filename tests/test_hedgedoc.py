@@ -42,9 +42,12 @@ class _FakeResponse:
 
 class TestHelpers:
     def test_extract_note_id_strips_base_and_anchor(self) -> None:
-        assert _extract_note_id_from_url("/aBC123#") == "aBC123"
-        assert _extract_note_id_from_url("https://pad.example.test/xYz789") == "xYz789"
-        assert _extract_note_id_from_url("/s/mon-alias") == "s/mon-alias"
+        # Fixée ici : un module de test importé avant celui-ci peut avoir posé
+        # HEDGEDOC_URL=x, que le serveur lit une seule fois à son import.
+        with patch.object(server, "HEDGEDOC_URL", "https://pad.example.test"):
+            assert _extract_note_id_from_url("/aBC123#") == "aBC123"
+            assert _extract_note_id_from_url("https://pad.example.test/xYz789") == "xYz789"
+            assert _extract_note_id_from_url("/s/mon-alias") == "s/mon-alias"
 
     def test_dumps_compact(self) -> None:
         assert _dumps({"a": 1}) == '{"a":1}'

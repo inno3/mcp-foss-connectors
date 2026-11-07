@@ -5,7 +5,7 @@ MCP server for the [Dolibarr](https://www.dolibarr.org/) ERP/CRM REST API (Dolib
 Part of [**mcp-foss-connectors**](../README.md). Configured entirely through
 environment variables : no host, login or secret is baked into the code.
 
-**Version courante : 1.8.15, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
+**Version courante : 1.8.18, non publiée.** Voir le [CHANGELOG](CHANGELOG.md).
 
 Les tâches d'un projet non public dont le compte de la clef n'est pas contact sont
 désormais retrouvées par `GET tasks`, et un total qu'un masquage peut encore fausser
@@ -700,7 +700,7 @@ Une ligne sans identifiant est conservée, sans fusion par ressemblance.
 | Outil, préfixe `dolibarr_` | Tableau et champs principaux | Filtres et statuts | Période et collecte |
 | --- | --- | --- | --- |
 | `list_projects` | `projects`, id, ref, title, status, thirdparty, dates, budget | status 0 brouillon, 1 ouvert par défaut, 2 fermé, vide tous, thirdparty_id, search | Toutes dates, REST paginé, recherche locale |
-| `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet, tâches masquées comprises ; total non certifié si un masquage reste possible |
+| `list_tasks` | `tasks`, id, ref, label, progress, dates, heures et secondes prévues et passées | project_id obligatoire, assigned_to | Collection complète du projet, tâches masquées comprises ; total non certifié si un masquage reste possible, ou si les contacts d'une tâche n'ont pu être lus avec assigned_to |
 | `list_task_contacts` | `contacts`, contact_id, user_id, source, rôle, identité | task_id obligatoire, role | Collection complète de la tâche |
 | `list_time_entries` | `entries`, entry_id, task_id, user_id, date, seconds, hours ; note sur demande par `fields` | task_id ou project_id, user_id | date_start et date_end incluses, pagination par tâche et budget global, agrégats sur les tâches lues, totaux seuls par `aggregate` |
 | `list_invoices` | `invoices`, id, ref, total_ht, total_ttc, échéance, statut, retard, reste | status unpaid par défaut, paid, draft, all, thirdparty_id, min_amount, search_ref | date_start et date_end incluses sur date de facture, sort asc ou desc, REST paginé |
@@ -974,10 +974,26 @@ Quand le total n'est pas certifié, `dolibarr_list_tasks` rend `total=null`,
 arrêté le parcours, `reason="tasks_unverified"`. Les heures rendues sont un minimum.
 Aucune clé ni aucun paramètre n'est retiré.
 
-`assigned_to` reste `null` sur une tâche retrouvée : `GET tasks` rend le créateur, qui
-n'est pas la personne affectée. La route projet n'a rendu ni l'un ni l'autre en
-production, si bien que le filtre `assigned_to` de `dolibarr_list_tasks` ne retient
-rien, avant comme après la 1.8.15. `dolibarr_list_task_contacts` lit les affectations.
+Sans filtre, `assigned_to` reste `null` sur une tâche retrouvée : `GET tasks` rend le
+créateur, qui n'est pas la personne affectée, et la route projet n'a rendu ni l'un ni
+l'autre en production.
+
+### Filtre `assigned_to` de `dolibarr_list_tasks`, 1.8.18
+
+Jusqu'à la 1.8.17, le filtre comparait ce responsable absent et ne retenait aucune
+tâche, total certifié à 0. Il lit désormais les contacts de chaque tâche,
+`tasks/{id}/contacts`, et garde celles où l'utilisateur est contact interne
+(`TASKEXECUTIVE` ou `TASKCONTRIBUTOR`). Un contact externe portant le même
+identifiant ne compte pas : c'est un contact de tiers, pas un utilisateur.
+
+| Situation | Tâche | Total |
+|---|---|---|
+| Utilisateur contact interne | rendue, `assigned_to` = l'ID filtré, `assigned_roles` | certifié |
+| Autres contacts, ou aucun | écartée | certifié |
+| Contacts en échec, illisibles ou non lus dans les 20 s | écartée, nommée dans `assignment_check.tasks_unverified` | `null`, `total_exact=false` |
+
+Coût : une requête par tâche du projet, huit en parallèle. Sans filtre, aucune n'est
+faite. `dolibarr_list_task_contacts` donne le détail d'une tâche.
 
 ## Modulepart non servis par le cœur (1.8.7)
 
