@@ -153,7 +153,7 @@ production ; ce cas n'est couvert que hors ligne.
 1. Fait : installation à chaud et recette réelle ci-dessus.
 2. Fait : fusion dans `main`, non poussée.
 3. Au prochain redémarrage du client, vérifier que les processus Dolibarr annoncent 1.8.17.
-4. Fournisseur de la route d'agrégat dans le connecteur, numéro 1.8.18 au moins (#8070).
+4. Fournisseur de la route d'agrégat dans le connecteur, numéro 1.8.19 au moins (#8070), la 1.8.18 étant le filtre assigned_to.
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.16 fusionnée, déployée et recettée en réel
 
