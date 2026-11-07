@@ -12,8 +12,9 @@ retirés, anciens environnements) : ce sont des faits datés, à ne pas suivre.
 ni `packaging/`, ni branche `vague/`, ni secret, ni nom de client ; courriels et URL d'exemple
 seulement, une référence de projet sans titre dans un test. Le commit relu a été poussé par son
 empreinte, pas par le nom de branche, pour qu'un commit d'une autre session ne parte pas avec.
-Crochet `pre-push` passé sur `562ffdb` : 2 076 réussis, 4 ignorés, ruff propre. `sauvegarde/main`
-reste à `2e27d59`.
+Crochet `pre-push` passé sur `562ffdb` : 2 076 réussis, 4 ignorés, ruff propre. `sauvegarde/main`,
+resté à `2e27d59` depuis le 06/11, est mis à jour le 07/11/2026 sur le commit qui porte cette
+mention, le même que `origin/main`.
 
 # Reprise du 07/11/2026 : Dolibarr 1.8.18, filtre assigned_to, installée, recette après redémarrage
 
