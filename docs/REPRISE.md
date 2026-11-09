@@ -97,9 +97,15 @@ environnement (compté sans afficher les valeurs).
 
 1. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl` (WordPress). `compact` est tranché.
 2. Fournisseur de la route d'agrégat (#8070) : 1.8.19 au moins, session « Heures par projet ».
-3. Benjamin : pousser les commits de documentation postérieurs à `2229a3f`, et nettoyer les branches
-   et worktrees `lot/` et `integration/` fusionnés. Les branches distantes en trop et
-   `fix/dolibarr-list-documents-meetingnotes` sont déjà nettoyées (09/11/2026).
+3. Fait le 09/11/2026, accord de Benjamin : `2335650` poussé par son empreinte sur `origin` et
+   `sauvegarde` (`2229a3f..2335650`, crochet `pre-push` vert : 2 076 réussis, 4 ignorés, ruff propre).
+   Les dix worktrees `lot/` et `integration/` fusionnés sont retirés sans forcer (aucun fichier
+   suivi modifié ni non suivi, caches ignorés seulement ; le `dist/` ignoré du lot 1.8.16 avait sa
+   copie identique dans `dist/` du clone principal), et leurs branches supprimées par `git branch -d`.
+   Les dossiers `_lots_wt/<lot>/dist/` (paquets, bascules, bancs, relevés) sont gardés ; deux
+   dossiers de lot devenus vides sont retirés. Restent en local : `main`, les trois `vague/*` (à ne
+   jamais fusionner ni pousser) et les repères `repere/*`. Les branches distantes en trop et
+   `fix/dolibarr-list-documents-meetingnotes` avaient été nettoyées le même jour par une autre session.
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
 
