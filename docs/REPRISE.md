@@ -16,15 +16,16 @@ Crochet `pre-push` passé sur `562ffdb` : 2 076 réussis, 4 ignorés, ruff propr
 resté à `2e27d59` depuis le 06/11, est mis à jour le 07/11/2026 sur le commit qui porte cette
 mention, le même que `origin/main`.
 
-# Reprise du 07/11/2026 : Dolibarr 1.8.18, filtre assigned_to, installée, recette après redémarrage
+# Reprise du 07/11/2026 : Dolibarr 1.8.18, filtre assigned_to, installée et recettée en réel le 09/11
 
 Cette section prime sur les suivantes pour Dolibarr. `main` contient le correctif (`1f36d0a`) par la
 fusion `d0e1ad8`. Worktree `/home/bjean/RepoGit/_lots_wt/2026-11-07-dolibarr-assigned-to/mcp-foss-connectors`,
 branche `lot/2026-11-07-dolibarr-assigned-to`. Demandé par Benjamin le 07/11/2026 : déployer, tout
 tester, corriger ce qui reste, et rendre l'ensemble fusionnable. Suivi : KB 262 #8073.
 
-Installée le 07/11/2026 à 10:32, à chaud. **Les processus du client datent du 06/11 à 21:15 : ils
-exécutent la 1.8.16, la 1.8.17 posée à 21:32 n'est pas chargée non plus.** Sauvegarde
+Installée le 07/11/2026 à 10:32, à chaud. Chargée le 09/11/2026 à 10:17, au premier vrai redémarrage
+du client (celui du 07/11 au soir n'avait pas relancé les processus : sous Linux, fermer la fenêtre
+laisse l'application ouverte). La 1.8.17 est chargée du même coup. Sauvegarde
 `.backup-dolibarr-erp-inno3-v2-2026-11-07-v1.8.17` dans
 `~/Sauvegarde/Archives/claude-extensions-anciennes-versions/`. Retour :
 `bascule-dolibarr-1.8.18.sh retour` dans `_lots_wt/2026-11-07-dolibarr-assigned-to/dist/`, puis
@@ -68,15 +69,32 @@ README Dolibarr : la ligne de version annonçait encore 1.8.15.
   `main`, où le correctif a été refait en 1.8.7. Non fusionnée.
 - `vague/2026-11-01-*` : intégrées en contenu le 02/11, à ne jamais fusionner ni pousser (`packaging/`).
 
+## Recette réelle du 09/11/2026, lecture seule
+
+Processus lancés à 10:17, `server.py` installé identique à `main`.
+
+| Appel | Résultat |
+|---|---|
+| `list_tasks(project_id=4, assigned_to=5)` | 5 tâches sur 14, dont la 44, `assigned_roles=["TASKEXECUTIVE"]`, total 5 certifié, 14 contacts lus |
+| `list_tasks(project_id=4, assigned_to=16)` | 10 tâches sur 14, total certifié, pagination par `next_cursor` |
+| `list_tasks(project_id=129, assigned_to=8)` | projet masqué : 6 tâches sur 9 retrouvées par `GET tasks`, dont la 458, total certifié |
+| `list_tasks(project_id=129, assigned_to=5)` | 0, certifié, 9 contacts lus |
+| `list_tasks(project_id=4)` sans filtre | aucune lecture de contacts, `assigned_to` nul, clés inchangées |
+| `list_time_entries(task_id=44, aggregate="user")` (1.8.17) | 23 h : 20 h pour l'utilisateur 16, 3 h pour le 5, égal au temps de la tâche |
+| `list_time_entries(task_id=44, fields=...)` (1.8.17) | colonnes demandées seules |
+| `list_time_entries(project_id=13, aggregate="project")` (1.8.17) | 1 h certifiée, tâche masquée retrouvée |
+
+Les autres connecteurs du dépôt répondent : `hedgedoc_me`, `wordpress_check_connection` (prod),
+`nextcloud_status`, `kanboard_who_am_i(as_user="agent")`. Aucun des processus Dolibarr, HedgeDoc,
+Kanboard, Nextcloud et WordPress ne porte de gabarit `${user_config` non résolu dans son
+environnement (compté sans afficher les valeurs).
+
 ## Restent ouverts
 
-1. Benjamin : redémarrer le client pour charger la 1.8.18 (et donc la 1.8.17).
-2. Recette en lecture seule : `list_tasks(project_id=4, assigned_to=5)` doit rendre la tâche 44 avec
-   `assigned_roles=["TASKEXECUTIVE"]` et `assignment_check.exact=true` ; `assigned_to=16` aussi ; un
-   projet masqué ; `list_time_entries(aggregate=...)` de la 1.8.17.
-3. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl` (WordPress) et celui de `compact`.
-4. Fournisseur de la route d'agrégat (#8070) : 1.8.19 au moins, session « Heures par projet ».
-5. Benjamin : pousser `main`, nettoyer les branches et worktrees fusionnés.
+1. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl` (WordPress). `compact` est tranché.
+2. Fournisseur de la route d'agrégat (#8070) : 1.8.19 au moins, session « Heures par projet ».
+3. Benjamin : pousser les commits de documentation postérieurs à `562ffdb`, et nettoyer les branches
+   et worktrees fusionnés (`fix/dolibarr-list-documents-meetingnotes` dépassée comprise).
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
 
