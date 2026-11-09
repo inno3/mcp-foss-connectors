@@ -66,7 +66,11 @@ README Dolibarr : la ligne de version annonçait encore 1.8.15.
   Dolibarr 1.8.18. Les autres extensions viennent de `mcp-inno3`, hors de ce dépôt.
 - Toutes les branches `lot/` et `integration/` sont fusionnées dans `main`.
 - `fix/dolibarr-list-documents-meetingnotes` (1.8.4, 17/10) : dépassée, ses trois tests passent sur
-  `main`, où le correctif a été refait en 1.8.7. Non fusionnée.
+  `main`, où le correctif a été refait en 1.8.7. Supprimée le 09/11/2026 avec l'accord de Benjamin :
+  branche locale, worktree `mcp-wt-builddoc/mcp-foss-connectors` (propre, caches ignorés seulement) et
+  copie sur `sauvegarde`. Pointe `4445d44f90cb964a5649b893e8b93e6c18bc5619`, encore dans le reflog
+  local. `feat/kanboard-overdue-un-appel` (02/09), entièrement contenue dans `main`, est supprimée
+  d'`origin` le même jour. `origin` et `sauvegarde` n'ont plus que `main`.
 - `vague/2026-11-01-*` : intégrées en contenu le 02/11, à ne jamais fusionner ni pousser (`packaging/`).
 
 ## Recette réelle du 09/11/2026, lecture seule
@@ -93,8 +97,9 @@ environnement (compté sans afficher les valeurs).
 
 1. Benjamin : trancher le défaut `"false"` de `wp_test_verify_ssl` (WordPress). `compact` est tranché.
 2. Fournisseur de la route d'agrégat (#8070) : 1.8.19 au moins, session « Heures par projet ».
-3. Benjamin : pousser les commits de documentation postérieurs à `562ffdb`, et nettoyer les branches
-   et worktrees fusionnés (`fix/dolibarr-list-documents-meetingnotes` dépassée comprise).
+3. Benjamin : pousser les commits de documentation postérieurs à `2229a3f`, et nettoyer les branches
+   et worktrees `lot/` et `integration/` fusionnés. Les branches distantes en trop et
+   `fix/dolibarr-list-documents-meetingnotes` sont déjà nettoyées (09/11/2026).
 
 # Reprise du 06/11/2026 : Dolibarr 1.8.17, totaux et colonnes des temps
 
